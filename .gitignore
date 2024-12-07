@@ -1,0 +1,6 @@
+.direnv/
+result
+
+wandb/
+
+__pycache__/
