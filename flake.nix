@@ -45,6 +45,8 @@
                   wandb
                   pygobject3
                   pygobject-stubs
+                  onnx
+                  onnxruntime
                 ];
               python = pkgs.python312;
             in

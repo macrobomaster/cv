@@ -1,7 +1,6 @@
 import time
 
 from tinygrad.tensor import Tensor
-from tinygrad.engine.jit import TinyJit
 from tinygrad.nn.state import safe_load, load_state_dict
 from tinygrad.helpers import GlobalCounters
 import cv2
@@ -34,8 +33,8 @@ if __name__ == "__main__":
 
     # run model
     yuvt = Tensor(np.array([yuv], dtype=np.uint8))
-    detected, det_prob, x, y, distance = pred(model, yuvt)
-    detected, det_prob, x, y, distance = detected.item(), det_prob.item(), x.item(), y.item(), distance.item()
+    detected, det_prob, x, y, dist = pred(model, yuvt)
+    detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
 
     dt = time.perf_counter() - st
     st = time.perf_counter()
@@ -45,8 +44,8 @@ if __name__ == "__main__":
     cv2.putText(img, f"{detected}: {det_prob:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     if detected == 1 and det_prob > 0.6:
       x, y = int(x), int(y)
-      cv2.circle(img, (x, y), 5, (255, 0, 0), -1)
-      cv2.putText(img, f"{distance:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+      cv2.circle(img, (x, y), int(max(10 - dist, 2)), (0, 255, 0), -1)
+      cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     cv2.imshow("img", img)
 
     # display

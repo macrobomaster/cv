@@ -14,12 +14,15 @@ import numpy as np
 import albumentations as A
 
 from .model import Model, twohot
+from .common import get_annotation
 from ..common import BASE_PATH, CLAMB, bgr_to_yuv420
 from ..dataloader import batch_load, BatchDesc
 
+# main augments
 A_PIPELINE = A.Compose([
+  A.HorizontalFlip(p=0.5),
   A.Perspective(p=0.25),
-  A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.1, rotate_limit=10, border_mode=cv2.BORDER_CONSTANT, value=0, p=0.25),
+  A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.1, rotate_limit=45, border_mode=cv2.BORDER_CONSTANT, value=0, p=0.25),
   A.OneOf([
     A.RandomCrop(256, 512, p=0.4),
     A.Compose([
@@ -29,36 +32,50 @@ A_PIPELINE = A.Compose([
   ], p=1),
   A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
   A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-  A.CLAHE(p=0.1),
   A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
-  A.RandomGamma(gamma_limit=(80, 120), p=0.1),
-  A.FancyPCA(alpha=0.1, p=0.5),
+  A.OneOf([
+    A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+    A.RandomToneCurve(p=0.5),
+  ], p=0.2),
+], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
+
+# for data with distance we can only do horizontal flips and very small non-affine transforms
+D_PIPELINE = A.Compose([
+  A.HorizontalFlip(p=0.5),
+  A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.01, rotate_limit=10, border_mode=cv2.BORDER_CONSTANT, value=0, p=0.25),
+  A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+  A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
+  A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
+  A.OneOf([
+    A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+    A.RandomToneCurve(p=0.5),
+  ], p=0.2),
 ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
 def get_train_files():
-  return glob.glob(str(BASE_PATH / "preprocessed" / "*.txt"))
+  return glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
 def load_single_file(file):
-  with open(file, "r") as f:
-    detected, x, y, distance = f.readline().split(" ")
-    detected, distance = int(detected), float(distance)
-    x, y = float(x), float(y)
-  img = cv2.imread(file.replace(".txt", ".png"))
+  img = cv2.imread(file)
   img = cv2.resize(img, (512, 256))
 
+  detected, x, y, dist = get_annotation(file)
+
   # transform points
-  x, y = float(x) * img.shape[1], float(y) * img.shape[0]
-  # x, y = int(((x + 1) / 2) * img.shape[1]), int(((-y + 1) / 2) * img.shape[0])
+  x, y = x * img.shape[1], (1 - y) * img.shape[0]
 
   # augment
-  # transformed = A_PIPELINE(image=img, keypoints=[(x, y)])
-  # img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
+  if dist > 0:
+    transformed = D_PIPELINE(image=img, keypoints=[(x, y)])
+  else:
+    transformed = A_PIPELINE(image=img, keypoints=[(x, y)])
+  img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
 
   # convert to yuv420
   img = bgr_to_yuv420(img)
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, x, y, distance), dtype=np.float32).tobytes(),
+    "y": np.array((detected, x, y, dist), dtype=np.float32).tobytes(),
   }
 
 BS = 64
@@ -66,7 +83,7 @@ WARMUP_STEPS = 100
 WARMPUP_LR = 0.0001
 START_LR = 0.0005
 END_LR = 0.0001
-EPOCHS = 1
+EPOCHS = 10
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
@@ -77,13 +94,12 @@ def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
   return loss.mean()
 
 def loss_fn(pred: Tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
-  # cl_loss = pred[0].sparse_categorical_crossentropy(y[:, 0].cast(dtypes.int32))
   cl_loss = focal_loss(pred[0], y[:, 0].cast(dtypes.int32).one_hot(2))
   x_loss = (pred[1].cross_entropy(twohot(y[:, 1], 512), reduction="none") * y[:, 0].detach()).mean()
   y_loss = (pred[2].cross_entropy(twohot(y[:, 2], 256), reduction="none") * y[:, 0].detach()).mean()
-  # dist_loss = (pred[3].cross_entropy(twohot(y[:, 3], 20), reduction="none") * (pred[0].argmax(1) + y[:, 0] + 0.5).detach()).mean()
+  dist_loss = (y[:, 3] > 0).detach().where(pred[3].cross_entropy(twohot(y[:, 3] * 10, 200), reduction="none") * y[:, 0].detach(), 0.0).mean()
 
-  return cl_loss + x_loss + y_loss# + dist_loss
+  return cl_loss + x_loss + y_loss + dist_loss
 
 @TinyJit
 def train_step(x, y, lr):
@@ -125,8 +141,8 @@ if __name__ == "__main__":
 
   model = Model()
 
-  # state_dict = safe_load(str(BASE_PATH / "model.safetensors"))
-  # load_state_dict(model, state_dict, strict=False)
+  state_dict = safe_load(str(BASE_PATH / "model.safetensors"))
+  load_state_dict(model, state_dict, strict=False)
 
   parameters = get_parameters(model)
   optim = CLAMB(parameters, weight_decay=0, adam=True)

@@ -1,7 +1,7 @@
 from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
-from tinygrad.helpers import round_up, prod
+from tinygrad.helpers import prod
 from tinygrad.device import is_dtype_supported
 
 class BatchNorm:
@@ -100,17 +100,46 @@ class SE:
     xx = self.cv2(xx).sigmoid()
     return x * xx
 
+class Attention:
+  def __init__(self, dim:int, qk_dim:int, heads:int=8):
+    self.qk_dim, self.heads = qk_dim, heads
+    self.q = nn.Linear(dim, qk_dim)
+    self.k = nn.Linear(dim, qk_dim)
+    self.v = nn.Linear(dim, dim)
+    self.out = nn.Linear(dim, dim)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    b, t, c = x.shape
+    q = self.q(x).reshape(b, t, self.heads, self.qk_dim // self.heads).transpose(1, 2)
+    k = self.k(x).reshape(b, t, self.heads, self.qk_dim // self.heads).transpose(1, 2)
+    v = self.v(x).reshape(b, t, self.heads, c // self.heads).transpose(1, 2)
+    attn = Tensor.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(b, t, c)
+    return self.out(attn)
+
 class TokenMixer:
-  def __init__(self, dim:int, stride:int=1):
-    self.stride = stride
-    self.conv7x7 = ConvNorm(dim // 4, dim // 4, 7, stride, 3, groups=dim // 4, bias=True)
+  def __init__(self, dim:int, stride:int=1, attn:bool=False):
+    assert not (attn and stride != 1), "attn only works with stride=1"
+    self.stride, self.has_attn = stride, attn
+
+    if self.has_attn:
+      # post norm in order to match what the convs do
+      self.attn = Attention(dim // 4, dim // 8, heads=1)
+      self.attn_norm = BatchNorm(dim // 4)
+    else:
+      self.conv7x7 = ConvNorm(dim // 4, dim // 4, 7, stride, 3, groups=dim // 4, bias=True)
     self.conv3x3 = ConvNorm(dim // 4, dim // 4, 3, stride, 1, groups=dim // 4, bias=True)
     self.conv2x2 = ConvNorm(dim // 4, dim // 4, 2, stride, 1, dilation=2, groups=dim // 4, bias=True)
 
   def __call__(self, x:Tensor) -> Tensor:
     x0, x1, x2, x3 = channel_shuffle(x, 4)
 
-    x1 = self.conv7x7(x1)
+    if self.has_attn:
+      b, c, h, w = x1.shape
+      x1 = x1.flatten(2).transpose(1, 2)
+      x1 = self.attn(x1).transpose(1, 2).reshape(b, c, h, w)
+      x1 = self.attn_norm(x1)
+    else:
+      x1 = self.conv7x7(x1)
     x2 = self.conv3x3(x2)
     x3 = self.conv2x2(x3)
 
@@ -139,10 +168,10 @@ class ChannelMixer:
     return x
 
 class Block:
-  def __init__(self, dim:int):
-    self.token_mixer = TokenMixer(dim)
+  def __init__(self, dim:int, attn:bool=False):
+    self.token_mixer = TokenMixer(dim, attn=attn)
     self.norm = BatchNorm(dim)
-    self.se = SE(dim, max(16, dim // 16))
+    self.se = SE(dim, max(4, dim // 16))
     self.channel_mixer = ChannelMixer(dim)
 
   def __call__(self, x:Tensor) -> Tensor:
@@ -156,6 +185,7 @@ class Downsample:
     self.cnorm = BatchNorm(cout)
     self.token_mixer = TokenMixer(cout, stride=2)
     self.tnorm = BatchNorm(cout)
+    self.se = SE(cout, max(4, cout // 16))
 
   def __call__(self, x:Tensor) -> Tensor:
     xx = self.cnorm(self.channel_mixer(x))
@@ -167,34 +197,36 @@ class Downsample:
     x = x.reshape(b, xx.shape[1], c // xx.shape[1], h, w)
     x = x.mean(2)
 
-    return x + xx
+    return self.se(x + xx)
 
 class Stem:
   def __init__(self, cin:int, cout:int):
     self.conv1 = ConvNorm(cin, cout // 2, 3, 2, 1, bias=False)
     self.conv2 = ConvNorm(cout // 2, cout, 3, 2, 1, bias=False)
+    self.se = SE(cout, max(4, cout // 16))
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
-    return self.conv2(x)
+    x = self.conv2(x)
+    return self.se(x)
 
 class Stage:
-  def __init__(self, cin:int, cout:int, num_blocks:int):
+  def __init__(self, cin:int, cout:int, num_blocks:int, attn:bool=False):
     self.downsample = Downsample(cin, cout) if cin != cout else lambda x: x
-    self.blocks = [Block(cout) for _ in range(num_blocks)]
+    self.blocks = [Block(cout, attn=attn) for _ in range(num_blocks)]
 
   def __call__(self, x:Tensor) -> Tensor:
     x = self.downsample(x)
     return x.sequential(self.blocks)
 
 class Backbone:
-  def __init__(self, cin:int=3, c_mult:int=1):
-    self.stem = Stem(cin, 16 * c_mult)
+  def __init__(self, cin:int=3, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 5, 1]):
+    self.stem = Stem(cin, cstage[0])
 
-    self.stage0 = Stage(16 * c_mult, 16 * c_mult, 2)
-    self.stage1 = Stage(16 * c_mult, 32 * c_mult, 2)
-    self.stage2 = Stage(32 * c_mult, 64 * c_mult, 5)
-    self.stage3 = Stage(64 * c_mult, 128 * c_mult, 1)
+    self.stage0 = Stage(cstage[0], cstage[0], stages[0])
+    self.stage1 = Stage(cstage[0], cstage[1], stages[1])
+    self.stage2 = Stage(cstage[1], cstage[2], stages[2], attn=True)
+    self.stage3 = Stage(cstage[2], cstage[3], stages[3], attn=True)
 
   def __call__(self, x:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     x = self.stem(x)
@@ -206,6 +238,18 @@ class Backbone:
 
     return x0, x1, x2, x3
 
+class FFN:
+  def __init__(self, in_dim:int, mid_dim:int, out_dim:int):
+    self.in_proj = nn.Linear(in_dim, mid_dim)
+    self.mix = nn.Linear(mid_dim, mid_dim * 2)
+    self.out_proj = nn.Linear(mid_dim, out_dim)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    x = self.in_proj(x).gelu()
+    x, gate = self.mix(x).chunk(2, dim=-1)
+    x = x * gate.gelu()
+    return self.out_proj(x)
+
 class Neck:
   def __init__(self, cins:list[int], cout:int, cmid:int=256):
     self.x0 = ConvNorm(cins[0], cmid, 1, 1, 0, bias=False)
@@ -213,17 +257,13 @@ class Neck:
     self.x2 = ConvNorm(cins[2], cmid, 1, 1, 0, bias=False)
     self.x3 = ConvNorm(cins[3], cmid, 1, 1, 0, bias=False)
 
-    self.feature = Tensor.kaiming_normal(1, 2, cmid)
+    self.features = cout // cmid
+    self.feature = Tensor.kaiming_normal(1, self.features, cmid)
 
-    self.heads = 8
-    self.head_size = cmid // self.heads
-    self.q = nn.Linear(cmid, cmid)
-    self.k = nn.Linear(cmid, cmid)
-    self.v = nn.Linear(cmid, cmid)
-    self.out = nn.Linear(cmid, cmid)
-
-    self.proj = nn.Linear(cmid * 2, cout, bias=False)
-    self.norm = BatchNorm(cout)
+    self.attn_norm = BatchNorm(cmid)
+    self.attn = Attention(cmid, cmid // 2, heads=cmid//64)
+    self.ffn_norm = BatchNorm(cmid)
+    self.ffn = FFN(cmid, cmid, cmid)
 
   def __call__(self, x0:Tensor, x1:Tensor, x2:Tensor, x3:Tensor) -> Tensor:
     x0 = self.x0(x0).mean((2, 3))
@@ -232,43 +272,27 @@ class Neck:
     x3 = self.x3(x3).mean((2, 3))
     x = Tensor.stack(x0, x1, x2, x3, dim=1)
 
-    # cat with feature
-    x = x.cat(self.feature.expand(x.shape[0], -1, -1), dim=1)
+    # concat with feature
+    x = x.cat(self.feature.expand(x.shape[0], self.features, -1), dim=1)
 
-    q = self.q(x).reshape(x.shape[0], -1, self.heads, self.head_size).transpose(1, 2)
-    k = self.k(x).reshape(x.shape[0], -1, self.heads, self.head_size).transpose(1, 2)
-    v = self.v(x).reshape(x.shape[0], -1, self.heads, self.head_size).transpose(1, 2)
-    attn = Tensor.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(x.shape[0], -1, self.heads * self.head_size)
-    out = self.out(attn)
+    # attention
+    out = x + self.attn(self.attn_norm(x.transpose(1, 2)).transpose(1, 2))
 
-    return self.norm(self.proj(out[:, -self.feature.shape[1]:].flatten(1)))
-
-class Head:
-  def __init__(self, outputs: int, mid: int = 64):
-    self.proj = nn.Linear(512, mid)
-
-    self.up = nn.Linear(mid, mid * 2)
-    self.down = nn.Linear(mid * 2, mid)
-
-    self.out = nn.Linear(mid, outputs)
-
-  def __call__(self, x: Tensor):
-    x = self.proj(x).gelu()
-    xx = self.up(x).gelu()
-    x = (x + self.down(xx)).gelu()
-    x = self.out(x)
-    return x
+    # ffn
+    out = out[:, -self.features:]
+    return (out + self.ffn(self.ffn_norm(out.transpose(1, 2)).transpose(1, 2))).flatten(1)
 
 class Model:
-  def __init__(self):
-    self.backbone = Backbone(cin=6)
-    self.neck = Neck([16, 32, 64, 128], 512)
+  def __init__(self, mid:int=512, head:int=64, cstage:list[int]=[24, 48, 96, 192], stages:list[int]=[2, 2, 5, 1]):
+    # feature extractor
+    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages)
+    self.neck = Neck(cstage, mid)
 
     # heads
-    self.cls_head = Head(2)
-    self.x_head = Head(512)
-    self.y_head = Head(256)
-    # self.dist_head = Head(20)
+    self.cls_head = FFN(mid, head, 2)
+    self.x_head = FFN(mid, head, 512)
+    self.y_head = FFN(mid, head, 256)
+    self.dist_head = FFN(mid, head, 200)
 
   def __call__(self, img:Tensor):
     # image normalization
@@ -282,15 +306,15 @@ class Model:
     cl = self.cls_head(f),
     x = self.x_head(f)
     y = self.y_head(f)
-    # dist = self.dist_head(x)
+    dist = self.dist_head(f)
 
     if not Tensor.training:
       cl = (cl[0].sigmoid().argmax(1), cl[0].sigmoid()[:, cl[0].argmax(1)])
       x = (x.softmax() @ Tensor.arange(512)).float()
       y = (y.softmax() @ Tensor.arange(256)).float()
-      # dist = (dist.softmax() @ Tensor.arange(20)).float()
+      dist = ((dist.softmax() @ Tensor.arange(200)) / 10).float()
 
-    return *cl, x, y
+    return *cl, x, y, dist
 
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
