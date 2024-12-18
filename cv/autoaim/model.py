@@ -3,7 +3,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import channel_shuffle, pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention
+from ..common.nn import BatchNorm, ConvNorm, Attention, SE
 
 class TokenMixer:
   def __init__(self, dim:int, stride:int=1, attn:bool=False):
@@ -89,10 +89,12 @@ class Stem:
   def __init__(self, cin:int, cout:int):
     self.conv1 = ConvNorm(cin, cout // 2, 3, 2, 1, bias=False)
     self.conv2 = ConvNorm(cout // 2, cout, 3, 2, 1, bias=False)
+    self.se = SE(cout, max(4, cout // 16))
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
-    return self.conv2(x)
+    x = self.conv2(x)
+    return self.se(x)
 
 class Stage:
   def __init__(self, cin:int, cout:int, num_blocks:int, attn:bool=False):
@@ -155,7 +157,7 @@ class Neck:
     self.feature = Tensor.kaiming_normal(1, self.features, cmid)
 
     self.attn_norm = BatchNorm(cmid)
-    self.attn = Attention(cmid, cmid, heads=8)
+    self.attn = Attention(cmid, cmid, heads=4)
     self.ffn_norm = BatchNorm(cmid)
     self.ffn = FFN(cmid, cmid, cmid, exp_dim=cmid*2)
 
