@@ -5,7 +5,7 @@ def channel_shuffle(x: Tensor, r:int=2) -> list[Tensor]:
   assert c % 4 == 0
   x = x.reshape(b * c // r, r, h * w).permute(1, 0, 2)
   x = x.reshape(r, -1, c // r, h, w)
-  return x.chunk(r)
+  return list(x[i] for i in range(r))
 
 def pixel_unshuffle(x:Tensor, factor:int) -> Tensor:
   b, c, h, w = x.shape
