@@ -8,7 +8,8 @@ import numpy as np
 
 from .model import Model
 from .common import pred
-from ..common import BASE_PATH, bgr_to_yuv420
+from ..common import BASE_PATH
+from ..common.image import bgr_to_yuv420
 
 if __name__ == "__main__":
   Tensor.no_grad = True

@@ -1,10 +1,9 @@
-import math, time, glob
+import math, time, glob, tempfile
 from typing import Tuple
 
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_save
-from tinygrad.nn.optim import LAMB
 from tinygrad.device import Device
 from tinygrad.engine.jit import TinyJit
 from tinygrad.helpers import GlobalCounters, tqdm, trange, getenv
@@ -13,10 +12,13 @@ import cv2
 import numpy as np
 import albumentations as A
 
-from .model import Model, twohot
+from .model import Model
 from .common import get_annotation
-from ..common import BASE_PATH, CLAMB, bgr_to_yuv420
-from ..dataloader import batch_load, BatchDesc
+from ..common.tensor import twohot
+from ..common import BASE_PATH
+from ..common.optim import CLAMB
+from ..common.image import bgr_to_yuv420
+from ..common.dataloader import batch_load, BatchDesc
 
 # main augments
 A_PIPELINE = A.Compose([
@@ -79,11 +81,11 @@ def load_single_file(file):
   }
 
 BS = 64
-WARMUP_STEPS = 100
-WARMPUP_LR = 0.0001
-START_LR = 0.0005
-END_LR = 0.0001
-EPOCHS = 10
+WARMUP_STEPS = 500
+WARMPUP_LR = 1e-5
+START_LR = 1e-3
+END_LR = 1e-5
+EPOCHS = 100
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
@@ -141,11 +143,13 @@ if __name__ == "__main__":
 
   model = Model()
 
-  state_dict = safe_load(str(BASE_PATH / "model.safetensors"))
-  load_state_dict(model, state_dict, strict=False)
+  if (ckpt := getenv("CKPT", "")) != "":
+    print(f"loading checkpoint {BASE_PATH / 'intermediate' / f'model_{ckpt}.safetensors'}")
+    state_dict = safe_load(BASE_PATH / "intermediate" / f"model_{ckpt}.safetensors")
+    load_state_dict(model, state_dict, strict=False)
 
   parameters = get_parameters(model)
-  optim = CLAMB(parameters, weight_decay=0, adam=True)
+  optim = CLAMB(parameters, weight_decay=0.1, b1=0.9, b2=0.994, adam=True)
 
   def single_batch(iter):
     d, c = next(iter)
@@ -195,4 +199,7 @@ if __name__ == "__main__":
       steps += 1
 
     safe_save(get_state_dict(model), str(BASE_PATH / f"intermediate/model_{epoch}.safetensors"))
-  safe_save(get_state_dict(model), str(BASE_PATH / f"model.safetensors"))
+
+  # copy the last intermediate to the final model
+  with open(BASE_PATH / "intermediate" / f"model_{epoch}.safetensors", "rb") as f:
+    with open(BASE_PATH / "model.safetensors", "wb") as f2: f2.write(f.read())

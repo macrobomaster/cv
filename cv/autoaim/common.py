@@ -1,7 +1,6 @@
 from pathlib import Path
 import csv
 
-from tinygrad.tensor import Tensor
 from tinygrad.engine.jit import TinyJit
 
 from ..common import BASE_PATH
