@@ -163,11 +163,12 @@ class Neck:
 
   def __call__(self, xs:tuple[Tensor, Tensor, Tensor, Tensor]) -> Tensor:
     x0, x1, x2, x3 = xs
-    x3 = self.x3(x3).mean((2, 3))
-    x2 = self.x2(x2).mean((2, 3))
-    x1 = self.x1(x1).mean((2, 3))
     x0 = self.x0(x0).mean((2, 3))
-    x = Tensor.stack(x3, x2, x1, x0, dim=1)
+    x1 = self.x1(x1).mean((2, 3))
+    x2 = self.x2(x2).mean((2, 3))
+    x3 = self.x3(x3).max_pool2d(2).flatten(2).transpose(1, 2)
+
+    x = x3.cat(Tensor.stack(x2, x1, x0, dim=1), dim=1)
 
     # concat with feature
     x = x.cat(self.feature.expand(x.shape[0], self.features, -1), dim=1)
@@ -200,8 +201,7 @@ class Model:
 
   def __call__(self, img:Tensor):
     # image normalization
-    if Tensor.training: img = img.float()
-    else: img = img.cast(dtypes.default_float)
+    img = img.cast(dtypes.default_float)
     img = img.permute(0, 3, 1, 2) / 255
 
     xs = self.backbone(img)
@@ -225,6 +225,8 @@ if __name__ == "__main__":
   from tinygrad.helpers import GlobalCounters
   from tinygrad.engine.jit import TinyJit
   from functools import partial
+
+  dtypes.default_float = dtypes.float16
 
   model = Model()
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")

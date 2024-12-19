@@ -1,7 +1,7 @@
 import math, time, glob, tempfile
 from typing import Tuple
 
-from tinygrad.tensor import Tensor
+from tinygrad.tensor import Tensor, _to_np_dtype
 from tinygrad.dtype import dtypes
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_save
 from tinygrad.device import Device
@@ -58,7 +58,8 @@ def get_train_files():
   return glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
 def load_single_file(file):
   img = cv2.imread(file)
-  img = cv2.resize(img, (512, 256))
+  if img.shape[0] != 256 or img.shape[1] != 512:
+    img = cv2.resize(img, (512, 256))
 
   detected, x, y, dist = get_annotation(file)
 
@@ -77,15 +78,15 @@ def load_single_file(file):
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, x, y, dist), dtype=np.float32).tobytes(),
+    "y": np.array((detected, x, y, dist), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
   }
 
-BS = 64
+BS = 256
 WARMUP_STEPS = 500
 WARMPUP_LR = 1e-5
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 100
+EPOCHS = 10
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
@@ -160,7 +161,7 @@ if __name__ == "__main__":
     batch_iter = iter(tqdm(batch_load(
       {
         "x": BatchDesc(shape=(128, 256, 6), dtype=dtypes.uint8),
-        "y": BatchDesc(shape=(4,), dtype=dtypes.float32),
+        "y": BatchDesc(shape=(4,), dtype=dtypes.default_float),
       },
       load_single_file, get_train_files, bs=BS, shuffle=True,
     ), total=STEPS_PER_EPOCH, desc=f"epoch {epoch}"))
@@ -170,7 +171,7 @@ if __name__ == "__main__":
       GlobalCounters.reset()
 
       lr = get_lr(steps)
-      loss = train_step(proc[0], proc[1], Tensor([lr], dtype=dtypes.default_float))
+      loss = train_step(proc[0], proc[1], Tensor([lr], dtype=dtypes.float32))
       pt = time.perf_counter()
 
       try: next_proc = single_batch(batch_iter)
