@@ -61,7 +61,8 @@ def load_single_file(file):
   if img.shape[0] != 256 or img.shape[1] != 512:
     img = cv2.resize(img, (512, 256))
 
-  detected, x, y, dist = get_annotation(file)
+  anno = get_annotation(file)
+  detected, x, y, dist = anno.detected, anno.x, anno.y, anno.dist
 
   # transform points
   x, y = x * img.shape[1], (1 - y) * img.shape[0]

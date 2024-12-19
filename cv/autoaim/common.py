@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 import csv
 
@@ -10,8 +11,15 @@ def pred(model, img):
   cl, cl_prob, x, y, dist = model(img)
   return cl, cl_prob, x, y, dist
 
+@dataclass
+class Annotation:
+  detected: int
+  x: float
+  y: float
+  dist: float = 0.0
+
 annotations = {}
-def get_annotation(img_file):
+def get_annotation(img_file) -> Annotation:
   global annotations
 
   # if there is a img_file.txt file, read that
@@ -20,9 +28,9 @@ def get_annotation(img_file):
       line = f.readline().strip()
       line = line.split(" ")
       if len(line) == 3:
-        return int(line[0]), float(line[1]), float(line[2]), 0.0
+        return Annotation(int(line[0]), float(line[1]), float(line[2]))
       elif len(line) == 4:
-        return int(line[0]), float(line[1]), float(line[2]), float(line[3])
+        return Annotation(int(line[0]), float(line[1]), float(line[2]), float(line[3]))
       else: raise ValueError(f"invalid annotation file {img_file}.txt")
   else:
     basename = ".".join(Path(img_file).name.split(".")[:-2])
@@ -38,4 +46,4 @@ def get_annotation(img_file):
     # get the frame index
     frame_index = int(Path(img_file).name.split(".")[-2]) - 1
     assert frame_index == annotations[basename][frame_index][0]
-    return annotations[basename][frame_index][1:] + (0.0,)
+    return Annotation(*annotations[basename][frame_index][1:])
