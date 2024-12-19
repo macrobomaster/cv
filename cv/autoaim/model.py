@@ -148,10 +148,10 @@ class FFN:
 
 class Neck:
   def __init__(self, cins:list[int], cout:int, cmid:int=256):
-    self.x0 = nn.Conv2d(cins[0], cmid, 1, 1, 0, bias=True)
-    self.x1 = nn.Conv2d(cins[1], cmid, 1, 1, 0, bias=True)
-    self.x2 = nn.Conv2d(cins[2], cmid, 1, 1, 0, bias=True)
-    self.x3 = nn.Conv2d(cins[3], cmid, 1, 1, 0, bias=True)
+    self.x0 = ChannelMixer(cins[0], cmid)
+    self.x1 = ChannelMixer(cins[1], cmid)
+    self.x2 = ChannelMixer(cins[2], cmid)
+    self.x3 = ChannelMixer(cins[3], cmid)
 
     self.features = cout // cmid
     self.feature = Tensor.kaiming_normal(1, self.features, cmid)
@@ -166,19 +166,22 @@ class Neck:
     x0 = self.x0(x0).mean((2, 3))
     x1 = self.x1(x1).mean((2, 3))
     x2 = self.x2(x2).mean((2, 3))
-    x3 = self.x3(x3).max_pool2d(2).flatten(2).transpose(1, 2)
+    x3 = self.x3(x3).mean((2, 3))
 
-    x = x3.cat(Tensor.stack(x2, x1, x0, dim=1), dim=1)
+    x = Tensor.stack(x0, x1, x2, x3, dim=1)
 
     # concat with feature
     x = x.cat(self.feature.expand(x.shape[0], self.features, -1), dim=1)
 
     # attention
-    out = x + self.attn(self.attn_norm(x.transpose(1, 2)).transpose(1, 2))
+    xx = self.attn(self.attn_norm(x.transpose(1, 2)).transpose(1, 2))
+    x = x + xx
 
     # ffn
-    out = out[:, -self.features:]
-    return self.ffn(self.ffn_norm(out.transpose(1, 2)).transpose(1, 2)).flatten(1)
+    x = x[:, -self.features:]
+    xx = self.ffn(self.ffn_norm(x.transpose(1, 2)).transpose(1, 2))
+    x = x + xx
+    return x.flatten(1)
 
 class Head:
   def __init__(self, in_dim:int, mid_dim:int, out_dim:int):
@@ -188,7 +191,7 @@ class Head:
     return self.ffn(x)
 
 class Model:
-  def __init__(self, mid:int=512, head:int=64, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 5, 1]):
+  def __init__(self, mid:int=512, head:int=64, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 5, 2]):
     # feature extractor
     self.backbone = Backbone(cin=6, cstage=cstage, stages=stages)
     self.neck = Neck(cstage, mid)
@@ -225,8 +228,6 @@ if __name__ == "__main__":
   from tinygrad.helpers import GlobalCounters
   from tinygrad.engine.jit import TinyJit
   from functools import partial
-
-  dtypes.default_float = dtypes.float16
 
   model = Model()
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
