@@ -46,3 +46,6 @@ def twohot(x:Tensor, bins:int) -> Tensor:
   th = (ar == k0.reshape(x.shape[0], 1)).where(w_below.reshape(x.shape[0], 1), 0)
   th = th + (ar == k1.reshape(x.shape[0], 1)).where(w_above.reshape(x.shape[0], 1), 0)
   return th
+
+def norm(x:Tensor, axis:int|None=None, keepdim:bool=False) -> Tensor:
+  return x.square().sum(axis, keepdim=keepdim).sqrt()
