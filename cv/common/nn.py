@@ -67,6 +67,12 @@ class ConvNorm:
     self.n = BatchNorm(out_channels)
   def __call__(self, x:Tensor) -> Tensor: return self.n(self.c(x))
 
+class ConvTransposeNorm:
+  def __init__(self, in_channels:int, out_channels:int, kernel_size:int, stride:int, padding:int, output_padding:int, groups:int=1, bias:bool=False):
+    self.c = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride, padding, output_padding, groups=groups, bias=bias)
+    self.n = BatchNorm(out_channels)
+  def __call__(self, x:Tensor) -> Tensor: return self.n(self.c(x))
+
 class SE:
   def __init__(self, dim:int, cmid:int):
     self.cv1 = nn.Conv2d(dim, cmid, kernel_size=1, bias=False)
