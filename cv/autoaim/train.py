@@ -1,5 +1,4 @@
-import math, time, glob, tempfile
-from typing import Tuple
+import math, time, glob
 
 from tinygrad.tensor import Tensor, _to_np_dtype
 from tinygrad.dtype import dtypes
@@ -97,7 +96,7 @@ def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
   loss = ce * ((1 - pt) ** gamma) * alpha_
   return loss.mean()
 
-def loss_fn(pred: Tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
+def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
   cl_loss = focal_loss(pred[0], y[:, 0].cast(dtypes.int32).one_hot(2))
   x_loss = (pred[1].cross_entropy(twohot(y[:, 1], 512), reduction="none") * y[:, 0].detach()).mean()
   y_loss = (pred[2].cross_entropy(twohot(y[:, 2], 256), reduction="none") * y[:, 0].detach()).mean()
