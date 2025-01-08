@@ -10,16 +10,15 @@ class CLAMB(Optimizer):
     self.m = [Tensor.zeros(*t.shape, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous() for t in self.params]
     self.v = [Tensor.zeros(*t.shape, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous() for t in self.params]
 
-  def _step(self) -> list[Tensor]:
+  def schedule_step_with_grads(self, grads:list[Tensor]) -> list[Tensor]:
     self.b1_t *= self.b1
     self.b2_t *= self.b2
-    for i, t in enumerate(self.params):
-      assert t.grad is not None
-      self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * t.grad)
-      self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (t.grad * t.grad))
+    for i, (t, g) in enumerate(zip(self.params, grads)):
+      self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * g)
+      self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (g * g))
       m_hat = self.m[i] / (1.0 - self.b1_t)
       v_hat = self.v[i] / (1.0 - self.b2_t)
-      cmask = (m_hat * t.grad > 0).cast(t.dtype)
+      cmask = (m_hat * g > 0).cast(t.dtype)
       cmask = cmask * (cmask.numel() / (cmask.sum() + 1))
       up = ((m_hat * cmask) / (v_hat.sqrt() + self.eps)) + self.wd * t.detach()
       if not self.adam:
