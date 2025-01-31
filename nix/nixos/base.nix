@@ -116,7 +116,6 @@
   services.timesyncd.enable = lib.mkDefault true;
 
   # disabled unneeded stuff
-  environment.noXlibs = lib.mkDefault true;
   security = {
     polkit.enable = lib.mkDefault false;
     audit.enable = false;
