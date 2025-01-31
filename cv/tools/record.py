@@ -2,7 +2,8 @@ import time
 
 import cv2
 
-from ..common import BASE_PATH, setup_aravis, get_aravis_frame
+from ..common import BASE_PATH
+from ..common.camera import setup_aravis, get_aravis_frame
 
 if __name__ == "__main__":
   cam, strm = setup_aravis()
