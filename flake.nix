@@ -113,6 +113,8 @@
             ./nix/nixos/disk.nix
           ];
 
+          nixpkgs.pkgs = pkgs-aarch64-linux;
+
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
