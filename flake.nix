@@ -114,8 +114,8 @@
 
           hardware.enableRedistributableFirmware = true;
           boot.consoleLogLevel = 7;
-          boot.initrd.kernelModules = [ "nvme" "f2fs" ];
-          boot.initrd.availableKernelModules = [ "nvme" "f2fs" ];
+          boot.initrd.kernelModules = [ "nvme" "f2fs" "pcie-tegra194" ];
+          boot.initrd.availableKernelModules = [ "nvme" "f2fs" "pcie-tegra194" ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
