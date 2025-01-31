@@ -121,10 +121,18 @@
     audit.enable = false;
   };
   services.udisks2.enable = false;
+  systemd.tpm2.enable = false;
+  xdg = {
+    autostart.enable = false;
+    icons.enable = false;
+    mime.enable = false;
+    sounds.enable = false;
+  };
 
   # remove docs
   documentation = {
     enable = false;
+    doc.enable = false;
     info.enable = false;
     man.enable = false;
     nixos.enable = false;

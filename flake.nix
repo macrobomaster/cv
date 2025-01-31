@@ -104,7 +104,11 @@
           };
         };
         orin-nano = pkgs-aarch64-linux.nixos {
-          _module.args = { inherit inputs; };
+          nixpkgs.pkgs = pkgs-aarch64-linux;
+          _module.args = {
+            inherit inputs;
+            pkgs = lib.mkForce pkgs-aarch64-linux;
+          };
 
           imports = [
             inputs.jetpack-nixos.nixosModules.default
@@ -112,8 +116,6 @@
             ./nix/nixos/base.nix
             ./nix/nixos/disk.nix
           ];
-
-          nixpkgs.pkgs = pkgs-aarch64-linux;
 
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
