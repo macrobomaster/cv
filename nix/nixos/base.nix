@@ -159,7 +159,7 @@
   '';
 
   # use systemd initrd
-  boot.initrd.systemd.enable = true;
+  # boot.initrd.systemd.enable = true;
 
   # firewall
   networking = {
