@@ -17,7 +17,7 @@
         };
         root = {
           name = "root";
-          end = "-0";
+          end = "-16G";
           content = {
             type = "filesystem";
             format = "f2fs";
@@ -29,6 +29,14 @@
             mountOptions = [
               "compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime,nodiscard"
             ];
+          };
+        };
+        swap = {
+          size = "100%";
+          content = {
+            type = "swap";
+            discardPolicy = "both";
+            resumeDevice = true;
           };
         };
       };
