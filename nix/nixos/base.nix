@@ -151,12 +151,6 @@
   ];
   users.users.root.hashedPassword = "$y$j9T$zj/Hf6NsqCBGuD.Wt0ux0.$fvdcKDDnICCnYGhRGC.I/I0GW/BQNOezvQzNQ1RGUQ3";
 
-  # reboot on kernel panic
-  boot.kernelParams = [
-    "panic=1"
-    "boot.panic_on_fail"
-  ];
-
   # systemd tweaks
   systemd.enableEmergencyMode = true;
   systemd.sleep.extraConfig = ''
