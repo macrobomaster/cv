@@ -112,7 +112,8 @@
             ./nix/nixos/disk.nix
           ];
 
-          boot.initrd.availableKernelModules = [ "nvme" ];
+          boot.initrd.kernelModules = [ "nvme" "f2fs" ];
+          boot.initrd.availableKernelModules = [ "nvme" "f2fs" ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
