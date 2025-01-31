@@ -110,13 +110,12 @@
             ./nix/nixos/base.nix
           ];
 
+          boot.initrd.supportedFilesystems = [ "f2fs" ];
           boot.initrd.availableKernelModules = [
             "nvme"
             "usb_storage"
           ];
-          boot.initrd.kernelModules = [ ];
-          boot.kernelModules = [ ];
-          boot.extraModulePackages = [ ];
+          boot.supportedFilesystems = [ "f2fs" ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
