@@ -112,6 +112,7 @@
             ./nix/nixos/disk.nix
           ];
 
+          hardware.enableRedistributableFirmware = true;
           boot.initrd.kernelModules = [ "nvme" "f2fs" ];
           boot.initrd.availableKernelModules = [ "nvme" "f2fs" ];
           boot.loader.systemd-boot.enable = true;
