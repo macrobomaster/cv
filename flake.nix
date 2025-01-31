@@ -5,6 +5,8 @@
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     tinygrad.url = "github:wozeparrot/tinygrad-nix";
+    jetpack-nixos.url = "github:tiiuae/jetpack-nixos/final-stretch";
+    disko.url = "github:nix-community/disko/latest";
   };
 
   outputs =
@@ -13,24 +15,46 @@
       flake-utils,
       ...
     }:
+    let
+      inherit (nixpkgs) lib;
+
+      nixpkgs_config = {
+        overlays = [
+          inputs.tinygrad.overlays.default
+          (final: prev: {
+            pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+              (python-final: python-prev: {
+                opencv4 = python-prev.opencv4.override {
+                  enableGtk3 = true;
+                };
+              })
+            ];
+          })
+        ];
+      };
+
+      pkgs-x86_64-linux = import nixpkgs (
+        {
+          system = "x86_64-linux";
+        }
+        // nixpkgs_config
+      );
+      pkgs-aarch64-linux = import nixpkgs (
+        {
+          system = "aarch64-linux";
+        }
+        // nixpkgs_config
+      );
+    in
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [
-            inputs.tinygrad.overlays.default
-            (final: prev: {
-              pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
-                (python-final: python-prev: {
-                  opencv4 = python-prev.opencv4.override {
-                    enableGtk3 = true;
-                  };
-                })
-              ];
-            })
-          ];
-        };
+        pkgs = import nixpkgs (
+          {
+            inherit system;
+          }
+          // nixpkgs_config
+        );
       in
       {
         devShell = pkgs.mkShell {
@@ -47,6 +71,7 @@
                   pygobject-stubs
                   onnx
                   onnxruntime
+                  torchvision
                 ];
               python = pkgs.python312;
             in
@@ -56,8 +81,82 @@
               aravis
               aravis.lib
               gobject-introspection
+              llvmPackages_latest.clang
             ];
         };
       }
-    );
+    )
+    // {
+      nixosConfigurations = {
+        orin-nano-installer = pkgs-x86_64-linux.pkgsCross.aarch64-multiplatform.nixos {
+          imports = [
+            "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
+            inputs.jetpack-nixos.nixosModules.default
+          ];
+          hardware.enableAllHardware = lib.mkForce false;
+          hardware.nvidia-jetpack = {
+            enable = true;
+            som = "orin-nano";
+            carrierBoard = "devkit";
+          };
+        };
+        orin-nano = pkgs-aarch64-linux.nixos {
+          _module.args = { inherit inputs; };
+
+          imports = [
+            inputs.jetpack-nixos.nixosModules.default
+            inputs.disko.nixosModules.disko
+            ./nix/nixos/base.nix
+          ];
+
+          disko.devices.disk.main = {
+            device = "/dev/nvme0n1";
+            type = "disk";
+            content = {
+              type = "gpt";
+              partitions = {
+                ESP = {
+                  end = "1G";
+                  type = "EF00";
+                  content = {
+                    type = "filesystem";
+                    format = "vfat";
+                    mountpoint = "/boot";
+                    mountOptions = [ "umask=0077" ];
+                  };
+                };
+                root = {
+                  name = "root";
+                  end = "-0";
+                  content = {
+                    type = "filesystem";
+                    format = "f2fs";
+                    mountpoint = "/";
+                    extraArgs = [
+                      "-O"
+                      "extra_attr,inode_checksum,sb_checksum,compression"
+                    ];
+                    mountOptions = [
+                      "compress_algorithm=zstd:6,compress_chksum,atgc,gc_merge,lazytime,nodiscard"
+                    ];
+                  };
+                };
+              };
+            };
+          };
+
+          boot.loader.systemd-boot.enable = true;
+          boot.loader.efi.canTouchEfiVariables = true;
+
+          hardware.enableAllHardware = lib.mkForce false;
+          hardware.nvidia-jetpack = {
+            enable = true;
+            som = "orin-nano";
+            carrierBoard = "devkit";
+          };
+
+          system.stateVersion = "25.05";
+        };
+      };
+    };
 }
