@@ -49,3 +49,6 @@ def twohot(x:Tensor, bins:int) -> Tensor:
 
 def norm(x:Tensor, axis:int|None=None, keepdim:bool=False) -> Tensor:
   return x.square().sum(axis, keepdim=keepdim).sqrt()
+
+def telu(x:Tensor) -> Tensor:
+  return x * x.exp().tanh()
