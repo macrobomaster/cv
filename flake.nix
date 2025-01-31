@@ -112,7 +112,7 @@
             ./nix/nixos/disk.nix
           ];
 
-          boot.initrd.availableKernelModules = [ "nvme" ];
+          boot.initrd.availableKernelModules = [ "nvme" "usb_storage" ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
