@@ -158,7 +158,7 @@
   ];
 
   # systemd tweaks
-  systemd.enableEmergencyMode = false;
+  systemd.enableEmergencyMode = true;
   systemd.sleep.extraConfig = ''
     AllowSuspend=no
     AllowHibernation=no
