@@ -113,6 +113,7 @@
           ];
 
           hardware.enableRedistributableFirmware = true;
+          boot.consoleLogLevel = 7;
           boot.initrd.kernelModules = [ "nvme" "f2fs" ];
           boot.initrd.availableKernelModules = [ "nvme" "f2fs" ];
           boot.loader.systemd-boot.enable = true;
