@@ -30,6 +30,7 @@
               })
             ];
           })
+          (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
         ];
       };
 
@@ -42,9 +43,6 @@
       pkgs-aarch64-linux = import nixpkgs (
         {
           system = "aarch64-linux";
-          overlays = [
-            (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
-          ];
         }
         // nixpkgs_config
       );
@@ -104,11 +102,8 @@
           };
         };
         orin-nano = pkgs-aarch64-linux.nixos {
-          nixpkgs.pkgs = pkgs-aarch64-linux;
-          _module.args = {
-            inherit inputs;
-            pkgs = lib.mkForce pkgs-aarch64-linux;
-          };
+          _module.args = { inherit inputs; };
+          nixpkgs = nixpkgs_config;
 
           imports = [
             inputs.jetpack-nixos.nixosModules.default
