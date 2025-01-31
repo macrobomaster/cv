@@ -42,6 +42,9 @@
       pkgs-aarch64-linux = import nixpkgs (
         {
           system = "aarch64-linux";
+          overlays = [
+            (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
+          ];
         }
         // nixpkgs_config
       );
