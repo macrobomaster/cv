@@ -158,14 +158,15 @@
   ];
 
   # systemd tweaks
-  systemd.enableEmergencyMode = false;
+  systemd.enableEmergencyMode = true;
   systemd.sleep.extraConfig = ''
     AllowSuspend=no
     AllowHibernation=no
   '';
 
   # use systemd initrd
-  # boot.initrd.systemd.enable = true;
+  boot.initrd.systemd.enable = true;
+  boot.initrd.systemd.emergencyAccess = true;
 
   # firewall
   networking = {

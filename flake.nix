@@ -107,46 +107,14 @@
 
           imports = [
             inputs.jetpack-nixos.nixosModules.default
+            inputs.disko.nixosModules.disko
             ./nix/nixos/base.nix
+            ./nix/nixos/disk.nix
           ];
 
-          boot.initrd.supportedFilesystems = [ "f2fs" ];
-          boot.initrd.availableKernelModules = [
-            "nvme"
-            "nvme-core"
-            "usb_storage"
-            "f2fs"
-            "xhci-tegra"
-            "vmd"
-          ];
-          boot.supportedFilesystems = [ "f2fs" ];
+          boot.initrd.availableKernelModules = [ "nvme" ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
-
-          fileSystems."/" = {
-            device = "/dev/nvme0n1p2";
-            fsType = "f2fs";
-            options = [
-              "compress_algorithm=zstd:6"
-              "compress_chksum"
-              "atgc"
-              "gc_merge"
-              "lazytime"
-              "nodiscard"
-            ];
-          };
-
-          fileSystems."/boot" = {
-            device = "/dev/nvme0n1p1";
-            fsType = "vfat";
-            options = [
-              "umask=0077"
-            ];
-          };
-
-          swapDevices = [
-            { device = "/dev/nvme0n1p3"; }
-          ];
 
           hardware.enableAllHardware = lib.mkForce false;
           hardware.nvidia-jetpack = {
