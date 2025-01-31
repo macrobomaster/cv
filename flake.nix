@@ -113,7 +113,11 @@
           boot.initrd.supportedFilesystems = [ "f2fs" ];
           boot.initrd.availableKernelModules = [
             "nvme"
+            "nvme-core"
             "usb_storage"
+            "f2fs"
+            "xhci-tegra"
+            "vmd"
           ];
           boot.supportedFilesystems = [ "f2fs" ];
           boot.loader.systemd-boot.enable = true;
