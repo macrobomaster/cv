@@ -120,7 +120,7 @@
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
-          fileSystems."/mnt" = {
+          fileSystems."/" = {
             device = "/dev/nvme0n1p2";
             fsType = "f2fs";
             options = [
@@ -133,7 +133,7 @@
             ];
           };
 
-          fileSystems."/mnt/boot" = {
+          fileSystems."/boot" = {
             device = "/dev/nvme0n1p1";
             fsType = "vfat";
             options = [
