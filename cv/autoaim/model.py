@@ -2,7 +2,7 @@ from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
-from ..common.tensor import channel_shuffle, pixel_unshuffle
+from ..common.tensor import channel_shuffle, pixel_unshuffle, telu
 from ..common.nn import BatchNorm, ConvNorm, Attention, SE
 
 class TokenMixer:
@@ -49,7 +49,7 @@ class ChannelMixer:
     x = self.proj(x)
 
     x, gate = self.mix(x).chunk(2, dim=1)
-    x = x * gate.gelu()
+    x = x * telu(gate)
 
     return self.out(x)
 
@@ -92,7 +92,7 @@ class Stem:
     self.se = SE(cout, max(4, cout // 16))
 
   def __call__(self, x: Tensor) -> Tensor:
-    x = self.conv1(x).gelu()
+    x = telu(self.conv1(x))
     x = self.conv2(x)
     return self.se(x)
 
@@ -129,10 +129,10 @@ class FFNBlock:
     self.up = nn.Linear(dim, exp_dim)
     self.down = nn.Linear(exp_dim, dim * 2)
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.up(x).gelu()
+    xx = telu(self.up(x))
     xx, gate = self.down(xx).chunk(2, dim=-1)
-    xx = xx * gate.gelu()
-    return (x + xx).gelu()
+    xx = xx * telu(gate)
+    return telu(x + xx)
 
 class FFN:
   def __init__(self, in_dim:int, mid_dim:int, out_dim:int, exp_dim:int=0, blocks:int=1):
@@ -142,7 +142,7 @@ class FFN:
     self.out = nn.Linear(mid_dim, out_dim)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.proj(x).gelu()
+    x = telu(self.proj(x))
     x = x.sequential(self.blocks)
     return self.out(x)
 
@@ -157,7 +157,7 @@ class Neck:
     self.feature = Tensor.kaiming_normal(1, self.features, cmid)
 
     self.attn_norm = BatchNorm(cmid)
-    self.attn = Attention(cmid, cmid, heads=4)
+    self.attn = Attention(cmid, cmid, heads=2)
     self.ffn_norm = BatchNorm(cmid)
     self.ffn = FFN(cmid, cmid, cmid, exp_dim=cmid*2)
 
