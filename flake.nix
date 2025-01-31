@@ -112,6 +112,7 @@
             ./nix/nixos/disk.nix
           ];
 
+          boot.initrd.availableKernelModules = [ "nvme" ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
