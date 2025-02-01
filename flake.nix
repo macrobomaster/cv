@@ -44,22 +44,17 @@
       pkgs-aarch64-linux = import nixpkgs (
         {
           system = "aarch64-linux";
+          config = {
+            allowUnfree = true;
+            cudaSupport = true;
+          };
         }
         // nixpkgs_config
       );
     in
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs (
-          {
-            inherit system;
-          }
-          // nixpkgs_config
-        );
-      in
-      {
-        devShell = pkgs.mkShell {
+    {
+      devShells = {
+        x86_64-linux.default = pkgs-x86_64-linux.mkShell {
           packages =
             let
               python-packages =
@@ -75,9 +70,9 @@
                   onnxruntime
                   torchvision
                 ];
-              python = pkgs.python312;
+              python = pkgs-x86_64-linux.python312;
             in
-            with pkgs;
+            with pkgs-x86_64-linux;
             [
               (python.withPackages python-packages)
               aravis
@@ -86,28 +81,54 @@
               llvmPackages_latest.clang
             ];
         };
-      }
-    )
-    // {
+        aarch64-linux.default = pkgs-aarch64-linux.mkShell {
+          packages =
+            let
+              python-packages =
+                p: with p; [
+                  albumentations
+                  opencv4
+                  pillow
+                  (tinygrad.override { cudaSupport = true; })
+                  wandb
+                  pygobject3
+                  pygobject-stubs
+                  onnx
+                ];
+              python = pkgs-aarch64-linux.python312;
+            in
+            with pkgs-aarch64-linux;
+            [
+              (python.withPackages python-packages)
+              aravis
+              aravis.lib
+              gobject-introspection
+              llvmPackages_latest.clang
+            ];
+        };
+      };
+
       nixosConfigurations = {
         orin-nano-installer = pkgs-x86_64-linux.pkgsCross.aarch64-multiplatform.nixos {
           imports = [
             "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
             inputs.jetpack-nixos.nixosModules.default
           ];
-          boot.kernelPatches = [{
-            name = "config";
-            patch = null;
-            extraConfig = ''
-              ARM64_PMEM y
-              PCI_TEGRA y
-              PCIE_TEGRA194 y
-              PCIE_TEGRA194_HOST y
-              BLK_DEV_NVME y
-              NVME_CORE y
-              FB_SIMPLE y
-            '';
-          }];
+          boot.kernelPatches = [
+            {
+              name = "config";
+              patch = null;
+              extraConfig = ''
+                ARM64_PMEM y
+                PCI_TEGRA y
+                PCIE_TEGRA194 y
+                PCIE_TEGRA194_HOST y
+                BLK_DEV_NVME y
+                NVME_CORE y
+                FB_SIMPLE y
+              '';
+            }
+          ];
           hardware.enableAllHardware = lib.mkForce false;
           hardware.nvidia-jetpack = {
             enable = true;
@@ -126,21 +147,30 @@
             ./nix/nixos/disk.nix
           ];
 
-          boot.kernelPatches = [{
-            name = "config";
-            patch = null;
-            extraConfig = ''
-              ARM64_PMEM y
-              PCI_TEGRA y
-              PCIE_TEGRA194 y
-              PCIE_TEGRA194_HOST y
-              BLK_DEV_NVME y
-              NVME_CORE y
-              FB_SIMPLE y
-            '';
-          }];
-          boot.initrd.availableKernelModules = [ "nvme" "f2fs" "pcie-tegra194" ];
-          boot.supportedFilesystems = [ "f2fs" "vfat" ];
+          boot.kernelPatches = [
+            {
+              name = "config";
+              patch = null;
+              extraConfig = ''
+                ARM64_PMEM y
+                PCI_TEGRA y
+                PCIE_TEGRA194 y
+                PCIE_TEGRA194_HOST y
+                BLK_DEV_NVME y
+                NVME_CORE y
+                FB_SIMPLE y
+              '';
+            }
+          ];
+          boot.initrd.availableKernelModules = [
+            "nvme"
+            "f2fs"
+            "pcie-tegra194"
+          ];
+          boot.supportedFilesystems = [
+            "f2fs"
+            "vfat"
+          ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
