@@ -6,6 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
     tinygrad.url = "github:wozeparrot/tinygrad-nix";
     jetpack-nixos.url = "github:tiiuae/jetpack-nixos/final-stretch";
+    # jetpack-nixos.url = "github:anduril/jetpack-nixos";
     disko.url = "github:nix-community/disko/latest";
   };
 
@@ -115,7 +116,10 @@
           hardware.enableRedistributableFirmware = true;
           boot.initrd.availableKernelModules = [ "nvme" "f2fs" "pcie-tegra194" ];
           boot.supportedFilesystems = [ "f2fs" "vfat" ];
-          boot.loader.systemd-boot.enable = true;
+          # boot.loader.systemd-boot.enable = true;
+          boot.loader.grub.enable = true;
+          boot.loader.grub.efiSupport = true;
+          boot.loader.grub.efiInstallAsRemovable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
           hardware.enableAllHardware = lib.mkForce false;
