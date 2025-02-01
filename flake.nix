@@ -150,6 +150,7 @@
             carrierBoard = "devkit";
           };
 
+          networking.hostName = "orin-nano";
           system.stateVersion = "25.05";
         };
       };
