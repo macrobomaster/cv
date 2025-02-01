@@ -66,6 +66,7 @@
       jq
       less
       neovim
+      nix-output-monitor
       pciutils
       ripgrep
       tree
