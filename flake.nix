@@ -116,11 +116,8 @@
           hardware.enableRedistributableFirmware = true;
           boot.initrd.availableKernelModules = [ "nvme" "f2fs" "pcie-tegra194" ];
           boot.supportedFilesystems = [ "f2fs" "vfat" ];
-          # boot.loader.systemd-boot.enable = true;
-          # boot.loader.efi.canTouchEfiVariables = true;
-          boot.loader.grub.enable = true;
-          boot.loader.grub.efiSupport = true;
-          boot.loader.grub.efiInstallAsRemovable = true;
+          boot.loader.systemd-boot.enable = true;
+          boot.loader.efi.canTouchEfiVariables = true;
 
           hardware.enableAllHardware = lib.mkForce false;
           hardware.nvidia-jetpack = {
