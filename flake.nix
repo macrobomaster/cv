@@ -95,6 +95,19 @@
             "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
             inputs.jetpack-nixos.nixosModules.default
           ];
+          boot.kernelPatches = [{
+            name = "config";
+            patch = null;
+            extraConfig = ''
+              ARM64_PMEM y
+              PCI_TEGRA y
+              PCIE_TEGRA194 y
+              PCIE_TEGRA194_HOST y
+              BLK_DEV_NVME y
+              NVME_CORE y
+              FB_SIMPLE y
+            '';
+          }];
           hardware.enableAllHardware = lib.mkForce false;
           hardware.nvidia-jetpack = {
             enable = true;
@@ -113,13 +126,24 @@
             ./nix/nixos/disk.nix
           ];
 
-          hardware.enableRedistributableFirmware = true;
+          boot.kernelPatches = [{
+            name = "config";
+            patch = null;
+            extraConfig = ''
+              ARM64_PMEM y
+              PCI_TEGRA y
+              PCIE_TEGRA194 y
+              PCIE_TEGRA194_HOST y
+              BLK_DEV_NVME y
+              NVME_CORE y
+              FB_SIMPLE y
+            '';
+          }];
           boot.initrd.availableKernelModules = [ "nvme" "f2fs" "pcie-tegra194" ];
           boot.supportedFilesystems = [ "f2fs" "vfat" ];
           boot.loader.systemd-boot.enable = true;
           boot.loader.efi.canTouchEfiVariables = true;
 
-          hardware.enableAllHardware = lib.mkForce false;
           hardware.nvidia-jetpack = {
             enable = true;
             som = "orin-nano";
