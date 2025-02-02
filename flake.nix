@@ -93,7 +93,10 @@
                 p: with p; [
                   opencv4
                   pillow
-                  (tinygrad.override { cudaSupport = true; })
+                  ((tinygrad.override { cudaSupport = true; }).overrideAttrs (oldAttrs: {
+                    doCheck = false;
+                    nativeCheckInputs = [];
+                  }))
                   pygobject3
                   pygobject-stubs
                   onnx
