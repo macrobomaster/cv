@@ -96,11 +96,14 @@
                   opencv4
                   pillow
                   (
-                    (tinygrad.overrideAttrs (oldAttrs: {
+                    (tinygrad.override {
+                      cudaSupport = true;
+                      torch = null;
+                    }).overrideAttrs
+                    (oldAttrs: {
                       doCheck = false;
                       nativeCheckInputs = [ ];
-                    })).override
-                    { cudaSupport = true; torch = null; }
+                    })
                   )
                   pygobject3
                   pygobject-stubs
