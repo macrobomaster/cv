@@ -100,7 +100,7 @@
                       doCheck = false;
                       nativeCheckInputs = [ ];
                     })).override
-                    { cudaSupport = true; }
+                    { cudaSupport = true; torch = null; }
                   )
                   pygobject3
                   pygobject-stubs
