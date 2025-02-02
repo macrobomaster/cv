@@ -63,10 +63,12 @@
                   opencv4
                   pillow
                   ((tinygrad.override { rocmSupport = true; }).overrideAttrs (oldAttrs: {
-                    postPatch = oldAttrs.postPatch + ''
-                      substituteInPlace tinygrad/runtime/ops_amd.py --replace '"Too many resources requested: private_segment_size"' 'f"Too many resources requested: private_segment_size: {self.private_segment_size}"'
-                      substituteInPlace tinygrad/runtime/ops_amd.py --replace "self.max_private_segment_size = 4096" "self.max_private_segment_size = 2**14"
-                    '';
+                    postPatch =
+                      oldAttrs.postPatch
+                      + ''
+                        substituteInPlace tinygrad/runtime/ops_amd.py --replace '"Too many resources requested: private_segment_size"' 'f"Too many resources requested: private_segment_size: {self.private_segment_size}"'
+                        substituteInPlace tinygrad/runtime/ops_amd.py --replace "self.max_private_segment_size = 4096" "self.max_private_segment_size = 2**14"
+                      '';
                   }))
                   wandb
                   pygobject3
@@ -93,10 +95,13 @@
                 p: with p; [
                   opencv4
                   pillow
-                  ((tinygrad.override { cudaSupport = true; }).overrideAttrs (oldAttrs: {
-                    doCheck = false;
-                    nativeCheckInputs = [];
-                  }))
+                  (
+                    (tinygrad.overrideAttrs (oldAttrs: {
+                      doCheck = false;
+                      nativeCheckInputs = [ ];
+                    })).override
+                    { cudaSupport = true; }
+                  )
                   pygobject3
                   pygobject-stubs
                   onnx
