@@ -85,6 +85,11 @@
       dnsutils
       nmap
       whois
+
+      # display
+      kitty
+      waypipe
+      weston
     ];
 
     shellAliases = {

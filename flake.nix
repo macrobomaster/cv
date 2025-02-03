@@ -193,6 +193,7 @@
           hardware.graphics.enable = true;
           hardware.nvidia-jetpack = {
             enable = true;
+            modesettings.enable = true;
             som = "orin-nano";
             carrierBoard = "devkit";
           };
