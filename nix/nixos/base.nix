@@ -87,9 +87,9 @@
       whois
 
       # display
-      kitty
       waypipe
       weston
+      foot
     ];
 
     shellAliases = {
