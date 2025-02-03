@@ -156,6 +156,10 @@
   # remove unneeded locales
   i18n.supportedLocales = [ (config.i18n.defaultLocale + "/UTF-8") ];
 
+  # font
+  fonts.fontconfig.enable = true;
+  fonts.enableDefaultPackages = true;
+
   # enable ssh
   services.openssh.enable = lib.mkForce true;
   users.users.root.openssh.authorizedKeys.keys = [
