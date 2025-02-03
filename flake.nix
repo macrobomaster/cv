@@ -119,7 +119,7 @@
               aravis
               aravis.lib
               gobject-introspection
-              llvmPackages_latest.clang
+              llvmPackages_latest.clang-unwrapped
             ];
         };
       };
