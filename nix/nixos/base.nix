@@ -175,7 +175,7 @@
   # firewall
   networking = {
     firewall = {
-      enable = true;
+      enable = false;
       allowPing = true;
       allowedTCPPorts = [ 22 ];
     };
