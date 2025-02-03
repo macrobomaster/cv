@@ -193,4 +193,13 @@
     "net.core.default_qdisc" = "fq";
     "net.ipv4.tcp_congestion_control" = "bbr";
   };
+
+  # weston tweaking
+  environment.etc = {
+    "xdg/weston/weston.ini".text = ''
+      [launcher]
+      icon=a
+      path=/run/current-system/sw/bin/foot
+    '';
+  };
 }
