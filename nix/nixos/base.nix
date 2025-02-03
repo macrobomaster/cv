@@ -113,6 +113,7 @@
   };
   users.defaultUserShell = pkgs.fish;
   programs.command-not-found.enable = false;
+  programs.direnv.enable = true;
 
   # disable manually creating users
   users.mutableUsers = false;
