@@ -85,7 +85,7 @@
               aravis
               aravis.lib
               gobject-introspection
-              llvmPackages_latest.clang
+              llvmPackages_latest.clang-unwrapped
             ];
         };
         aarch64-linux.default = pkgs-aarch64-linux.mkShell {
