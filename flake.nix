@@ -102,7 +102,7 @@
                     }).overrideAttrs
                     (_: {
                       doCheck = false;
-                      checkPhase = ''
+                      pytestCheckPhase = ''
                         echo "Skipping tests"
                       '';
                     })
