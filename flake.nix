@@ -100,9 +100,9 @@
                       cudaSupport = true;
                       torch = null;
                     }).overrideAttrs
-                    (oldAttrs: {
+                    (_: {
                       doCheck = false;
-                      nativeCheckInputs = [ ];
+                      pytestFlagsArray = [];
                     })
                   )
                   pygobject3
