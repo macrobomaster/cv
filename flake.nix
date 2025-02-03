@@ -102,7 +102,9 @@
                     }).overrideAttrs
                     (_: {
                       doCheck = false;
-                      pytestFlagsArray = [];
+                      checkPhase = ''
+                        echo "Skipping tests"
+                      '';
                     })
                   )
                   pygobject3
