@@ -32,7 +32,7 @@ def loader_process(q_in:Queue, q_out:Queue, load_single_fn:Callable, tensors:dic
       # write to shared memory
       for name, t in tensors.items():
         try:
-          t[idx].contiguous().realize().lazydata.realized.as_buffer(force_zero_copy=True)[:] = data[name]
+          t[idx].contiguous().realize().lazydata.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
         except Exception as e:
           print(f"error writing {name} to shared memory: {e}")
           raise e
