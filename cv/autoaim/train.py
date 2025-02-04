@@ -13,45 +13,46 @@ import albumentations as A
 
 from .model import Model
 from .common import get_annotation
-from ..common.tensor import twohot
+from ..common.tensor import twohot, focal_loss
 from ..common import BASE_PATH
 from ..common.optim import CLAMB
 from ..common.image import bgr_to_yuv420
 from ..common.dataloader import batch_load, BatchDesc
 
 # main augments
-A_PIPELINE = A.Compose([
-  A.HorizontalFlip(p=0.5),
-  A.Perspective(p=0.25),
-  A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.1, rotate_limit=45, border_mode=cv2.BORDER_CONSTANT, value=0, p=0.25),
-  A.OneOf([
-    A.RandomCrop(256, 512, p=0.4),
-    A.Compose([
-      A.LongestMaxSize(max_size=512, p=1),
-      A.RandomCrop(256, 512, p=1)
-    ], p=0.6),
-  ], p=1),
-  A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-  A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-  A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
-  A.OneOf([
-    A.RandomGamma(gamma_limit=(80, 120), p=0.5),
-    A.RandomToneCurve(p=0.5),
-  ], p=0.2),
-], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
+if __name__ == "__main__":
+  A_PIPELINE = A.Compose([
+    A.HorizontalFlip(p=0.5),
+    A.Perspective(p=0.25),
+    A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-45, 45), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
+    A.OneOf([
+      A.RandomCrop(256, 512, p=0.4),
+      A.Compose([
+        A.LongestMaxSize(max_size=512, p=1),
+        A.RandomCrop(256, 512, p=1)
+      ], p=0.6),
+    ], p=1),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+    A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
+    A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
+    A.OneOf([
+      A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+      A.RandomToneCurve(p=0.5),
+    ], p=0.2),
+  ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
-# for data with distance we can only do horizontal flips and very small non-affine transforms
-D_PIPELINE = A.Compose([
-  A.HorizontalFlip(p=0.5),
-  A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.01, rotate_limit=10, border_mode=cv2.BORDER_CONSTANT, value=0, p=0.25),
-  A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-  A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-  A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
-  A.OneOf([
-    A.RandomGamma(gamma_limit=(80, 120), p=0.5),
-    A.RandomToneCurve(p=0.5),
-  ], p=0.2),
-], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
+  # for data with distance we can only do horizontal flips and very small non-affine transforms
+  D_PIPELINE = A.Compose([
+    A.HorizontalFlip(p=0.5),
+    A.Affine(translate_percent=(-0.05, 0.05), scale=(0.99, 1.01), rotate=(-5, 5), shear=(-0.5, 0.5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+    A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
+    A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
+    A.OneOf([
+      A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+      A.RandomToneCurve(p=0.5),
+    ], p=0.2),
+  ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
 def get_train_files():
   return glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
@@ -67,11 +68,11 @@ def load_single_file(file):
   x, y = x * img.shape[1], (1 - y) * img.shape[0]
 
   # augment
-  if dist > 0:
-    transformed = D_PIPELINE(image=img, keypoints=[(x, y)])
-  else:
-    transformed = A_PIPELINE(image=img, keypoints=[(x, y)])
-  img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
+  # if dist > 0:
+  #   transformed = D_PIPELINE(image=img, keypoints=[(x, y)])
+  # else:
+  #   transformed = A_PIPELINE(image=img, keypoints=[(x, y)])
+  # img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
 
   # convert to yuv420
   img = bgr_to_yuv420(img)
@@ -82,27 +83,25 @@ def load_single_file(file):
   }
 
 BS = 256
-WARMUP_STEPS = 500
+WARMUP_STEPS = 100
 WARMPUP_LR = 1e-5
 START_LR = 1e-3
 END_LR = 1e-5
 EPOCHS = 10
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
-  p, ce = pred.sigmoid(), pred.binary_crossentropy_logits(y, reduction="none")
-  pt = p * y + (1 - p) * (1 - y)
-  alpha_ = y * alpha + (1 - y) * (1 - alpha)
-  loss = ce * ((1 - pt) ** gamma) * alpha_
-  return loss.mean()
+def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean") -> Tensor:
+  assert reduction == "mean", "only mean reduction is supported"
+  ce = pred.cross_entropy(y, reduction="none")
+  return (ce * mask).sum() / mask.sum().add(1e-6)
 
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
   cl_loss = focal_loss(pred[0], y[:, 0].cast(dtypes.int32).one_hot(2))
-  x_loss = (pred[1].cross_entropy(twohot(y[:, 1], 512), reduction="none") * y[:, 0].detach()).mean()
-  y_loss = (pred[2].cross_entropy(twohot(y[:, 2], 256), reduction="none") * y[:, 0].detach()).mean()
-  dist_loss = (y[:, 3] > 0).detach().where(pred[3].cross_entropy(twohot(y[:, 3] * 10, 200), reduction="none") * y[:, 0].detach(), 0.0).mean()
+  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1], 512), y[:, 0])
+  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2], 256), y[:, 0])
+  # dist_loss = (y[:, 3] > 0).detach().where(pred[3].cross_entropy(twohot(y[:, 3] * 10, 200), reduction="none") * y[:, 0].detach(), 0.0).mean()
 
-  return cl_loss + x_loss + y_loss + dist_loss
+  return cl_loss + x_loss + y_loss# + dist_loss
 
 @TinyJit
 def train_step(x, y, lr):
