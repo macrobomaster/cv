@@ -8,8 +8,7 @@ from ..common import BASE_PATH
 
 @TinyJit
 def pred(model, img):
-  cl, cl_prob, x, y, dist = model(img)
-  return cl, cl_prob, x, y, dist
+  return model(img)
 
 @dataclass
 class Annotation:
