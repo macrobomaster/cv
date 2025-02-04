@@ -62,14 +62,7 @@
                   albumentations
                   opencv4
                   pillow
-                  ((tinygrad.override { rocmSupport = true; }).overrideAttrs (oldAttrs: {
-                    postPatch =
-                      oldAttrs.postPatch
-                      + ''
-                        substituteInPlace tinygrad/runtime/ops_amd.py --replace '"Too many resources requested: private_segment_size"' 'f"Too many resources requested: private_segment_size: {self.private_segment_size}"'
-                        substituteInPlace tinygrad/runtime/ops_amd.py --replace "self.max_private_segment_size = 4096" "self.max_private_segment_size = 2**14"
-                      '';
-                  }))
+                  (tinygrad.override { rocmSupport = true; })
                   wandb
                   pygobject3
                   pygobject-stubs
