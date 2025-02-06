@@ -40,6 +40,8 @@ if __name__ == "__main__":
     # increase brightness
     img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
     yuv = bgr_to_yuv420(img)
+    pt = time.perf_counter() - st
+    print(f"frame aquisition time: {pt:.3f}")
 
     # run model
     yuvt = Tensor(np.array([yuv], dtype=np.uint8))
