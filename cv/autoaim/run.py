@@ -45,7 +45,7 @@ if __name__ == "__main__":
     print(f"frame aquisition time: {pt:.3f}")
 
     # run model
-    yuvt = Tensor(np.array([yuv], dtype=np.uint8))
+    yuvt = Tensor(np.expand_dims(yuv, 0), dtype=dtypes.uint8)
     detected, det_prob, x, y, dist = pred(model, yuvt)
     detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
 
