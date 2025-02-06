@@ -39,11 +39,13 @@ if __name__ == "__main__":
     # increase brightness
     # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
     pt = time.perf_counter() - spt
-    print(f"frame aquisition time: {pt:.3f}")
 
     # run model
+    smt = time.perf_counter()
     detected, det_prob, x, y, dist = pred(model, Tensor(img))
     detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
+    mt = time.perf_counter() - smt
+    print(f"frame aquisition time: {pt:.3f}, model time: {mt:.3f}")
 
     dt = time.perf_counter() - st
     st = time.perf_counter()
