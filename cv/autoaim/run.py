@@ -16,7 +16,8 @@ from ..common.image import bgr_to_yuv420
 if __name__ == "__main__":
   Tensor.no_grad = True
   Tensor.training = False
-  dtypes.default_float = dtypes.float16
+  if getenv("HALF", 0) == 1:
+    dtypes.default_float = dtypes.float16
 
   cam, strm = setup_aravis()
 
