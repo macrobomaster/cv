@@ -35,11 +35,9 @@ if __name__ == "__main__":
     file = preprocessed_train_files[i]
     img = cv2.imread(file)
     img = cv2.resize(img, (512, 256))
-    yuv = bgr_to_yuv420(img)
 
     # predict
-    yuvt = Tensor(np.array([yuv], dtype=np.uint8))
-    detected, det_prob, x, y, dist = pred(model, yuvt)
+    detected, det_prob, x, y, dist = pred(model, Tensor(img))
     detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
 
     # draw the annotation

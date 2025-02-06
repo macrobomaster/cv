@@ -5,10 +5,12 @@ import csv
 from tinygrad.engine.jit import TinyJit
 
 from ..common import BASE_PATH
+from ..common.image import bgr_to_yuv420_tensor
 
 @TinyJit
 def pred(model, img):
-  return model(img)
+  yuv = bgr_to_yuv420_tensor(img.unsqueeze(0))
+  return model(yuv)
 
 @dataclass
 class Annotation:

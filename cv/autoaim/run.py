@@ -40,13 +40,11 @@ if __name__ == "__main__":
     img = cv2.resize(img, (512, 256))
     # increase brightness
     # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
-    yuv = bgr_to_yuv420(img)
     pt = time.perf_counter() - spt
     print(f"frame aquisition time: {pt:.3f}")
 
     # run model
-    yuvt = Tensor(np.expand_dims(yuv, 0), dtype=dtypes.uint8)
-    detected, det_prob, x, y, dist = pred(model, yuvt)
+    detected, det_prob, x, y, dist = pred(model, Tensor(img))
     detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
 
     dt = time.perf_counter() - st
