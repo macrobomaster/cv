@@ -70,8 +70,6 @@
                   onnxruntime
                   torchvision
                   transformers
-                  pyvips
-                  einops
                   (p.buildPythonPackage rec {
                     pname = "moondream";
                     version = "0.0.6";
@@ -92,6 +90,8 @@
                       onnxruntime
                       pillow
                       tokenizers
+                      pyvips
+                      einops
                     ];
                     doCheck = false;
                   })
@@ -129,7 +129,6 @@
                   pygobject3
                   pygobject-stubs
                   onnx
-                  transformers
                 ];
               python = pkgs-aarch64-linux.python312;
             in
