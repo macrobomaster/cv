@@ -3,7 +3,7 @@ import time
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
-from tinygrad.helpers import GlobalCounters
+from tinygrad.helpers import GlobalCounters, getenv
 import cv2
 import numpy as np
 
@@ -16,16 +16,18 @@ from ..common.image import bgr_to_yuv420
 if __name__ == "__main__":
   Tensor.no_grad = True
   Tensor.training = False
+  dtypes.default_float = dtypes.float16
 
   cam, strm = setup_aravis()
 
   model = Model()
   state_dict = safe_load(str(BASE_PATH / "model.safetensors"))
   load_state_dict(model, state_dict)
-  for key, param in get_state_dict(model).items():
-    if "norm" in key: continue
-    if ".n" in key: continue
-    param.replace(param.half()).realize()
+  if getenv("HALF", 0) == 1:
+    for key, param in get_state_dict(model).items():
+      if "norm" in key: continue
+      if ".n" in key: continue
+      param.replace(param.half()).realize()
 
   st = time.perf_counter()
   while True:
