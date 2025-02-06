@@ -57,5 +57,8 @@ def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
 def norm(x:Tensor, axis:int|None=None, keepdim:bool=False) -> Tensor:
   return x.square().sum(axis, keepdim=keepdim).sqrt()
 
+def rms_norm(x:Tensor, axis:int|None=-1, eps:float=1e-6) -> Tensor:
+  return x * x.square().mean(axis, keepdim=True).add(eps).rsqrt()
+
 def telu(x:Tensor) -> Tensor:
   return x * x.exp().tanh()
