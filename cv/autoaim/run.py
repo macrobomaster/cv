@@ -34,13 +34,14 @@ if __name__ == "__main__":
   while True:
     GlobalCounters.reset()
 
+    spt = time.perf_counter()
     img = get_aravis_frame(cam, strm)
     # resize and convert to yuv
     img = cv2.resize(img, (512, 256))
     # increase brightness
     img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
     yuv = bgr_to_yuv420(img)
-    pt = time.perf_counter() - st
+    pt = time.perf_counter() - spt
     print(f"frame aquisition time: {pt:.3f}")
 
     # run model
