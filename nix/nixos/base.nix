@@ -202,4 +202,8 @@
       path=/run/current-system/sw/bin/foot
     '';
   };
+
+  # containers
+  virtualsation.podman.enable = true;
+  virtualsation.podman.enableNvidia = true;
 }
