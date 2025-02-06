@@ -23,7 +23,7 @@ def bgr_to_yuv420(img):
 def bgr_to_yuv420_tensor(img:Tensor) -> Tensor:
   coeffs = Tensor([[0.299, 0.587, 0.114],
                    [-0.168736, -0.331264, 0.5],
-                   [0.5, -0.418688, -0.081312]]).reshape(3, 3)
+                   [0.5, -0.418688, -0.081312]])
   yuv = img[:, :, :, ::-1].matmul(coeffs.T)
   yuv = yuv.add(Tensor([0, 128, 128]))
 
