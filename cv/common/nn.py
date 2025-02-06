@@ -1,8 +1,10 @@
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.device import is_dtype_supported
-from tinygrad.helpers import prod
+from tinygrad.helpers import prod, round_up
 from tinygrad import nn
+
+from .tensor import rms_norm
 
 class BatchNorm:
   def __init__(self, sz:int, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
@@ -87,23 +89,62 @@ class SE:
   def __init__(self, dim:int, cmid:int):
     self.cv1 = nn.Conv2d(dim, cmid, kernel_size=1, bias=False)
     self.cv2 = nn.Conv2d(cmid, dim, kernel_size=1, bias=False)
-  def __call__(self, x: Tensor):
+
+  def __call__(self, x:Tensor):
     xx = x.mean((2, 3), keepdim=True)
     xx = self.cv1(xx).relu()
     xx = self.cv2(xx).sigmoid()
     return x * xx
 
+class SRM:
+  def __init__(self, dim:int):
+    self.cv1 = nn.Conv2d(dim, dim, kernel_size=(1, 2), bias=False)
+    self.cv2 = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    b, c, _, _ = x.shape
+    mean = x.flatten(2).mean(2).reshape(b, c, 1, 1)
+    std = x.flatten(2).std(2).reshape(b, c, 1, 1)
+    u = mean.cat(std, dim=3)
+    xx = self.cv1(u).relu()
+    xx = self.cv2(xx).sigmoid()
+    return x * xx
+
 class Attention:
-  def __init__(self, dim:int, qk_dim:int, heads:int=8):
+  def __init__(self, dim:int, qk_dim:int, heads:int):
     self.dim, self.qk_dim, self.heads = dim, qk_dim, heads
-    self.qkv = nn.Linear(dim, qk_dim * 2 + dim)
-    self.out = nn.Linear(dim, dim)
+    self.qkv = nn.Linear(dim, qk_dim * 2 + dim, bias=False)
+    self.out = nn.Linear(dim, dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     b, t, c = x.shape
     q, k, v = self.qkv(x).split([self.qk_dim, self.qk_dim, self.dim], dim=-1)
-    q = q.reshape(b, t, self.heads, self.qk_dim // self.heads).transpose(1, 2)
-    k = k.reshape(b, t, self.heads, self.qk_dim // self.heads).transpose(1, 2)
+    q = rms_norm(q.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
+    k = rms_norm(k.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
     v = v.reshape(b, t, self.heads, c // self.heads).transpose(1, 2)
     attn = Tensor.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(b, t, c)
     return self.out(attn)
+
+class RecConv:
+  """
+  Recursive Convolution Module
+
+  See: https://arxiv.org/pdf/2412.19628v1
+  """
+  def __init__(self, dim:int, kernel_size:int, levels:int=2):
+    assert kernel_size % 2 == 1, "kernel_size must be odd"
+    self.levels = levels
+    self.down = nn.Conv2d(dim, dim, kernel_size, 2, kernel_size//2, groups=dim, bias=False)
+    self.convs = [nn.Conv2d(dim, dim, kernel_size, 1, kernel_size//2, groups=dim, bias=False) for _ in range(levels + 1)]
+    self.up = nn.ConvTranspose2d(dim, dim, round_up(kernel_size, 2), 2, kernel_size//2, groups=dim, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    features = [x]
+    for _ in range(self.levels):
+      features.append(self.down(features[-1]))
+
+    x = self.convs[-1](features[-1])
+    for f, conv in zip(reversed(features[:-1]), reversed(self.convs[:-1])):
+      x = conv(self.up(x) + f)
+
+    return x
