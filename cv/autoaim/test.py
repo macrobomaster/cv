@@ -5,12 +5,10 @@ from tinygrad.dtype import dtypes
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from tinygrad.helpers import GlobalCounters, getenv
 import cv2
-import numpy as np
 
 from .model import Model
 from .common import pred
 from ..common import BASE_PATH
-from ..common.image import bgr_to_yuv420
 
 if __name__ == "__main__":
   Tensor.no_grad = True
