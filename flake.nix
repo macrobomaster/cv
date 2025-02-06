@@ -69,6 +69,32 @@
                   onnx
                   onnxruntime
                   torchvision
+                  transformers
+                  pyvips
+                  einops
+                  (p.buildPythonPackage rec {
+                    pname = "moondream";
+                    version = "0.0.6";
+                    pyproject = true;
+                    src = pkgs-x86_64-linux.fetchPypi {
+                      inherit pname version;
+                      hash = "sha256-uSN2dTCvmWkzDRCsTQeNIFZot4SCVm0Jo4lyKYjqaP4=";
+                    };
+                    pythonRelaxDeps = [
+                      "onnxruntime"
+                      "pillow"
+                      "tokenizers"
+                    ];
+                    nativeBuildInputs = with p; [poetry-core];
+                    propagatedBuildInputs = with p; [
+                      numpy
+                      onnx
+                      onnxruntime
+                      pillow
+                      tokenizers
+                    ];
+                    doCheck = false;
+                  })
                 ];
               python = pkgs-x86_64-linux.python312;
             in
@@ -103,6 +129,7 @@
                   pygobject3
                   pygobject-stubs
                   onnx
+                  transformers
                 ];
               python = pkgs-aarch64-linux.python312;
             in
