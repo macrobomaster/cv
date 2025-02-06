@@ -25,7 +25,7 @@ if __name__ == "__main__":
   for key, param in get_state_dict(model).items():
     if "norm" in key: continue
     if ".n" in key: continue
-    param.replace(param.half())
+    param.replace(param.half()).realize()
 
   st = time.perf_counter()
   while True:
