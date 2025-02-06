@@ -204,6 +204,6 @@
   };
 
   # containers
-  virtualsation.podman.enable = true;
-  virtualsation.podman.enableNvidia = true;
+  virtualisation.podman.enable = true;
+  virtualisation.podman.enableNvidia = true;
 }
