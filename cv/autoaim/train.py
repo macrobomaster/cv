@@ -68,11 +68,11 @@ def load_single_file(file):
   x, y = x * img.shape[1], (1 - y) * img.shape[0]
 
   # augment
-  # if dist > 0:
-  #   transformed = D_PIPELINE(image=img, keypoints=[(x, y)])
-  # else:
-  #   transformed = A_PIPELINE(image=img, keypoints=[(x, y)])
-  # img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
+  if dist > 0:
+    transformed = D_PIPELINE(image=img, keypoints=[(x, y)])
+  else:
+    transformed = A_PIPELINE(image=img, keypoints=[(x, y)])
+  img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
 
   # convert to yuv420
   img = bgr_to_yuv420(img)
@@ -87,21 +87,21 @@ WARMUP_STEPS = 100
 WARMPUP_LR = 1e-5
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 10
+EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean") -> Tensor:
   assert reduction == "mean", "only mean reduction is supported"
   ce = pred.cross_entropy(y, reduction="none")
-  return (ce * mask).sum() / mask.sum().add(1e-6)
+  return mask.where(ce, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
 
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
   cl_loss = focal_loss(pred[0], y[:, 0].cast(dtypes.int32).one_hot(2))
-  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1], 512), y[:, 0])
-  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2], 256), y[:, 0])
-  # dist_loss = (y[:, 3] > 0).detach().where(pred[3].cross_entropy(twohot(y[:, 3] * 10, 200), reduction="none") * y[:, 0].detach(), 0.0).mean()
+  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1], 512), (y[:, 0] > 0).detach())
+  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2], 256), (y[:, 0] > 0).detach())
+  dist_loss = masked_cross_entropy(pred[3], twohot(y[:, 3] * 16, 256), ((y[:, 0] > 0) & (y[:, 3] > 0)).detach())
 
-  return cl_loss + x_loss + y_loss# + dist_loss
+  return cl_loss + x_loss + y_loss + dist_loss
 
 @TinyJit
 def train_step(x, y, lr):
