@@ -21,18 +21,22 @@ def bgr_to_yuv420(img):
   return np.stack([y0, y1, y2, y3, u, v], axis=-1)
 
 def bgr_to_yuv420_tensor(img:Tensor) -> Tensor:
-  coeffs = Tensor([[0.299, 0.587, 0.114],
+  if not hasattr(bgr_to_yuv420_tensor, "coeffs"):
+    coeffs = Tensor([[0.299, 0.587, 0.114],
                    [-0.168736, -0.331264, 0.5],
                    [0.5, -0.418688, -0.081312]])
+    setattr(bgr_to_yuv420_tensor, "coeffs", coeffs)
+  else:
+    coeffs = getattr(bgr_to_yuv420_tensor, "coeffs")
+
   yuv = img[:, :, :, ::-1].matmul(coeffs.T)
-  yuv = yuv.add(Tensor([0, 128, 128]))
 
   y0 = yuv[:, ::2, ::2, 0]
   y1 = yuv[:, 1::2, ::2, 0]
   y2 = yuv[:, ::2, 1::2, 0]
   y3 = yuv[:, 1::2, 1::2, 0]
-  u = yuv[:, :, :, 1].avg_pool2d(2, 2)
-  v = yuv[:, :, :, 2].avg_pool2d(2, 2)
+  u = yuv[:, :, :, 1].add(128).avg_pool2d(2, 2)
+  v = yuv[:, :, :, 2].add(128).avg_pool2d(2, 2)
 
   return Tensor.stack(y0, y1, y2, y3, u, v, dim=-1).clamp(0, 255).cast(dtypes.uint8)
 

@@ -1,3 +1,4 @@
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 import csv
@@ -7,7 +8,7 @@ from tinygrad.engine.jit import TinyJit
 from ..common import BASE_PATH
 from ..common.image import bgr_to_yuv420_tensor
 
-@TinyJit
+@partial(TinyJit, prune=True)
 def pred(model, img):
   yuv = bgr_to_yuv420_tensor(img.unsqueeze(0))
   return model(yuv)
