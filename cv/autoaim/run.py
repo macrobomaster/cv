@@ -20,9 +20,7 @@ def frame_thread_fn(stop_event: threading.Event, frame_queue: Queue):
     sft = time.perf_counter()
     img = get_aravis_frame(cam, strm)
     # resize and convert to yuv
-    img = cv2.resize(img, (512, 256))
-    # increase brightness
-    # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
+    img = cv2.resize(img, (512, 256), interpolation=cv2.INTER_NEAREST)
     ft = time.perf_counter() - sft
     frame_queue.put((img, ft))
 

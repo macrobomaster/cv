@@ -10,7 +10,11 @@ from ..common.image import bgr_to_yuv420_tensor
 
 @partial(TinyJit, prune=True)
 def pred(model, img):
-  yuv = bgr_to_yuv420_tensor(img.unsqueeze(0))
+  if img.ndim == 3: img = img.unsqueeze(0)
+  if img.shape[3] == 3:
+    yuv = bgr_to_yuv420_tensor(img)
+  else:
+    yuv = img
   return model(yuv)
 
 @dataclass
