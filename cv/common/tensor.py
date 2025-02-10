@@ -47,11 +47,18 @@ def twohot(x:Tensor, bins:int) -> Tensor:
   th = th + (ar == k1.reshape(x.shape[0], 1)).where(w_above.reshape(x.shape[0], 1), 0)
   return th
 
-def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2):
+def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2) -> Tensor:
   p, ce = pred.sigmoid(), pred.binary_crossentropy_logits(y, reduction="none")
   pt = p * y + (1 - p) * (1 - y)
   alpha_ = y * alpha + (1 - y) * (1 - alpha)
   loss = ce * ((1 - pt) ** gamma) * alpha_
+  return loss.mean()
+
+def mal_loss(pred:Tensor, y:Tensor, score:Tensor, gamma:float=1.5) -> Tensor:
+  target = ((score * y) ** gamma)
+  p, ce = pred.sigmoid(), pred.binary_crossentropy_logits(target, reduction="none")
+  weight = (1 - y) * (p ** gamma) + y
+  loss = weight * ce
   return loss.mean()
 
 def norm(x:Tensor, axis:int|None=None, keepdim:bool=False) -> Tensor:
