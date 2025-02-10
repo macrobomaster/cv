@@ -35,7 +35,7 @@ if __name__ == "__main__":
     dtypes.default_float = dtypes.float16
 
   stop_event = threading.Event()
-  frame_queue = Queue(maxsize=1)
+  frame_queue = Queue(maxsize=2)
   frame_thread = threading.Thread(target=frame_thread_fn, args=(stop_event, frame_queue), daemon=True)
   frame_thread.start()
 
@@ -93,5 +93,5 @@ if __name__ == "__main__":
   cv2.destroyAllWindows()
 
   stop_event.set()
-  _ = frame_queue.get()
+  while not frame_queue.empty(): _ = frame_queue.get()
   frame_thread.join()
