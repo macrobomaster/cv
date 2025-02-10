@@ -16,7 +16,7 @@ from .common import get_annotation
 from ..common.tensor import twohot, focal_loss
 from ..common import BASE_PATH
 from ..common.optim import CLAMB
-from ..common.image import bgr_to_yuv420
+from ..common.image import bgr_to_yuv420_tensor
 from ..common.dataloader import batch_load, BatchDesc
 
 # main augments
@@ -65,7 +65,7 @@ def load_single_file(file):
   detected, x, y, dist = anno.detected, anno.x, anno.y, anno.dist
 
   # transform points
-  x, y = x * img.shape[1], (1 - y) * img.shape[0]
+  x, y = x * (img.shape[1] - 1), (1 - y) * (img.shape[0] - 1)
 
   # augment
   if dist > 0:
@@ -74,20 +74,17 @@ def load_single_file(file):
     transformed = A_PIPELINE(image=img, keypoints=[(x, y)])
   img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
 
-  # convert to yuv420
-  img = bgr_to_yuv420(img)
-
   return {
     "x": img.tobytes(),
     "y": np.array((detected, x, y, dist), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
   }
 
 BS = 256
-WARMUP_STEPS = 100
+WARMUP_STEPS = 500
 WARMPUP_LR = 1e-5
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 50
+EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean") -> Tensor:
@@ -97,21 +94,33 @@ def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean
 
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
   cl_loss = focal_loss(pred[0], y[:, 0].cast(dtypes.int32).one_hot(2))
-  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1], 512), (y[:, 0] > 0).detach())
-  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2], 256), (y[:, 0] > 0).detach())
-  dist_loss = masked_cross_entropy(pred[3], twohot(y[:, 3] * 16, 256), ((y[:, 0] > 0) & (y[:, 3] > 0)).detach())
+
+  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1] / 4, 128), (y[:, 0] > 0).detach())
+  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2] / 4, 64), (y[:, 0] > 0).detach())
+
+  dist_loss = masked_cross_entropy(pred[3], twohot(y[:, 3] * 4, 64), ((y[:, 0] > 0) & (y[:, 3] > 0)).detach())
 
   return cl_loss + x_loss + y_loss + dist_loss
 
 @TinyJit
 def train_step(x, y, lr):
-  pred = model(x)
+  yuv = bgr_to_yuv420_tensor(x)
+
+  pred = model(yuv)
   loss = loss_fn(pred, y)
 
   optim.lr.assign(lr)
   optim.zero_grad()
   loss.backward()
   optim.step()
+
+  if getenv("NAN", 0):
+    gsums = {k: v.grad.square().sum() for k,v in get_state_dict(model).items() if v.grad is not None}
+    wsums = {k: v.square().sum() for k,v in get_state_dict(model).items() if v.grad is not None}
+    loss = loss.float().realize()
+    for s in gsums.values(): s.realize()
+    for s in wsums.values(): s.realize()
+    return loss, gsums, wsums
 
   return loss.float().realize()
 
@@ -127,7 +136,7 @@ def get_lr(step:int) -> float:
 if __name__ == "__main__":
   Tensor.no_grad = False
   Tensor.training = True
-  # dtypes.default_float = dtypes.float16
+  dtypes.default_float = dtypes.float32
 
   if getenv("WANDB", 0):
     wandb.init(project="mrm_cv_autoaim")
@@ -159,7 +168,7 @@ if __name__ == "__main__":
   for epoch in trange(EPOCHS):
     batch_iter = iter(tqdm(batch_load(
       {
-        "x": BatchDesc(shape=(128, 256, 6), dtype=dtypes.uint8),
+        "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
         "y": BatchDesc(shape=(4,), dtype=dtypes.default_float),
       },
       load_single_file, get_train_files, bs=BS, shuffle=True,
@@ -171,6 +180,8 @@ if __name__ == "__main__":
 
       lr = get_lr(steps)
       loss = train_step(proc[0], proc[1], Tensor([lr], dtype=dtypes.float32))
+      if getenv("NAN", 0):
+        loss, gsums, wsums = loss
       pt = time.perf_counter()
 
       try: next_proc = single_batch(batch_iter)
@@ -178,6 +189,22 @@ if __name__ == "__main__":
       dt = time.perf_counter()
 
       loss = loss.item()
+      if getenv("NAN", 0):
+        # check for NaNs
+        has_nan = False
+        for p,s in gsums.items():
+          if math.isnan(s.item()):
+            print(f"{p}.grad: NaN")
+            has_nan = True
+          else:
+            print(f"{p}.grad: {math.sqrt(s.item())}")
+        for p,s in wsums.items():
+          if math.isnan(s.item()):
+            print(f"{p}: NaN")
+            has_nan = True
+          else:
+            print(f"{p}: {math.sqrt(s.item())}")
+        if has_nan: exit(1)
       at = time.perf_counter()
 
       tqdm.write(
