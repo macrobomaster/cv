@@ -51,6 +51,7 @@ if __name__ == "__main__":
   st = time.perf_counter()
   img, ft = frame_queue.get()
   imgt = Tensor(img, dtype=dtypes.uint8)
+  print(f"first frame aquisition time: {ft:.3f}")
   try:
     while True:
       GlobalCounters.reset()
