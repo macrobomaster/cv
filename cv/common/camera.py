@@ -17,6 +17,7 @@ def setup_aravis():
   print(f"using {Aravis.get_device_id(0)}")
   cam = Aravis.Camera.new(Aravis.get_device_id(0))
   cam.stop_acquisition()
+  cam.stop_acquisition()
   dev = cam.get_device()
   dev.set_string_feature_value("UserSetSelector", "Default")
   dev.execute_command("UserSetLoad")

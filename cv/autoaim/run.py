@@ -49,7 +49,8 @@ if __name__ == "__main__":
       param.replace(param.half()).realize()
 
   st = time.perf_counter()
-  img, imgt, ft = frame_queue.get()
+  img, ft = frame_queue.get()
+  imgt = Tensor(img, dtype=dtypes.uint8)
   try:
     while True:
       GlobalCounters.reset()
