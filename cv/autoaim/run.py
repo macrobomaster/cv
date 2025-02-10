@@ -13,15 +13,15 @@ from ..common import BASE_PATH
 from ..common.camera import setup_aravis, get_aravis_frame
 
 def frame():
-  spt = time.perf_counter()
+  sft = time.perf_counter()
   img = get_aravis_frame(cam, strm)
   # resize and convert to yuv
   img = cv2.resize(img, (512, 256))
   # increase brightness
   # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
   imgt = Tensor(img).to(Device.DEFAULT).realize()
-  pt = time.perf_counter() - spt
-  return img, imgt, pt
+  ft = time.perf_counter() - sft
+  return img, imgt, ft
 
 if __name__ == "__main__":
   Tensor.no_grad = True
@@ -40,25 +40,27 @@ if __name__ == "__main__":
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
-  img, imgt, pt = frame()
+  img, imgt, ft = frame()
   st = time.perf_counter()
   while True:
     GlobalCounters.reset()
 
     # run model
-    smt = time.perf_counter()
+    spt = time.perf_counter()
     detected, det_prob, x, y, dist = pred(model, imgt)
-    mt = time.perf_counter() - smt
+    pt = time.perf_counter() - spt
 
     # get new frame while model is running
-    img, imgt, pt = frame()
+    img, imgt, ft = frame()
 
     # copy from gpu to cpu
+    smt = time.perf_counter()
     detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
+    mt = time.perf_counter() - smt
 
     dt = time.perf_counter() - st
     st = time.perf_counter()
-    print(f"frame aquisition time: {pt:.3f}, model time: {mt:.3f}, total time: {dt:.3f}")
+    print(f"frame aquisition time: {ft:.3f}, python time: {pt:.3f}, model time: {mt:.3f}, total time: {dt:.3f}")
     cv2.putText(img, f"{1/dt:.2f} FPS", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (55, 250, 55), 1)
 
     # draw the annotation
