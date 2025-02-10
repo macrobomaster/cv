@@ -12,7 +12,8 @@ while i < len(preprocessed_train_files):
   img = cv2.imread(file)
 
   # get the annotation
-  detected, x, y, dist = get_annotation(file)
+  anno = get_annotation(file)
+  detected, x, y, dist = anno.detected, anno.x, anno.y, anno.dist
 
   # draw the annotation
   if detected:
@@ -26,6 +27,8 @@ while i < len(preprocessed_train_files):
   elif key == ord("a"):
     i -= 1
     if i < 0: i = len(preprocessed_train_files) - 1
+  elif key == ord("f"):
+    i += 100
   else: i += 1
 
 cv2.destroyAllWindows()
