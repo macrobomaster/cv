@@ -23,9 +23,8 @@ def frame_thread_fn(stop_event: threading.Event, frame_queue: Queue):
     img = cv2.resize(img, (512, 256))
     # increase brightness
     # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
-    imgt = Tensor(img)
     ft = time.perf_counter() - sft
-    frame_queue.put((img, imgt, ft))
+    frame_queue.put((img, ft))
 
   cam.stop_acquisition()
 
@@ -60,7 +59,8 @@ if __name__ == "__main__":
       detected, det_prob, x, y, dist = pred(model, imgt)
       pt = time.perf_counter() - spt
 
-      img, imgt, ft = frame_queue.get()
+      img, ft = frame_queue.get()
+      imgt = Tensor(img, dtype=dtypes.uint8)
 
       # copy from gpu to cpu
       smt = time.perf_counter()
