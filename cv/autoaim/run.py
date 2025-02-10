@@ -56,15 +56,15 @@ if __name__ == "__main__":
 
       # run model
       spt = time.perf_counter()
-      detected, det_prob, x, y, dist = pred(model, imgt)
+      model_out = pred(model, imgt).numpy()[0]
       pt = time.perf_counter() - spt
 
       img, ft = frame_queue.get()
-      imgt = Tensor(img, dtype=dtypes.uint8)
+      imgt = Tensor(img, dtype=dtypes.uint8, device="NPY")
 
       # copy from gpu to cpu
       smt = time.perf_counter()
-      detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
+      detected, det_prob, x, y, dist = model_out[0], model_out[1], model_out[2], model_out[3], model_out[4]
       mt = time.perf_counter() - smt
 
       dt = time.perf_counter() - st

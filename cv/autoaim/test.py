@@ -35,8 +35,8 @@ if __name__ == "__main__":
     img = cv2.resize(img, (512, 256))
 
     # predict
-    detected, det_prob, x, y, dist = pred(model, Tensor(img))
-    detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
+    model_out = pred(model, Tensor(img, device="NPY")).numpy()[0]
+    detected, det_prob, x, y, dist = model_out[0], model_out[1], model_out[2], model_out[3], model_out[4]
 
     # draw the annotation
     cv2.putText(img, f"{detected}: {det_prob:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)

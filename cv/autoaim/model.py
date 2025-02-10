@@ -201,18 +201,24 @@ class Heads:
     self.dist_head = Head(in_dim, 64, 64)
 
   def __call__(self, f:Tensor):
-    cl = self.cls_head(f),
+    cl = self.cls_head(f)
     x = self.x_head(f)
     y = self.y_head(f)
     dist = self.dist_head(f)
 
     if not Tensor.training:
-      cl = (cl[0].sigmoid().argmax(1), cl[0].sigmoid()[:, cl[0].argmax(1)])
-      x = (x.softmax() @ Tensor.arange(128)).float() * 4
-      y = (y.softmax() @ Tensor.arange(64)).float() * 4
-      dist = (dist.softmax() @ Tensor.arange(64)).float() / 4
+      cl = cl.sigmoid()
+      cla = cl.argmax(1)
+      clp = cl[:, cla]
+      cla = cla.unsqueeze(1)
 
-    return *cl, x, y, dist
+      x = (x.softmax() @ Tensor.arange(128).unsqueeze(1)).float() * 4
+      y = (y.softmax() @ Tensor.arange(64).unsqueeze(1)).float() * 4
+      dist = (dist.softmax() @ Tensor.arange(64).unsqueeze(1)).float() / 4
+
+      return Tensor.cat(cla, clp, x, y, dist, dim=1)
+
+    return cl, x, y, dist
 
 class Model:
   def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2]):

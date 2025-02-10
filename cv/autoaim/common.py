@@ -4,18 +4,20 @@ from pathlib import Path
 import csv
 
 from tinygrad.engine.jit import TinyJit
+from tinygrad.device import Device
 
 from ..common import BASE_PATH
 from ..common.image import bgr_to_yuv420_tensor
 
 @partial(TinyJit, prune=True)
 def pred(model, img):
+  img = img.to(Device.DEFAULT)
   if img.ndim == 3: img = img.unsqueeze(0)
   if img.shape[3] == 3:
     yuv = bgr_to_yuv420_tensor(img)
   else:
     yuv = img
-  return model(yuv)
+  return model(yuv).to("CLANG")
 
 @dataclass
 class Annotation:
