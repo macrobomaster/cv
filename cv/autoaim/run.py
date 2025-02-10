@@ -1,4 +1,5 @@
-import time
+import time, threading
+from queue import Queue
 
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
@@ -12,16 +13,21 @@ from .common import pred
 from ..common import BASE_PATH
 from ..common.camera import setup_aravis, get_aravis_frame
 
-def frame():
-  sft = time.perf_counter()
-  img = get_aravis_frame(cam, strm)
-  # resize and convert to yuv
-  img = cv2.resize(img, (512, 256))
-  # increase brightness
-  # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
-  imgt = Tensor(img).to(Device.DEFAULT).realize()
-  ft = time.perf_counter() - sft
-  return img, imgt, ft
+def frame_thread_fn(stop_event: threading.Event, frame_queue: Queue):
+  cam, strm = setup_aravis()
+
+  while not stop_event.is_set():
+    sft = time.perf_counter()
+    img = get_aravis_frame(cam, strm)
+    # resize and convert to yuv
+    img = cv2.resize(img, (512, 256))
+    # increase brightness
+    # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
+    imgt = Tensor(img)
+    ft = time.perf_counter() - sft
+    frame_queue.put((img, imgt, ft))
+
+  cam.stop_acquisition()
 
 if __name__ == "__main__":
   Tensor.no_grad = True
@@ -29,7 +35,10 @@ if __name__ == "__main__":
   if getenv("HALF", 0) == 1:
     dtypes.default_float = dtypes.float16
 
-  cam, strm = setup_aravis()
+  stop_event = threading.Event()
+  frame_queue = Queue(maxsize=2)
+  frame_thread = threading.Thread(target=frame_thread_fn, args=(stop_event, frame_queue), daemon=True)
+  frame_thread.start()
 
   model = Model()
   state_dict = safe_load(str(BASE_PATH / "model.safetensors"))
@@ -40,42 +49,46 @@ if __name__ == "__main__":
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
-  img, imgt, ft = frame()
   st = time.perf_counter()
-  while True:
-    GlobalCounters.reset()
+  img, imgt, ft = frame_queue.get()
+  try:
+    while True:
+      GlobalCounters.reset()
 
-    # run model
-    spt = time.perf_counter()
-    detected, det_prob, x, y, dist = pred(model, imgt)
-    pt = time.perf_counter() - spt
+      # run model
+      spt = time.perf_counter()
+      detected, det_prob, x, y, dist = pred(model, imgt)
+      pt = time.perf_counter() - spt
 
-    # get new frame while model is running
-    img, imgt, ft = frame()
+      img, imgt, ft = frame_queue.get()
 
-    # copy from gpu to cpu
-    smt = time.perf_counter()
-    detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
-    mt = time.perf_counter() - smt
+      # copy from gpu to cpu
+      smt = time.perf_counter()
+      detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
+      mt = time.perf_counter() - smt
 
-    dt = time.perf_counter() - st
-    st = time.perf_counter()
-    print(f"frame aquisition time: {ft:.3f}, python time: {pt:.3f}, model time: {mt:.3f}, total time: {dt:.3f}")
-    cv2.putText(img, f"{1/dt:.2f} FPS", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (55, 250, 55), 1)
+      dt = time.perf_counter() - st
+      st = time.perf_counter()
+      print(f"frame aquisition time: {ft:.3f}, python time: {pt:.3f}, model time: {mt:.3f}, total time: {dt:.3f}")
+      cv2.putText(img, f"{1/dt:.2f} FPS", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (55, 250, 55), 1)
 
-    # draw the annotation
-    cv2.putText(img, f"{detected}: {det_prob:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    if detected == 1 and det_prob > 0.6:
-      x, y = int(x), int(y)
-      cv2.circle(img, (x, y), int(max(10 - dist, 2)), (0, 255, 0), -1)
-      cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    cv2.imshow("img", img)
+      # draw the annotation
+      cv2.putText(img, f"{detected}: {det_prob:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+      if detected == 1 and det_prob > 0.6:
+        x, y = int(x), int(y)
+        cv2.circle(img, (x, y), int(max(10 - dist, 2)), (0, 255, 0), -1)
+        cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+      cv2.imshow("img", img)
 
-    # display
-    cv2.imshow("img", img)
+      # display
+      cv2.imshow("img", img)
 
-    key = cv2.waitKey(1)
-    if key == ord("q"): break
+      key = cv2.waitKey(1)
+      if key == ord("q"): break
+  except KeyboardInterrupt:
+    pass
 
   cv2.destroyAllWindows()
-  cam.stop_acquisition()
+
+  stop_event.set()
+  frame_thread.join()
