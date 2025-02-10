@@ -1,7 +1,7 @@
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.device import is_dtype_supported
-from tinygrad.helpers import prod, round_up
+from tinygrad.helpers import make_tuple, prod, round_up
 from tinygrad import nn
 
 from .tensor import rms_norm
@@ -42,7 +42,7 @@ class AllNorm:
     self.bias: Tensor | None = Tensor.zeros(sz) if affine else None
 
     self.num_batches_tracked = Tensor.zeros(1, dtype='long' if is_dtype_supported(dtypes.long) else 'int', requires_grad=False)
-    if track_running_stats: self.running_mean, self.running_var = Tensor.zeros(1, requires_grad=False), Tensor.ones(1, requires_grad=False)
+    if track_running_stats: self.running_mean, self.running_var = Tensor.zeros(1, dtype=dtypes.float32, requires_grad=False), Tensor.ones(1, dtype=dtypes.float32, requires_grad=False)
 
   def calc_stats(self, x:Tensor) -> tuple[Tensor, Tensor]:
     shape_mask: list[int] = [1, -1, *([1]*(x.ndim-2))]
@@ -62,6 +62,19 @@ class AllNorm:
     shape_mask: list[int] = [1, -1, *([1]*(x.ndim-2))]
     batch_mean = batch_mean.reshape(shape=shape_mask).expand(list(x.shape[i] if shape_mask[i] == -1 else 1 for i in range(x.ndim)))
     return x.batchnorm(self.weight, self.bias, batch_mean, batch_var.add(self.eps).rsqrt())
+
+class LayerNorm:
+  def __init__(self, normalized_shape:int|tuple[int, ...], eps=1e-5, elementwise_affine=True):
+    self.normalized_shape: tuple[int, ...] = make_tuple(normalized_shape, 1)
+    self.axis, self.eps, self.elementwise_affine = tuple(-1-i for i in range(len(self.normalized_shape))), eps, elementwise_affine
+    self.weight: Tensor|None = Tensor.ones(*self.normalized_shape) if elementwise_affine else None
+    self.bias: Tensor|None = Tensor.zeros(*self.normalized_shape) if elementwise_affine else None
+
+  def __call__(self, x:Tensor) -> Tensor:
+    assert self.normalized_shape == x.shape[-len(self.normalized_shape):], f"last dimensions of {x.shape} must match {self.normalized_shape}"
+    x = x.cast(dtypes.float32).layernorm(eps=self.eps, axis=self.axis).cast(x.dtype)
+    if not self.elementwise_affine: return x
+    return x * self.weight + self.bias
 
 class ConvNorm:
   def __init__(self, in_channels:int, out_channels:int, kernel_size:int, stride:int, padding:int, groups:int=1, dilation:int=1, bias:bool=False):
@@ -90,7 +103,7 @@ class SE:
     self.cv1 = nn.Conv2d(dim, cmid, kernel_size=1, bias=False)
     self.cv2 = nn.Conv2d(cmid, dim, kernel_size=1, bias=False)
 
-  def __call__(self, x:Tensor):
+  def __call__(self, x:Tensor) -> Tensor:
     xx = x.mean((2, 3), keepdim=True)
     xx = self.cv1(xx).relu()
     xx = self.cv2(xx).sigmoid()
@@ -111,10 +124,13 @@ class SRM:
     return x * xx
 
 class Attention:
-  def __init__(self, dim:int, qk_dim:int, heads:int):
+  """
+  Self Attention with qk-norm
+  """
+  def __init__(self, dim:int, qk_dim:int, heads:int, out_proj:bool=True):
     self.dim, self.qk_dim, self.heads = dim, qk_dim, heads
     self.qkv = nn.Linear(dim, qk_dim * 2 + dim, bias=False)
-    self.out = nn.Linear(dim, dim, bias=False)
+    if out_proj: self.out = nn.Linear(dim, dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     b, t, c = x.shape
@@ -122,8 +138,8 @@ class Attention:
     q = rms_norm(q.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
     k = rms_norm(k.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
     v = v.reshape(b, t, self.heads, c // self.heads).transpose(1, 2)
-    attn = Tensor.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(b, t, c)
-    return self.out(attn)
+    attn = q.scaled_dot_product_attention(k, v).transpose(1, 2).reshape(b, t, c)
+    return self.out(attn) if hasattr(self, "out") else attn
 
 class RecConv:
   """
