@@ -1,6 +1,7 @@
 import time
 
 from tinygrad.tensor import Tensor
+from tinygrad.device import Device
 from tinygrad.dtype import dtypes
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from tinygrad.helpers import GlobalCounters, getenv
@@ -10,6 +11,17 @@ from .model import Model
 from .common import pred
 from ..common import BASE_PATH
 from ..common.camera import setup_aravis, get_aravis_frame
+
+def frame():
+  spt = time.perf_counter()
+  img = get_aravis_frame(cam, strm)
+  # resize and convert to yuv
+  img = cv2.resize(img, (512, 256))
+  # increase brightness
+  # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
+  imgt = Tensor(img).to(Device.DEFAULT).realize()
+  pt = time.perf_counter() - spt
+  return img, imgt, pt
 
 if __name__ == "__main__":
   Tensor.no_grad = True
@@ -28,27 +40,25 @@ if __name__ == "__main__":
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
+  img, imgt, pt = frame()
   st = time.perf_counter()
   while True:
     GlobalCounters.reset()
 
-    spt = time.perf_counter()
-    img = get_aravis_frame(cam, strm)
-    # resize and convert to yuv
-    img = cv2.resize(img, (512, 256))
-    # increase brightness
-    # img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
-    pt = time.perf_counter() - spt
-
     # run model
     smt = time.perf_counter()
-    detected, det_prob, x, y, dist = pred(model, Tensor(img))
-    detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
+    detected, det_prob, x, y, dist = pred(model, imgt)
     mt = time.perf_counter() - smt
-    print(f"frame aquisition time: {pt:.3f}, model time: {mt:.3f}")
+
+    # get new frame while model is running
+    img, imgt, pt = frame()
+
+    # copy from gpu to cpu
+    detected, det_prob, x, y, dist = detected.item(), det_prob.item(), x.item(), y.item(), dist.item()
 
     dt = time.perf_counter() - st
     st = time.perf_counter()
+    print(f"frame aquisition time: {pt:.3f}, model time: {mt:.3f}, total time: {dt:.3f}")
     cv2.putText(img, f"{1/dt:.2f} FPS", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (55, 250, 55), 1)
 
     # draw the annotation
