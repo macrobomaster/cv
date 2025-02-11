@@ -49,6 +49,7 @@ if __name__ == "__main__":
     key = cv2.waitKey(0)
     if key == ord("q"): break
     elif key == ord("a"): i -= 1
+    elif key == ord("f"): i += 100
     else: i += 1
 
   cv2.destroyAllWindows()
