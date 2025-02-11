@@ -13,7 +13,7 @@ import albumentations as A
 
 from .model import Model
 from .common import get_annotation
-from ..common.tensor import twohot, focal_loss
+from ..common.tensor import twohot, masked_cross_entropy, mal_loss
 from ..common import BASE_PATH
 from ..common.optim import CLAMB
 from ..common.image import bgr_to_yuv420_tensor
@@ -65,7 +65,7 @@ def load_single_file(file):
   detected, x, y, dist = anno.detected, anno.x, anno.y, anno.dist
 
   # transform points
-  x, y = x * (img.shape[1] - 1), (1 - y) * (img.shape[0] - 1)
+  x, y = x * img.shape[1], (1 - y) * img.shape[0]
 
   # augment
   if dist > 0:
@@ -87,20 +87,22 @@ END_LR = 1e-5
 EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean") -> Tensor:
-  assert reduction == "mean", "only mean reduction is supported"
-  ce = pred.cross_entropy(y, reduction="none")
-  return mask.where(ce, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
-
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
-  cl_loss = focal_loss(pred[0], y[:, 0].cast(dtypes.int32).one_hot(2))
+  det_gate = (y[:, 0] > 0).detach()
 
-  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1] / 4, 128), (y[:, 0] > 0).detach())
-  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2] / 4, 64), (y[:, 0] > 0).detach())
+  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1] / 4, 128), det_gate)
+  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2] / 4, 64), det_gate)
 
-  dist_loss = masked_cross_entropy(pred[3], twohot(y[:, 3] * 4, 64), ((y[:, 0] > 0) & (y[:, 3] > 0)).detach())
+  point_x = (pred[1].softmax() @ Tensor.arange(128)).float() / 128
+  point_y = (pred[2].softmax() @ Tensor.arange(64)).float() / 64
+  point_dist = (point_x.sub(y[:, 1] / 512).square() + point_y.sub(y[:, 2] / 256).square()).sqrt()
+  point_loss = det_gate.where(point_dist, 0).sum() / det_gate.sum().add(1e-6)
 
-  return cl_loss + x_loss + y_loss + dist_loss
+  dist_loss = masked_cross_entropy(pred[3], twohot(y[:, 3] * 4, 64), (det_gate & (y[:, 3] > 0)).detach())
+
+  cl_loss = mal_loss(pred[0], y[:, 0].cast(dtypes.int32).one_hot(2), det_gate.where(1 - point_dist, 0))
+
+  return cl_loss + x_loss + y_loss + point_loss + dist_loss
 
 @TinyJit
 def train_step(x, y, lr):

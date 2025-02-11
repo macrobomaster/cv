@@ -1,4 +1,5 @@
 from tinygrad.tensor import Tensor
+from tinygrad.dtype import dtypes
 
 def channel_shuffle(x: Tensor, r:int=2) -> list[Tensor]:
   b, c, h, w = x.shape
@@ -54,12 +55,16 @@ def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2) -> Tensor
   loss = ce * ((1 - pt) ** gamma) * alpha_
   return loss.mean()
 
-def mal_loss(pred:Tensor, y:Tensor, score:Tensor, gamma:float=1.5) -> Tensor:
-  target = ((score * y) ** gamma)
-  p, ce = pred.sigmoid(), pred.binary_crossentropy_logits(target, reduction="none")
-  weight = (1 - y) * (p ** gamma) + y
-  loss = weight * ce
+def mal_loss(pred:Tensor, y:Tensor, quality:Tensor, gamma:float=1.5) -> Tensor:
+  target = ((quality.detach().unsqueeze(-1) * y) ** gamma)
+  ce = pred.binary_crossentropy_logits(target, reduction="none")
+  loss = ((1 - y) * (pred.sigmoid().detach() ** gamma) + y) * ce
   return loss.mean()
+
+def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean") -> Tensor:
+  assert reduction == "mean", "only mean reduction is supported"
+  ce = pred.cross_entropy(y, reduction="none")
+  return mask.where(ce, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
 
 def norm(x:Tensor, axis:int|None=None, keepdim:bool=False) -> Tensor:
   return x.square().sum(axis, keepdim=keepdim).sqrt()
