@@ -111,7 +111,7 @@ WARMUP_STEPS = 100
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 10
+EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
@@ -127,7 +127,7 @@ def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
   point_dist = (point_x.sub(y[:, 1] / 512).square() + point_y.sub(y[:, 2] / 256).square()).sqrt()
   point_loss = det_gate.where(point_dist, 0).sum() / det_gate.sum().add(1e-6)
 
-  cl_loss = mal_loss(pred[0], y[:, 0].cast(dtypes.int32), (1 - point_dist.clamp(0, 1)).unsqueeze(-1))
+  cl_loss = mal_loss(pred[0], y[:, 0].cast(dtypes.int32), (1 - point_dist.clamp(0, 1)).unsqueeze(-1), gamma=1.5)
 
   return cl_loss + x_loss + y_loss + point_loss
 
