@@ -150,6 +150,7 @@
               cudaPackages.cuda_nvcc
               cudaPackages.cuda_cccl
               cudaPackages.cuda_cudart
+              cudaPackages.cuda_toolkit
               gcc13
             ];
         };
