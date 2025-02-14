@@ -149,6 +149,7 @@
               cudaPackages.cuda_nvdisasm
               cudaPackages.cuda_nvcc
               cudaPackages.cuda_cccl
+              gcc13
             ];
         };
       };
