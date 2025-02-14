@@ -148,6 +148,7 @@
               llvmPackages_latest.clang-unwrapped
               cudaPackages.cuda_nvdisasm
               cudaPackages.cuda_nvcc
+              cudaPackages.cuda_cccl
             ];
         };
       };
