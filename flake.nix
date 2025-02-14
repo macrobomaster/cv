@@ -147,6 +147,7 @@
               gobject-introspection
               llvmPackages_latest.clang-unwrapped
               cudaPackages.cuda_nvdisasm
+              cudaPackages.cuda_nvcc
             ];
         };
       };
