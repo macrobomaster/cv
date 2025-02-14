@@ -38,7 +38,16 @@ def bgr_to_yuv420_tensor(img:Tensor) -> Tensor:
   u = yuv[:, :, :, 1].add(128).avg_pool2d(2, 2)
   v = yuv[:, :, :, 2].add(128).avg_pool2d(2, 2)
 
-  return Tensor.stack(y0, y1, y2, y3, u, v, dim=-1).clamp(0, 255).cast(dtypes.uint8)
+  return Tensor.stack(y0, y1, y2, y3, u, v, dim=-1).clamp(0, 255)
+
+def alpha_overlay(img, background, x, y):
+  """
+  Overlay img centered at (x, y) on background with alpha blending
+  """
+  alpha = img[:, :, 3] / 255.0
+  alpha = alpha[:, :, np.newaxis]
+  img = img[:, :, :3]
+  background[y:y+img.shape[0], x:x+img.shape[1]] = img * alpha + background[y:y+img.shape[0], x:x+img.shape[1]] * (1 - alpha)
 
 if __name__ == "__main__":
   img = cv2.imread("test.png")
