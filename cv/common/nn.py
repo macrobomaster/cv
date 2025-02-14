@@ -1,3 +1,5 @@
+from typing import Literal
+
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.device import is_dtype_supported
@@ -77,7 +79,7 @@ class LayerNorm:
     return x * self.weight + self.bias
 
 class ConvNorm:
-  def __init__(self, in_channels:int, out_channels:int, kernel_size:int, stride:int, padding:int, groups:int=1, dilation:int=1, bias:bool=False):
+  def __init__(self, in_channels:int, out_channels:int, kernel_size:int|tuple[int, ...], stride:int, padding:int, groups:int=1, dilation:int=1, bias:bool=False):
     self.c = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, groups=groups, dilation=dilation, bias=bias)
     self.n = BatchNorm(out_channels)
   def __call__(self, x:Tensor) -> Tensor: return self.n(self.c(x))
@@ -127,19 +129,37 @@ class Attention:
   """
   Self Attention with qk-norm
   """
-  def __init__(self, dim:int, qk_dim:int, heads:int, out_proj:bool=True):
+  def __init__(self, dim:int, qk_dim:int, heads:int, out:Literal["proj", "mod"]|None="proj"):
+    assert qk_dim % heads == 0, "qk_dim must be divisible by heads"
+    assert out in ["proj", "mod", None], "out must be one of 'proj', 'mod', or None"
+
     self.dim, self.qk_dim, self.heads = dim, qk_dim, heads
     self.qkv = nn.Linear(dim, qk_dim * 2 + dim, bias=False)
-    if out_proj: self.out = nn.Linear(dim, dim, bias=False)
+
+    self.out = out
+    match out:
+      case "proj":
+        self.proj = nn.Linear(dim, dim, bias=False)
+      case "mod":
+        self.gate = nn.Linear(dim, dim, bias=False)
+        self.proj = nn.Linear(dim, dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     b, t, c = x.shape
+
     q, k, v = self.qkv(x).split([self.qk_dim, self.qk_dim, self.dim], dim=-1)
     q = rms_norm(q.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
     k = rms_norm(k.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
     v = v.reshape(b, t, self.heads, c // self.heads).transpose(1, 2)
+
     attn = q.scaled_dot_product_attention(k, v).transpose(1, 2).reshape(b, t, c)
-    return self.out(attn) if hasattr(self, "out") else attn
+
+    match self.out:
+      case "proj":
+        return self.proj(attn)
+      case "mod":
+        return self.proj(attn.sigmoid() * self.gate(x).sigmoid())
+      case _: return attn
 
 class RecConv:
   """
