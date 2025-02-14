@@ -36,14 +36,14 @@ if __name__ == "__main__":
 
     # predict
     model_out = pred(model, Tensor(img, device="NPY")).numpy()[0]
-    detected, det_prob, x, y, dist = model_out[0], model_out[1], model_out[2], model_out[3], model_out[4]
+    detected, x, y = model_out[0], model_out[1], model_out[2]
 
     # draw the annotation
-    cv2.putText(img, f"{detected}: {det_prob:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    if detected == 1 and det_prob > 0.6:
+    cv2.putText(img, f"{detected:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    if detected > 0.0:
       x, y = int(x), int(y)
       cv2.circle(img, (x, y), 5, (0, 255, 0), -1)
-      cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+      # cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     cv2.imshow("img", img)
 
     key = cv2.waitKey(0)

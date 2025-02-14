@@ -64,7 +64,7 @@ if __name__ == "__main__":
 
       # copy from gpu to cpu
       smt = time.perf_counter()
-      detected, det_prob, x, y, dist = model_out[0], model_out[1], model_out[2], model_out[3], model_out[4]
+      detected, x, y = model_out[0], model_out[1], model_out[2]
       mt = time.perf_counter() - smt
 
       dt = time.perf_counter() - st
@@ -73,11 +73,11 @@ if __name__ == "__main__":
       cv2.putText(img, f"{1/dt:.2f} FPS", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (55, 250, 55), 1)
 
       # draw the annotation
-      cv2.putText(img, f"{detected}: {det_prob:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-      if detected == 1 and det_prob > 0.6:
+      cv2.putText(img, f"{detected:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+      if detected > 0.0:
         x, y = int(x), int(y)
-        cv2.circle(img, (x, y), int(max(10 - dist, 2)), (0, 255, 0), -1)
-        cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        cv2.circle(img, (x, y), 5, (0, 255, 0), -1)
+        # cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
       cv2.imshow("img", img)
 
       # display

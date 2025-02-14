@@ -2,47 +2,36 @@ from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
-from ..common.tensor import channel_shuffle, pixel_unshuffle
-from ..common.nn import BatchNorm, LayerNorm, ConvNorm, Attention, SRM
+from ..common.tensor import pixel_unshuffle
+from ..common.nn import BatchNorm, LayerNorm, ConvNorm, Attention, SE
 
 def nonlinear(x:Tensor) -> Tensor: return x.gelu()
 
 class TokenMixer:
   def __init__(self, dim:int, attn:bool=False):
     self.has_attn = attn
-    if self.has_attn:
-      self.attn = Attention(dim // 2, min(16, dim // 8), heads=1, out_proj=True)
-    else:
-      self.conv7x7 = nn.Conv2d(dim // 2, dim // 2, 7, 1, 3, groups=dim // 2, bias=False)
 
-    # self.gate = nn.Conv2d(dim, dim, 1, 1, 0, bias=False)
-    self.conv3x3 = nn.Conv2d(dim // 2, dim // 2, 3, 1, 1, groups=dim // 2, bias=False)
+    if self.has_attn:
+      self.attn = Attention(dim, min(16, dim // 4), heads=1, out="mod")
+    else:
+      self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x0, x1 = channel_shuffle(x, 2)
-
-    # mix
     if self.has_attn:
-      b, c, h, w = x0.shape
-      x0 = x0.flatten(2).transpose(1, 2)
-      x0 = self.attn(x0).transpose(1, 2).reshape(b, c, h, w)
+      b, c, h, w = x.shape
+      x = x.flatten(2).transpose(1, 2)
+      x = self.attn(x).transpose(1, 2).reshape(b, c, h, w)
     else:
-      x0 = self.conv7x7(x0)
+      x = self.conv7x7(x)
 
-    x1 = self.conv3x3(x1)
-
-    # # modulate
-    # xg0, xg1 = channel_shuffle(self.gate(x).sigmoid(), 2)
-    # x0 = x0 * xg0
-    # x1 = x1 * xg1
-
-    return x0.cat(x1, dim=1)
+    return x
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2, mix:bool=False):
-    self.proj = nn.Conv2d(cin, cin * exp, 1, 1, 0, bias=False)
-    if mix: self.mix = nn.Conv2d(cin * exp, cin * exp, 3, 1, 1, groups=cin * exp, bias=False)
-    self.out = nn.Conv2d((cin * exp)//2 if mix else cin * exp, cin if cout == 0 else cout, 1, 1, 0, bias=False)
+    if cout == 0: cout = cin
+    self.proj = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
+    if mix: self.mix = nn.Conv2d(cout * exp, cout * exp, 3, 1, 1, groups=cout * exp, bias=False)
+    self.out = nn.Conv2d((cout * exp)//2 if mix else cout * exp, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     x = self.proj(x)
@@ -68,14 +57,10 @@ class Block:
 
 class Downsample:
   def __init__(self, cin:int, cout:int):
-    self.cnorm = BatchNorm(cin)
-    self.channel_mixer = nn.Conv2d(cin, cout, 1, 1, 0, bias=False)
-    self.tnorm = BatchNorm(cout)
-    self.token_mixer = nn.Conv2d(cout, cout, 3, 2, 1, groups=cout, bias=False)
+    self.conv = ConvNorm(cin, cout, 3, 2, 1, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.channel_mixer(self.cnorm(x))
-    xx = self.token_mixer(self.tnorm(xx))
+    xx = self.conv(x)
 
     # shortcut
     x = pixel_unshuffle(x, 2)
@@ -97,13 +82,15 @@ class Stage:
 class Stem:
   def __init__(self, cin:int, cout:int):
     self.conv1 = ConvNorm(cin, cout // 2, 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(cout // 2, cout, 5, 2, 2, bias=False)
-    self.srm = SRM(cout)
+    self.conv2 = ConvNorm(cout // 2, cout * 2, 5, 2, 2, bias=False)
+    self.proj = ConvNorm(cout * 2, cout, 1, 1, 0, bias=False)
+    self.se = SE(cout, cout // 8)
 
   def __call__(self, x: Tensor) -> Tensor:
     x = nonlinear(self.conv1(x))
-    x = self.conv2(x)
-    return self.srm(x)
+    x = nonlinear(self.conv2(x))
+    x = self.proj(x)
+    return self.se(x)
 
 class Backbone:
   def __init__(self, cin:int, cstage:list[int], stages:list[int], attn:bool):
@@ -147,23 +134,26 @@ class FFN:
 
 class DecoderBlock:
   def __init__(self, dim:int):
+    self.cpe = nn.Conv1d(dim, dim, 3, 1, 1, bias=False)
     self.attn_norm = LayerNorm(dim)
     self.attn = Attention(dim, dim // 4, heads=4)
     self.ffn_norm = LayerNorm(dim)
     self.ffn = FFN(dim, dim, dim*2, blocks=0)
 
   def __call__(self, x:Tensor) -> Tensor:
+    xx = self.cpe(x.transpose(1, 2)).transpose(1, 2)
+    x = x + xx
     xx = self.attn(self.attn_norm(x))
     x = x + xx
     xx = self.ffn(self.ffn_norm(x))
     return x + xx
 
 class Decoder:
-  def __init__(self, cins:list[int], cout:int, blocks:int=1):
-    self.x0 = ConvNorm(cins[0], cout, 1, 1, 0, bias=False)
-    self.x1 = ConvNorm(cins[1], cout, 1, 1, 0, bias=False)
-    self.x2 = ConvNorm(cins[2], cout, 1, 1, 0, bias=False)
-    self.x3 = ConvNorm(cins[3], cout, 1, 1, 0, bias=False)
+  def __init__(self, cins:list[int], cout:int, blocks:int):
+    self.x0 = nn.Conv2d(cins[0], cout, 1, 1, 0, bias=False)
+    self.x1 = nn.Conv2d(cins[1], cout, 1, 1, 0, bias=False)
+    self.x2 = nn.Conv2d(cins[2], cout, 1, 1, 0, bias=False)
+    self.x3 = nn.Conv2d(cins[3], cout, 1, 1, 0, bias=False)
 
     self.blocks = [DecoderBlock(cout) for _ in range(blocks)]
 
@@ -171,16 +161,16 @@ class Decoder:
     # project encoder inputs
     x0, x1, x2, x3 = xs
     x0 = self.x0(x0)
-    x0m, x0s = x0.mean((2, 3)).unsqueeze(1), x0.std((2, 3)).unsqueeze(1)
+    x0m = x0.mean((2, 3)).unsqueeze(1)
     x1 = self.x1(x1)
-    x1m, x1s = x1.mean((2, 3)).unsqueeze(1), x1.std((2, 3)).unsqueeze(1)
+    x1m = x1.mean((2, 3)).unsqueeze(1)
     x2 = self.x2(x2)
-    x2m, x2s = x2.mean((2, 3)).unsqueeze(1), x2.std((2, 3)).unsqueeze(1)
+    x2m = x2.mean((2, 3)).unsqueeze(1)
     x3 = self.x3(x3)
-    x3m, x3s = x3.mean((2, 3)).unsqueeze(1), x3.std((2, 3)).unsqueeze(1)
+    x3m = x3.mean((2, 3)).unsqueeze(1)
 
     # input seq
-    x = Tensor.cat(x0m, x0s, x1m, x1s, x2m, x2s, x3m, x3s, dim=1)
+    x = Tensor.cat(x0m, x1m, x2m, x3m, dim=1)
 
     # blocks
     x = x.sequential(self.blocks)
@@ -195,30 +185,26 @@ class Head:
 
 class Heads:
   def __init__(self, in_dim:int):
-    self.cls_head = Head(in_dim, 2, 64)
+    self.cls_head = Head(in_dim, 1, 64)
     self.x_head = Head(in_dim, 128, 64)
     self.y_head = Head(in_dim, 64, 64)
-    self.dist_head = Head(in_dim, 64, 64)
+    # self.dist_head = Head(in_dim, 64, 64)
 
   def __call__(self, f:Tensor):
     cl = self.cls_head(f)
     x = self.x_head(f)
     y = self.y_head(f)
-    dist = self.dist_head(f)
+    # dist = self.dist_head(f)
 
     if not Tensor.training:
       cl = cl.sigmoid()
-      cla = cl.argmax(1)
-      clp = cl[:, cla]
-      cla = cla.unsqueeze(1)
-
       x = (x.softmax() @ Tensor.arange(128).unsqueeze(1)).float() * 4
       y = (y.softmax() @ Tensor.arange(64).unsqueeze(1)).float() * 4
-      dist = (dist.softmax() @ Tensor.arange(64).unsqueeze(1)).float() / 4
+      # dist = (dist.softmax() @ Tensor.arange(64).unsqueeze(1)).float() / 4
 
-      return Tensor.cat(cla, clp, x, y, dist, dim=1)
+      return Tensor.cat(cl, x, y, dim=1)
 
-    return cl, x, y, dist
+    return cl, x, y
 
 class Model:
   def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2]):
@@ -226,7 +212,7 @@ class Model:
     self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, attn=True)
 
     # decoder
-    self.decoder = Decoder(cstage, dim)
+    self.decoder = Decoder(cstage, dim, blocks=1)
 
     # heads
     self.heads = Heads(dim)
@@ -256,18 +242,15 @@ if __name__ == "__main__":
     dtypes.default_float = dtypes.float16
 
   model = Model()
-  print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
-  print(f"backbone parameters: {sum(p.numel() for p in get_parameters(model.backbone))}")
-  print(f"decoder parameters: {sum(p.numel() for p in get_parameters(model.decoder))}")
-  print(f"head parameters: {sum(p.numel() for p in get_parameters(model.heads))}")
 
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
     return model(x)
-
   run(Tensor.randn(1, 128, 256, 6))
   GlobalCounters.reset()
   run(Tensor.randn(1, 128, 256, 6))
+
+  # full run
   GlobalCounters.reset()
   run(Tensor.randn(1, 128, 256, 6))
 
