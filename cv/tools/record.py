@@ -33,10 +33,11 @@ if __name__ == "__main__":
       break
     elif key == ord("r"):
       # start recording
-      writer = cv2.VideoWriter(str(BASE_PATH / "record" / f"{time.time()}.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 30, (512, 256))
-      record = True
+      record = str(BASE_PATH / "record" / f"{time.time()}.mp4")
+      writer = cv2.VideoWriter(record, cv2.VideoWriter_fourcc(*"mp4v"), 30, (512, 256))
     elif key == ord("s") and writer is not None:
       # stop recording
+      print(f"recorded to {record}")
       record = False
       writer.release()
 
