@@ -55,10 +55,10 @@ def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2) -> Tensor
   loss = ce * ((1 - pt) ** gamma) * alpha_
   return loss.mean()
 
-def mal_loss(pred:Tensor, y:Tensor, quality:Tensor, gamma:float=1.5) -> Tensor:
-  target = ((quality.detach().unsqueeze(-1) * y) ** gamma)
+def mal_loss(pred:Tensor, y:Tensor, quality:Tensor, gamma:float=2) -> Tensor:
+  target = y.where(quality.detach() ** gamma, 0)
   ce = pred.binary_crossentropy_logits(target, reduction="none")
-  loss = ((1 - y) * (pred.sigmoid().detach() ** gamma) + y) * ce
+  loss = ce * y.where(1, pred.sigmoid().detach() ** gamma)
   return loss.mean()
 
 def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean") -> Tensor:
