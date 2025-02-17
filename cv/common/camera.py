@@ -44,6 +44,6 @@ def get_aravis_frame(cam, strm):
   buf = strm.pop_buffer()
   img_data = buf.get_data()
   img_raw = np.frombuffer(img_data, dtype=np.uint8).reshape(cam.get_region()[3], cam.get_region()[2], 2)
-  img = cv2.cvtColor(img_raw, cv2.COLOR_YUV2BGR_YUYV)
+  img = cv2.cvtColor(img_raw, cv2.COLOR_YUV2RGB_YUYV)
   strm.push_buffer(buf)
   return img
