@@ -12,7 +12,7 @@ class TokenMixer:
     self.has_attn = attn
 
     if self.has_attn:
-      self.attn = Attention(dim, min(16, dim // 4), heads=1, out="mod")
+      self.attn = Attention(dim, dim // 4, heads=1, out="mod")
     else:
       self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
 
@@ -133,47 +133,53 @@ class FFN:
     return self.out(x)
 
 class DecoderBlock:
-  def __init__(self, dim:int):
-    self.cpe = nn.Conv1d(dim, dim, 3, 1, 1, bias=False)
-    self.attn_norm = LayerNorm(dim)
-    self.attn = Attention(dim, dim // 4, heads=4)
+  def __init__(self, dim:int, has_self:bool=True):
+    if has_self:
+      self.self_attn_norm = LayerNorm(dim)
+      self.self_attn = Attention(dim, dim, heads=4)
+    self.cross_attn_norm = LayerNorm(dim)
+    self.cross_attn = Attention(dim, dim, heads=4, out="mod")
     self.ffn_norm = LayerNorm(dim)
     self.ffn = FFN(dim, dim, dim*2, blocks=0)
 
-  def __call__(self, x:Tensor) -> Tensor:
-    xx = self.cpe(x.transpose(1, 2)).transpose(1, 2)
-    x = x + xx
-    xx = self.attn(self.attn_norm(x))
+  def __call__(self, x:Tensor, kv:Tensor) -> Tensor:
+    if hasattr(self, "self_attn"):
+      xx = self.self_attn(self.self_attn_norm(x))
+      x = x + xx
+    xx = self.cross_attn(self.cross_attn_norm(x), kv)
     x = x + xx
     xx = self.ffn(self.ffn_norm(x))
     return x + xx
 
 class Decoder:
-  def __init__(self, cins:list[int], cout:int, blocks:int):
-    self.x0 = nn.Conv2d(cins[0], cout, 1, 1, 0, bias=False)
-    self.x1 = nn.Conv2d(cins[1], cout, 1, 1, 0, bias=False)
-    self.x2 = nn.Conv2d(cins[2], cout, 1, 1, 0, bias=False)
-    self.x3 = nn.Conv2d(cins[3], cout, 1, 1, 0, bias=False)
+  def __init__(self, cin:int, cout:int, blocks:int, token_count:int):
+    self.proj = nn.Conv2d(cin, cout, 1, 1, 0, bias=False)
+    self.token_count = token_count
+    self.pos_emb = nn.Embedding(token_count, cout)
+    self.query_emb = nn.Embedding(1, cout)
+    self.blocks = [DecoderBlock(cout, has_self=False) for _ in range(blocks)]
 
-    self.blocks = [DecoderBlock(cout) for _ in range(blocks)]
+  def __call__(self, x:Tensor) -> Tensor:
+    x = nonlinear(self.proj(x))
 
-  def __call__(self, xs:tuple[Tensor, Tensor, Tensor, Tensor]) -> Tensor:
-    # project encoder inputs
-    x0, x1, x2, x3 = xs
-    x0 = self.x0(x0)
-    x0m = x0.mean((2, 3)).unsqueeze(1)
-    x1 = self.x1(x1)
-    x1m = x1.mean((2, 3)).unsqueeze(1)
-    x2 = self.x2(x2)
-    x2m = x2.mean((2, 3)).unsqueeze(1)
-    x3 = self.x3(x3)
-    x3m = x3.mean((2, 3)).unsqueeze(1)
+    # flatten
+    x = x.flatten(2).transpose(1, 2)
+    assert x.shape[1] == self.token_count, f"expected {self.token_count} tokens, got {x.shape[1]}"
 
-    # input seq
-    x = Tensor.cat(x0m, x1m, x2m, x3m, dim=1)
+    # add positional embedding
+    if not hasattr(self, "pos_arange"):
+      self.pos_arange = Tensor.arange(self.token_count).unsqueeze(0)
+    x = x + self.pos_emb(self.pos_arange).expand(x.shape[0], -1, -1)
+
+    # query
+    if not hasattr(self, "query"):
+      self.query = Tensor([0]).unsqueeze(0)
+    query = self.query_emb(self.query).expand(x.shape[0], -1, -1)
 
     # blocks
-    x = x.sequential(self.blocks)
+    for block in self.blocks:
+      x = block(query, x)
+
     return x.sum(1)
 
 class Head:
@@ -185,9 +191,9 @@ class Head:
 
 class Heads:
   def __init__(self, in_dim:int):
-    self.cls_head = Head(in_dim, 1, 64)
-    self.x_head = Head(in_dim, 128, 64)
-    self.y_head = Head(in_dim, 64, 64)
+    self.cls_head = Head(in_dim, 2, 64)
+    self.x_head = Head(in_dim, 512, 64)
+    self.y_head = Head(in_dim, 256, 64)
     # self.dist_head = Head(in_dim, 64, 64)
 
   def __call__(self, f:Tensor):
@@ -197,22 +203,26 @@ class Heads:
     # dist = self.dist_head(f)
 
     if not Tensor.training:
-      cl = cl.sigmoid()
-      x = (x.softmax() @ Tensor.arange(128).unsqueeze(1)).float() * 4
-      y = (y.softmax() @ Tensor.arange(64).unsqueeze(1)).float() * 4
+      cl = cl.softmax(1)
+      clm, clp = cl.argmax(1, keepdim=True), cl.max(1, keepdim=True).float()
+
+      if not hasattr(self, "x_arange"): self.x_arange = Tensor.arange(512).unsqueeze(1)
+      if not hasattr(self, "y_arange"): self.y_arange = Tensor.arange(256).unsqueeze(1)
+      x = (x.softmax() @ self.x_arange).float()
+      y = (y.softmax() @ self.y_arange).float()
       # dist = (dist.softmax() @ Tensor.arange(64).unsqueeze(1)).float() / 4
 
-      return Tensor.cat(cl, x, y, dim=1)
+      return Tensor.cat(clm, clp, x, y, dim=1)
 
     return cl, x, y
 
 class Model:
-  def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2]):
+  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2]):
     # feature extractor
     self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, attn=True)
 
     # decoder
-    self.decoder = Decoder(cstage, dim, blocks=1)
+    self.decoder = Decoder(cstage[-1], dim, blocks=2, token_count=32)
 
     # heads
     self.heads = Heads(dim)
@@ -226,7 +236,7 @@ class Model:
     xs = self.backbone(img)
 
     # decoder
-    f = self.decoder(xs)
+    f = self.decoder(xs[-1])
 
     # heads
     return self.heads(f)
