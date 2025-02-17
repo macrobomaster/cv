@@ -28,7 +28,7 @@ class Annotation:
   dist: float
 
 annotations_csv = {}
-def get_annotation(img_file) -> Annotation:
+def get_annotation(img_file, with_depth:bool=False) -> Annotation:
   global annotations_csv
 
   # default
@@ -62,7 +62,7 @@ def get_annotation(img_file) -> Annotation:
     detected, x, y = annotations_csv[basename][frame_index][1:]
 
   # check if there is a .depth file
-  if Path(img_file).with_suffix(".depth").exists():
+  if with_depth and Path(img_file).with_suffix(".depth").exists():
     with open(Path(img_file).with_suffix(".depth"), "r") as f:
       dist = float(f.readline().strip())
 
