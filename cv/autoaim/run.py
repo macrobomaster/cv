@@ -56,7 +56,7 @@ if __name__ == "__main__":
 
       # run model
       spt = time.perf_counter()
-      model_out = pred(model, imgt).numpy()[0]
+      model_out = pred(model, imgt).tolist()[0]
       pt = time.perf_counter() - spt
 
       img, ft = frame_queue.get()
