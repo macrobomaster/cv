@@ -31,7 +31,10 @@ def symlog(x:Tensor) -> Tensor:
 def symexp(x:Tensor) -> Tensor:
   return x.sign() * x.abs().exp().sub(1)
 
+twohot_bins = {}
 def twohot(x:Tensor, bins:int) -> Tensor:
+  global twohot_bins
+
   k0 = x.floor().clamp(0, bins-1)
   k1 = x.ceil().clamp(0, bins-1)
 
@@ -43,7 +46,9 @@ def twohot(x:Tensor, bins:int) -> Tensor:
   w_below = to_above / total
   w_above = to_below / total
 
-  ar = Tensor.arange(bins).reshape(1, bins).expand(x.shape[0], bins)
+  if bins not in twohot_bins:
+    twohot_bins[bins] = Tensor.arange(bins).reshape(1, bins)
+  ar = twohot_bins[bins].expand(x.shape[0], bins)
   th = (ar == k0.reshape(x.shape[0], 1)).where(w_below.reshape(x.shape[0], 1), 0)
   th = th + (ar == k1.reshape(x.shape[0], 1)).where(w_above.reshape(x.shape[0], 1), 0)
   return th
