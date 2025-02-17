@@ -5,16 +5,17 @@ import csv
 
 from tinygrad.engine.jit import TinyJit
 from tinygrad.device import Device
+from tinygrad.helpers import tqdm
 
 from ..common import BASE_PATH
-from ..common.image import bgr_to_yuv420_tensor
+from ..common.image import rgb_to_yuv420_tensor
 
 @partial(TinyJit, prune=True)
 def pred(model, img):
   img = img.to(Device.DEFAULT)
   if img.ndim == 3: img = img.unsqueeze(0)
   if img.shape[3] == 3:
-    yuv = bgr_to_yuv420_tensor(img)
+    yuv = rgb_to_yuv420_tensor(img)
   else:
     yuv = img
   return model(yuv).to("CLANG")
@@ -47,7 +48,7 @@ def get_annotation(img_file) -> Annotation:
     basename = ".".join(Path(img_file).name.split(".")[:-2])
     if basename not in annotations_csv:
       with open(BASE_PATH / "data" / basename / f"{basename}.csv", "r") as f:
-        print(f"reading annotation file {BASE_PATH / 'data' / basename / f'{basename}.csv'}")
+        tqdm.write(f"reading annotation file {BASE_PATH / 'data' / basename / f'{basename}.csv'}")
         # read the annotation file
         reader = csv.reader(f)
         # skip the header
