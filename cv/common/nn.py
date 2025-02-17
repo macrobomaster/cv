@@ -127,14 +127,15 @@ class SRM:
 
 class Attention:
   """
-  Self Attention with qk-norm
+  Cross and Self Attention with qk-norm and configurable output modulation
   """
   def __init__(self, dim:int, qk_dim:int, heads:int, out:Literal["proj", "mod"]|None="proj"):
     assert qk_dim % heads == 0, "qk_dim must be divisible by heads"
     assert out in ["proj", "mod", None], "out must be one of 'proj', 'mod', or None"
 
     self.dim, self.qk_dim, self.heads = dim, qk_dim, heads
-    self.qkv = nn.Linear(dim, qk_dim * 2 + dim, bias=False)
+    self.q = nn.Linear(dim, qk_dim, bias=False)
+    self.kv = nn.Linear(dim, qk_dim + dim, bias=False)
 
     self.out = out
     match out:
@@ -144,13 +145,16 @@ class Attention:
         self.gate = nn.Linear(dim, dim, bias=False)
         self.proj = nn.Linear(dim, dim, bias=False)
 
-  def __call__(self, x:Tensor) -> Tensor:
+  def __call__(self, x:Tensor, kv:Tensor|None=None) -> Tensor:
     b, t, c = x.shape
+    if kv is not None: kvt = kv.shape[1]
+    else: kvt = t
 
-    q, k, v = self.qkv(x).split([self.qk_dim, self.qk_dim, self.dim], dim=-1)
+    q = self.q(x)
+    k, v = self.kv(x if kv is None else kv).split([self.qk_dim, self.dim], dim=-1)
     q = rms_norm(q.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
-    k = rms_norm(k.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
-    v = v.reshape(b, t, self.heads, c // self.heads).transpose(1, 2)
+    k = rms_norm(k.reshape(b, kvt, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
+    v = v.reshape(b, kvt, self.heads, c // self.heads).transpose(1, 2)
 
     attn = q.scaled_dot_product_attention(k, v).transpose(1, 2).reshape(b, t, c)
 
