@@ -37,6 +37,7 @@ def load_single_file(file):
       ], p=0.2),
     ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
+  detected, x, y, dist = 0, 0, 0, 0
   if file.startswith("path:"):
     img = pyvips.Image.new_from_file(file[5:], access="sequential").numpy()
     img = img[..., :3]
@@ -48,18 +49,6 @@ def load_single_file(file):
 
     # transform points
     x, y = x * (img.shape[1] - 1), (1 - y) * (img.shape[0] - 1)
-
-    # augment
-    transformed = OUTPUT_PIPELINE(image=img, keypoints=[(x, y)])
-    img, x, y = transformed["image"], transformed["keypoints"][0][0], transformed["keypoints"][0][1]
-    # see if point is still within image
-    if x < 0 or x > img.shape[1] or y < 0 or y > img.shape[0]:
-      detected = 0
-
-    return {
-      "x": img.tobytes(),
-      "y": np.array((detected, x, y, dist), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
-    }
   elif file.startswith("fake:"):
     img, x, y = generate_sample(file)
 
@@ -73,7 +62,7 @@ def load_single_file(file):
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, x, y, 0), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
+    "y": np.array((detected, x, y, dist), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
   }
 
 def single_batch(iter):
