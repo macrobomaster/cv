@@ -1,11 +1,10 @@
 from tinygrad.tensor import Tensor
-from tinygrad.dtype import dtypes
 import cv2
 import numpy as np
 
-def bgr_to_yuv420(img):
+def rgb_to_yuv420(img):
   height, width = img.shape[:2]
-  img = cv2.cvtColor(img, cv2.COLOR_BGR2YUV_I420)
+  img = cv2.cvtColor(img, cv2.COLOR_RGB2YUV_I420)
 
   # extract U and V channels
   u = img[height:height+height//4].reshape(-1, width//2)
@@ -20,16 +19,16 @@ def bgr_to_yuv420(img):
   # stack the channels
   return np.stack([y0, y1, y2, y3, u, v], axis=-1)
 
-def bgr_to_yuv420_tensor(img:Tensor) -> Tensor:
-  if not hasattr(bgr_to_yuv420_tensor, "coeffs"):
+def rgb_to_yuv420_tensor(img:Tensor) -> Tensor:
+  if not hasattr(rgb_to_yuv420_tensor, "coeffs"):
     coeffs = Tensor([[0.299, 0.587, 0.114],
                    [-0.168736, -0.331264, 0.5],
                    [0.5, -0.418688, -0.081312]])
-    setattr(bgr_to_yuv420_tensor, "coeffs", coeffs)
+    setattr(rgb_to_yuv420_tensor, "coeffs", coeffs)
   else:
-    coeffs = getattr(bgr_to_yuv420_tensor, "coeffs")
+    coeffs = getattr(rgb_to_yuv420_tensor, "coeffs")
 
-  yuv = img[:, :, :, ::-1].matmul(coeffs.T)
+  yuv = img.matmul(coeffs.T)
 
   y0 = yuv[:, ::2, ::2, 0]
   y1 = yuv[:, 1::2, ::2, 0]
@@ -52,10 +51,11 @@ def alpha_overlay(img, background, x, y):
 if __name__ == "__main__":
   img = cv2.imread("test.png")
   img = cv2.resize(img, (812, 1080))
+  img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-  yuv_tensor = bgr_to_yuv420_tensor(Tensor(img).unsqueeze(0))
+  yuv_tensor = rgb_to_yuv420_tensor(Tensor(img).unsqueeze(0))
   yuv = yuv_tensor.numpy()[0]
-  yuv_ref = bgr_to_yuv420(img)
+  yuv_ref = rgb_to_yuv420(img)
   for i in range(6):
     # put reference next to our implementation
     cv2.imshow("yuv", np.hstack([yuv_ref[..., i], yuv[..., i]]))

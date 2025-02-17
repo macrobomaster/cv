@@ -69,6 +69,7 @@
                   albumentations
                   opencv4
                   pillow
+                  pyvips
                   (tinygrad.override { rocmSupport = true; })
                   wandb
                   pygobject3
