@@ -33,17 +33,19 @@ if __name__ == "__main__":
     file = preprocessed_train_files[i]
     img = cv2.imread(file)
     img = cv2.resize(img, (512, 256))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     # predict
-    model_out = pred(model, Tensor(img, device="NPY")).numpy()[0]
-    detected, x, y = model_out[0], model_out[1], model_out[2]
+    model_out = pred(model, Tensor(img, device="NPY")).tolist()[0]
+    cl, clp, x, y = model_out[0], model_out[1], model_out[2], model_out[3]
 
     # draw the annotation
-    cv2.putText(img, f"{detected:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    if detected > 0.0:
+    cv2.putText(img, f"{cl}: {clp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    if cl == 1 and clp > 0.0:
       x, y = int(x), int(y)
       cv2.circle(img, (x, y), 5, (0, 255, 0), -1)
       # cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     cv2.imshow("img", img)
 
     key = cv2.waitKey(0)
