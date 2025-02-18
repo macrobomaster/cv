@@ -29,25 +29,25 @@ class TokenMixer:
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2, mix:bool=False):
     if cout == 0: cout = cin
-    self.proj = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
+    self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
     if mix: self.mix = nn.Conv2d(cout * exp, cout * exp, 3, 1, 1, groups=cout * exp, bias=False)
-    self.out = nn.Conv2d((cout * exp)//2 if mix else cout * exp, cout, 1, 1, 0, bias=False)
+    self.down = nn.Conv2d((cout * exp)//2 if mix else cout * exp, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.proj(x)
+    x = self.up(x)
     if hasattr(self, "mix"):
       x, gate = self.mix(x).chunk(2, dim=1)
       x = x * nonlinear(gate)
     else:
       x = nonlinear(x)
-    return self.out(x)
+    return self.down(x)
 
 class Block:
   def __init__(self, dim:int, attn:bool=False):
     self.tnorm = BatchNorm(dim)
     self.token_mixer = TokenMixer(dim, attn=attn)
     self.cnorm = BatchNorm(dim)
-    self.channel_mixer = ChannelMixer(dim, mix=attn)
+    self.channel_mixer = ChannelMixer(dim, mix=True)
 
   def __call__(self, x:Tensor) -> Tensor:
     xx = self.token_mixer(self.tnorm(x))
@@ -113,24 +113,26 @@ class Backbone:
 
 class FFNBlock:
   def __init__(self, dim:int, exp:int=1):
-    self.up = nn.Linear(dim, dim * exp, bias=False)
-    self.down = nn.Linear(dim * exp, dim * 2, bias=False)
+    self.up = nn.Linear(dim, dim * exp)
+    self.mix = nn.Linear(dim * exp, dim * exp)
+    self.down = nn.Linear((dim * exp)//2, dim)
   def __call__(self, x:Tensor) -> Tensor:
     xx = nonlinear(self.up(x))
-    xx, gate = self.down(xx).chunk(2, dim=-1)
+    xx, gate = self.mix(xx).chunk(2, dim=-1)
     xx = xx * nonlinear(gate)
-    return nonlinear(x + xx)
+    xx = nonlinear(self.down(xx))
+    return x + xx
 
 class FFN:
   def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1):
-    self.proj = nn.Linear(in_dim, mid_dim, bias=False)
+    self.up = nn.Linear(in_dim, mid_dim)
     self.blocks = [FFNBlock(mid_dim, exp) for _ in range(blocks)]
-    self.out = nn.Linear(mid_dim, out_dim, bias=False)
+    self.down = nn.Linear(mid_dim, out_dim)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = nonlinear(self.proj(x))
+    x = nonlinear(self.up(x))
     x = x.sequential(self.blocks)
-    return self.out(x)
+    return self.down(x)
 
 class DecoderBlock:
   def __init__(self, dim:int, has_self:bool=True):
@@ -217,7 +219,7 @@ class Heads:
     return cl, x, y
 
 class Model:
-  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2]):
+  def __init__(self, dim:int=192, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2]):
     # feature extractor
     self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, attn=True)
 

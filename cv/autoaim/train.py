@@ -38,15 +38,14 @@ def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
   if not hasattr(loss_fn, "y_arange"): setattr(loss_fn, "y_arange", Tensor.arange(256))
   point_x = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float() / 512
   point_y = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float() / 256
-  point_dist = (point_x.sub(y[:, 1] / 512).square() + point_y.sub(y[:, 2] / 256).square())
-  point_loss = det_gate.where(point_dist, 0).sum() / det_gate.sum().add(1e-6)
+  point_dist = (point_x.sub(y[:, 1] / 512).square() + point_y.sub(y[:, 2] / 256).square()).sqrt()
 
   target_cls = y[:, 0].cast(dtypes.int32).one_hot(2)
-  quality = (1 - point_dist.sqrt().clamp(0, 1))
+  quality = (1 - point_dist.clamp(0, 1))
   quality = target_cls[:, 0].stack(quality, dim=1)
   cl_loss = mal_loss(pred[0], target_cls, quality, gamma=1.5)
 
-  return cl_loss + x_loss + y_loss + point_loss
+  return cl_loss + x_loss + y_loss
 
 @TinyJit
 def train_step(x, y, lr):
