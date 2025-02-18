@@ -23,7 +23,7 @@ WARMUP_STEPS = 200
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 30
+EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
