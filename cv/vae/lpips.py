@@ -10,8 +10,6 @@ class VGG16Loss:
     self.net = VGG16()
     channels = [64, 128, 256, 512, 512]
     self.lins = [NetLinLayer(c, 1) for c in channels]
-    for i,l in enumerate(self.lins):
-      setattr(self, f"lin{i}", l)
 
   def __call__(self, x:Tensor, y:Tensor) -> Tensor:
     x = x * 2 - 1
@@ -34,8 +32,8 @@ class VGG16Loss:
 
 class ScalingLayer:
   def __init__(self):
-    self.shift = Tensor([-0.030, -0.088, -0.188])[None, :, None, None]
-    self.scale = Tensor([0.458, 0.448, 0.450])[None, :, None, None]
+    self.shift = Tensor([-0.030, -0.088, -0.188], requires_grad=False)[None, :, None, None]
+    self.scale = Tensor([0.458, 0.448, 0.450], requires_grad=False)[None, :, None, None]
 
   def __call__(self, x:Tensor) -> Tensor:
     return (x - self.shift) / self.scale
@@ -104,7 +102,7 @@ if __name__ == "__main__":
     v.assign(weights[k].numpy()).realize()
 
   state_dict = torch_load("weights/vgg.pth")
-  print(state_dict)
+  state_dict = {k.replace("lin", "lins."): v for k,v in state_dict.items()}
   load_state_dict(lpips, state_dict, strict=False)
 
   safe_save(get_state_dict(lpips), "weights/lpips.safetensors")

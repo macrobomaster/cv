@@ -29,7 +29,7 @@ if __name__ == "__main__":
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     # predict
-    imgt = Tensor(np.array([img], dtype=np.uint8))
+    imgt = Tensor(np.array([img], dtype=np.uint8), device="NPY")
     oimg = pred(model, imgt)
     oimg = oimg.numpy()[0]
 
@@ -39,6 +39,7 @@ if __name__ == "__main__":
     key = cv2.waitKey(0)
     if key == ord("q"): break
     elif key == ord("a"): i -= 1
+    elif key == ord("f"): i += 100
     else: i += 1
 
   cv2.destroyAllWindows()

@@ -21,45 +21,40 @@ from ..common.dataloader import batch_load, BatchDesc
 WIDTH = 128
 HEIGHT = 128
 
-# main augments
-A_PIPELINE = A.Compose([
-  A.HorizontalFlip(p=0.5),
-  A.Perspective(p=0.25),
-  A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.1, rotate_limit=45, border_mode=cv2.BORDER_CONSTANT, value=0, p=0.25),
-  A.OneOf([
-    A.RandomCrop(HEIGHT, WIDTH, p=0.4),
-    A.Compose([
-      A.LongestMaxSize(max_size=max(HEIGHT, WIDTH), p=1),
-      A.RandomCrop(HEIGHT, WIDTH, p=1)
-    ], p=0.6),
-  ], p=1),
-  A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-  A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-  A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
-  A.OneOf([
-    A.RandomGamma(gamma_limit=(80, 120), p=0.5),
-    A.RandomToneCurve(p=0.5),
-  ], p=0.2),
-], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
-
 def get_train_files():
   return glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
+
+A_PIPELINE = None
 def load_single_file(file):
+  global A_PIPELINE
+  if A_PIPELINE is None:
+    A_PIPELINE = A.Compose([
+      A.HorizontalFlip(p=0.5),
+      A.Perspective(p=0.25),
+      A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-45, 45), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
+      A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+      A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
+      A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
+      A.OneOf([
+        A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+        A.RandomToneCurve(p=0.5),
+      ], p=0.2),
+    ])
+
   img = cv2.imread(file)
   if img.shape[0] != HEIGHT or img.shape[1] != WIDTH:
     img = cv2.resize(img, (WIDTH, HEIGHT))
+  img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
   # augment
   transformed = A_PIPELINE(image=img)
   img = transformed["image"]
 
-  img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
   return {
     "x": img.tobytes(),
   }
 
-BS = 16
+BS = 32
 WARMUP_STEPS = 100
 WARMPUP_LR = 1e-5
 START_LR = 1e-3
@@ -71,9 +66,9 @@ def loss_fn(x_hat: Tensor, x: Tensor):
   l1_loss = (x_hat - x).abs().mean()
   l2_loss = (x_hat - x).square().mean()
   wp_loss = 0.01 * (x_hat[0] - x).flatten(1).square().max(axis=-1).mean()
-  lpips_loss = lpips(x_hat, x).mean()
+  # lpips_loss = lpips(x_hat, x).mean()
 
-  return l1_loss + l2_loss + wp_loss + lpips_loss
+  return l1_loss + l2_loss + wp_loss
 
 @TinyJit
 def train_step(x, lr):
@@ -123,7 +118,7 @@ if __name__ == "__main__":
     load_state_dict(model, state_dict, strict=False)
 
   parameters = get_parameters(model)
-  optim = CLAMB(parameters, weight_decay=0.1, b1=0.9, b2=0.95, adam=True)
+  optim = CLAMB(parameters, weight_decay=0.1, b1=0.9, b2=0.994, adam=True)
 
   # initialize lpips loss
   lpips = VGG16Loss()
