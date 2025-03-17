@@ -6,4 +6,4 @@ from tinygrad.dtype import dtypes
 def pred(model, img):
   img = img.to(Device.DEFAULT)
   oimg, _, _ = model(img)
-  return (oimg.permute(0, 2, 3, 1) * 255).cast(dtypes.uint8).to("CLANG")
+  return (oimg.permute(0, 2, 3, 1) * 255).cast(dtypes.uint8).to("CPU")

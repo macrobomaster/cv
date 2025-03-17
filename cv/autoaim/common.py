@@ -18,7 +18,7 @@ def pred(model, img):
     yuv = rgb_to_yuv420_tensor(img)
   else:
     yuv = img
-  return model(yuv).to("CLANG")
+  return model(yuv).to("CPU")
 
 @dataclass
 class Annotation:
