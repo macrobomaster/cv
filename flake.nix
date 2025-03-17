@@ -173,6 +173,12 @@
               '';
             }
           ];
+          boot.supportedFilesystems = {
+            zfs = lib.mkForce false;
+          };
+          boot.initrd.supportedFilesystems = {
+            zfs = lib.mkForce false;
+          };
           hardware.enableAllHardware = lib.mkForce false;
           hardware.nvidia-jetpack = {
             enable = true;
