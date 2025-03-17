@@ -23,29 +23,52 @@ WARMUP_STEPS = 200
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 50
+EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor], y: Tensor):
-  det_gate = (y[:, 0] > 0).detach()
+def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor, Tensor], y: Tensor):
+  B = y.shape[0]
 
-  x_loss = masked_cross_entropy(pred[1], twohot(y[:, 1], 512), det_gate)
-  y_loss = masked_cross_entropy(pred[2], twohot(y[:, 2], 256), det_gate)
+  y_det = y[:, 0] > 0
+  y_x = y[:, 1]
+  y_y = y[:, 2]
+  y_dist = y[:, 3]
+  y_color = y[:, 4]
+  y_number = y[:, 5]
 
-  # dist_loss = masked_cross_entropy(pred[3], twohot(y[:, 3] * 4, 64), (det_gate & (y[:, 3] > 0)).detach())
+  det_gate = y_det.detach()
 
+  # position loss
+  x_loss = masked_cross_entropy(pred[1], twohot(y_x, 512), det_gate)
+  y_loss = masked_cross_entropy(pred[2], twohot(y_y, 256), det_gate)
+
+  # distance loss
+  # dist_loss = masked_cross_entropy(pred[3], twohot(y_dist * 4, 64), (det_gate & (y_dist > 0)).detach())
+
+  # quality factor
   if not hasattr(loss_fn, "x_arange"): setattr(loss_fn, "x_arange", Tensor.arange(512))
   if not hasattr(loss_fn, "y_arange"): setattr(loss_fn, "y_arange", Tensor.arange(256))
   point_x = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float() / 512
   point_y = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float() / 256
-  point_dist = (point_x.sub(y[:, 1] / 512).square() + point_y.sub(y[:, 2] / 256).square()).sqrt()
-
-  target_cls = y[:, 0].cast(dtypes.int32).one_hot(2)
+  point_dist = (point_x.sub(y_x / 512).square() + point_y.sub(y_y / 256).square()).sqrt()
   quality = (1 - point_dist.clamp(0, 1))
-  quality = target_cls[:, 0].stack(quality, dim=1)
-  cl_loss = mal_loss(pred[0], target_cls, quality, gamma=1.5)
 
-  return cl_loss + x_loss + y_loss
+  # detection loss
+  target_cls = y_det.cast(dtypes.int32).one_hot(2)
+  target_quality = target_cls[:, 0].stack(quality, dim=1)
+  det_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
+
+  # color loss
+  target_cls = y_color.cast(dtypes.int32).one_hot(4)
+  target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(B, 3), dim=1)
+  color_loss = mal_loss(pred[3], target_cls, target_quality, gamma=1.5)
+
+  # number loss
+  target_cls = y_number.cast(dtypes.int32).one_hot(6)
+  target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(B, 5), dim=1)
+  number_loss = mal_loss(pred[4], target_cls, target_quality, gamma=1.5)
+
+  return det_loss + x_loss + y_loss + color_loss + number_loss
 
 @TinyJit
 def train_step(x, y, lr):
@@ -110,7 +133,7 @@ if __name__ == "__main__":
     batch_iter = iter(tqdm(batch_load(
       {
         "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-        "y": BatchDesc(shape=(4,), dtype=dtypes.default_float),
+        "y": BatchDesc(shape=(6,), dtype=dtypes.default_float),
       },
       load_single_file, get_train_files, bs=BS, shuffle=True,
     ), total=STEPS_PER_EPOCH, desc=f"epoch {epoch}"))
@@ -130,8 +153,10 @@ if __name__ == "__main__":
       dt = time.perf_counter()
 
       loss = loss.item()
+      at = time.perf_counter()
+
+      # check for NaNs
       if getenv("NAN", 0):
-        # check for NaNs
         has_nan = False
         for p,s in gsums.items():
           if math.isnan(s.item()):
@@ -146,8 +171,8 @@ if __name__ == "__main__":
           else:
             print(f"{p}: {math.sqrt(s.item())}")
         if has_nan: exit(1)
-      at = time.perf_counter()
 
+      # logging
       tqdm.write(
         f"{i:5} {((at - st)) * 1000.0:7.2f} ms step, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms data, {(at - dt) * 1000.0:7.2f} ms accel, "
         f"{loss:11.6f} loss, {lr:.6f} lr, "
@@ -167,6 +192,7 @@ if __name__ == "__main__":
       steps += 1
 
     safe_save(get_state_dict(model), str(BASE_PATH / f"intermediate/model_{epoch}.safetensors"))
+    safe_save(get_state_dict(optim), str(BASE_PATH / f"intermediate/optim_{epoch}.safetensors"))
 
   # copy the last intermediate to the final model
   with open(BASE_PATH / "intermediate" / f"model_{epoch}.safetensors", "rb") as f:

@@ -112,10 +112,11 @@ class Backbone:
     return x0, x1, x2, x3
 
 class FFNBlock:
-  def __init__(self, dim:int, exp:int=1):
+  def __init__(self, dim:int, exp:int):
     self.up = nn.Linear(dim, dim * exp)
     self.mix = nn.Linear(dim * exp, dim * exp)
     self.down = nn.Linear((dim * exp)//2, dim)
+
   def __call__(self, x:Tensor) -> Tensor:
     xx = nonlinear(self.up(x))
     xx, gate = self.mix(xx).chunk(2, dim=-1)
@@ -135,12 +136,9 @@ class FFN:
     return self.down(x)
 
 class DecoderBlock:
-  def __init__(self, dim:int, has_self:bool=True):
-    if has_self:
-      self.self_attn_norm = LayerNorm(dim)
-      self.self_attn = Attention(dim, dim, heads=4)
+  def __init__(self, dim:int):
     self.cross_attn_norm = LayerNorm(dim)
-    self.cross_attn = Attention(dim, dim, heads=4, out="mod")
+    self.cross_attn = Attention(dim, dim, heads=4)
     self.ffn_norm = LayerNorm(dim)
     self.ffn = FFN(dim, dim, dim*2, blocks=0)
 
@@ -155,11 +153,11 @@ class DecoderBlock:
 
 class Decoder:
   def __init__(self, cin:int, cout:int, blocks:int, token_count:int):
-    self.proj = nn.Conv2d(cin, cout, 1, 1, 0, bias=False)
+    self.proj = ConvNorm(cin, cout, 1, 1, 0, bias=False)
     self.token_count = token_count
     self.pos_emb = nn.Embedding(token_count, cout)
     self.query_emb = nn.Embedding(1, cout)
-    self.blocks = [DecoderBlock(cout, has_self=False) for _ in range(blocks)]
+    self.blocks = [DecoderBlock(cout) for _ in range(blocks)]
 
   def __call__(self, x:Tensor) -> Tensor:
     x = nonlinear(self.proj(x))
@@ -182,11 +180,11 @@ class Decoder:
     for block in self.blocks:
       x = block(query, x)
 
-    return x.sum(1)
+    return x[:, 0, :]
 
 class Head:
   def __init__(self, in_dim:int, mid_dim:int, out_dim:int):
-    self.ffn = FFN(in_dim, mid_dim, out_dim, blocks=1)
+    self.ffn = FFN(in_dim, mid_dim, out_dim, blocks=1, exp=2)
 
   def __call__(self, x:Tensor) -> Tensor:
     return self.ffn(x)
@@ -194,15 +192,19 @@ class Head:
 class Heads:
   def __init__(self, in_dim:int):
     self.cls_head = Head(in_dim, 2, 64)
-    self.x_head = Head(in_dim, 512, 64)
-    self.y_head = Head(in_dim, 256, 64)
+    self.x_head = Head(in_dim, 512, 128)
+    self.y_head = Head(in_dim, 256, 128)
     # self.dist_head = Head(in_dim, 64, 64)
+    self.color_head = Head(in_dim, 4, 64)
+    self.number_head = Head(in_dim, 6, 64)
 
   def __call__(self, f:Tensor):
     cl = self.cls_head(f)
     x = self.x_head(f)
     y = self.y_head(f)
     # dist = self.dist_head(f)
+    color = self.color_head(f)
+    number = self.number_head(f)
 
     if not Tensor.training:
       cl = cl.softmax(1)
@@ -212,19 +214,26 @@ class Heads:
       if not hasattr(self, "y_arange"): self.y_arange = Tensor.arange(256).unsqueeze(1)
       x = (x.softmax() @ self.x_arange).float()
       y = (y.softmax() @ self.y_arange).float()
+
       # dist = (dist.softmax() @ Tensor.arange(64).unsqueeze(1)).float() / 4
 
-      return Tensor.cat(clm, clp, x, y, dim=1)
+      color = color.softmax(1)
+      colorm, colorp = color.argmax(1, keepdim=True), color.max(1, keepdim=True).float()
 
-    return cl, x, y
+      number = number.softmax(1)
+      numberm, numberp = number.argmax(1, keepdim=True) + 1, number.max(1, keepdim=True).float()
+
+      return Tensor.cat(clm, clp, x, y, colorm, colorp, numberm, numberp, dim=1)
+
+    return cl, x, y, color, number
 
 class Model:
-  def __init__(self, dim:int=192, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2]):
+  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 5, 2]):
     # feature extractor
     self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, attn=True)
 
     # decoder
-    self.decoder = Decoder(cstage[-1], dim, blocks=2, token_count=32)
+    self.decoder = Decoder(cstage[-1], dim, blocks=1, token_count=32)
 
     # heads
     self.heads = Heads(dim)
@@ -234,13 +243,8 @@ class Model:
     img = img.cast(dtypes.default_float)
     img = img.permute(0, 3, 1, 2) / 255
 
-    # feature extraction
     xs = self.backbone(img)
-
-    # decoder
     f = self.decoder(xs[-1])
-
-    # heads
     return self.heads(f)
 
 

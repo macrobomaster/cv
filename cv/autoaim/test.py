@@ -37,7 +37,11 @@ if __name__ == "__main__":
 
     # predict
     model_out = pred(model, Tensor(img, device="NPY")).tolist()[0]
-    cl, clp, x, y = model_out[0], model_out[1], model_out[2], model_out[3]
+    cl, clp, x, y, colorm, colorp, numberm, numberp = model_out[0], model_out[1], model_out[2], model_out[3], model_out[4], model_out[5], model_out[6], model_out[7]
+    match colorm:
+      case 1: colorm = "red"
+      case 2: colorm = "blue"
+      case _: colorm = "blank"
 
     # draw the annotation
     cv2.putText(img, f"{cl}: {clp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
@@ -45,6 +49,8 @@ if __name__ == "__main__":
       x, y = int(x), int(y)
       cv2.circle(img, (x, y), 5, (0, 255, 0), -1)
       # cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+      cv2.putText(img, f"{colorm}: {colorp:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+      cv2.putText(img, f"{numberm}: {numberp:.3f}", (x, y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     cv2.imshow("img", img)
 
