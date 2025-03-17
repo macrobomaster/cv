@@ -20,7 +20,7 @@ class CLAMB(Optimizer):
       m_hat = self.m[i] / (1.0 - self.b1_t)
       v_hat = self.v[i] / (1.0 - self.b2_t)
       cmask = (m_hat * g > 0).cast(t.dtype)
-      cmask = cmask * (cmask.numel() / (cmask.sum() + 1))
+      cmask = cmask / cmask.mean().clamp(min_=1e-3)
       up = ((m_hat * cmask) / (v_hat.sqrt() + self.eps)) + self.wd * t.detach()
       if not self.adam:
         r1 = t.detach().square().sum().sqrt()
