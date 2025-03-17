@@ -1,5 +1,6 @@
 import glob
 
+from tinygrad.helpers import getenv
 from tinygrad.tensor import _to_np_dtype
 from tinygrad.device import Device
 from tinygrad.dtype import dtypes
@@ -17,8 +18,29 @@ from .syndata import generate_sample
 def get_train_files():
   real_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
   real_files = [f"path:{f}" for f in real_files]
-  fake_files = ["fake:3", "fake:4", "fake:5"] * len(real_files)
-  return real_files + fake_files
+
+  fake_files = [
+    "fake:3_blank",
+    "fake:4_blank",
+    "fake:5_blank",
+
+    "fake:2_red",
+    "fake:3_red",
+    "fake:4_red",
+    "fake:5_red",
+    "fake:6_red",
+
+    "fake:2_blue",
+    "fake:3_blue",
+    "fake:4_blue",
+    "fake:5_blue",
+    "fake:6_blue",
+  ] * len(real_files)
+
+  if getenv("FINETUNE", 0):
+    return real_files
+  else:
+    return fake_files
 
 OUTPUT_PIPELINE = None
 def load_single_file(file):
@@ -37,7 +59,7 @@ def load_single_file(file):
       ], p=0.2),
     ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
-  detected, x, y, dist = 0, 0, 0, 0
+  detected, x, y, dist, color, number = 0, 0, 0, -1, -1, -1
   if file.startswith("path:"):
     img = pyvips.Image.new_from_file(file[5:], access="sequential").numpy()
     img = img[..., :3]
@@ -50,7 +72,7 @@ def load_single_file(file):
     # transform points
     x, y = x * (img.shape[1] - 1), (1 - y) * (img.shape[0] - 1)
   elif file.startswith("fake:"):
-    img, x, y = generate_sample(file)
+    img, x, y, color, number = generate_sample(file)
 
   output = OUTPUT_PIPELINE(image=img, keypoints=[(x, y)])
   img = output["image"]
@@ -60,9 +82,11 @@ def load_single_file(file):
   else:
     detected = 1
 
+  number -= 1
+
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, x, y, dist), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
+    "y": np.array((detected, x, y, dist, color, number), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
   }
 
 def single_batch(iter):

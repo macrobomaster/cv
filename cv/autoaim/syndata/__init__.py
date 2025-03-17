@@ -13,7 +13,7 @@ PLATE2_PIPELINE = None
 BACKGROUND_PIPELINE = None
 plate_images = {}
 background_images = []
-def generate_sample(file) -> tuple[cv2.Mat, float, float]:
+def generate_sample(file) -> tuple[cv2.Mat, float, float, int, int]:
   global PLATE_PIPELINE, PLATE2_PIPELINE, BACKGROUND_PIPELINE, plate_images, background_images
   if PLATE_PIPELINE is None:
     PLATE_PIPELINE = A.Compose([
@@ -32,10 +32,12 @@ def generate_sample(file) -> tuple[cv2.Mat, float, float]:
     ])
 
   # preload plate image
-  plate = int(file.split(":")[1])
+  plate = file.split(":")[1]
+  number = int(plate.split("_")[0])
+  color = plate.split("_")[1]
   if plate not in plate_images:
     tqdm.write(f"loading plate {plate}")
-    plate_img = pyvips.Image.new_from_file(str(BASE_PATH / "armor_plate" / f"{plate}_front.png"), access="sequential").numpy()
+    plate_img = pyvips.Image.new_from_file(str(BASE_PATH / "armor_plate" / f"{plate}.png"), access="sequential").numpy()
     # resize so that max side length is 512
     if plate_img.shape[0] > plate_img.shape[1]:
       plate_img = cv2.resize(plate_img, (int(512 * plate_img.shape[1] / plate_img.shape[0]), 512))
@@ -67,4 +69,10 @@ def generate_sample(file) -> tuple[cv2.Mat, float, float]:
   y = random.randint(0, img.shape[0] - plate.shape[0])
   alpha_overlay(plate, img, x, y)
 
-  return img, x + plate_out["keypoints"][0][0], y + plate_out["keypoints"][0][1]
+  # turn color into int
+  match color:
+    case "red": color = 1
+    case "blue": color = 2
+    case _: color = 3
+
+  return img, x + plate_out["keypoints"][0][0], y + plate_out["keypoints"][0][1], color, number
