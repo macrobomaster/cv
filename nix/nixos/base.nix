@@ -204,9 +204,6 @@
   };
 
   # containers
-  virtualisation.docker.enable = true;
-  virtualisation.docker.enableNvidia = true;
-  virtualisation.docker.daemon.settings = {
-    features.cdi = true;
-  };
+  virtualisation.podman.enable = true;
+  virtualisation.podman.enableNvidia = true;
 }
