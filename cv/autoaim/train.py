@@ -23,7 +23,7 @@ WARMUP_STEPS = 200
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 20
+EPOCHS = 10
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor, Tensor], y: Tensor):
@@ -72,14 +72,19 @@ def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor, Tensor], y: Tensor):
 
 @TinyJit
 def train_step(x, y, lr):
+  optim.zero_grad()
+
   yuv = rgb_to_yuv420_tensor(x)
 
   pred = model(yuv)
   loss = loss_fn(pred, y)
 
-  optim.lr.assign(lr)
-  optim.zero_grad()
+  # (loss * 1024).backward()
+  # for p in optim.params:
+  #   p.grad = p.grad / 1024
   loss.backward()
+
+  optim.lr.assign(lr.to(optim.lr.device))
   optim.step()
 
   if getenv("NAN", 0):
@@ -90,7 +95,7 @@ def train_step(x, y, lr):
     for s in wsums.values(): s.realize()
     return loss, gsums, wsums
 
-  return loss.float().realize()
+  return loss.float().to("CPU")
 
 warming_up = True
 def get_lr(step:int) -> float:
@@ -143,7 +148,7 @@ if __name__ == "__main__":
       GlobalCounters.reset()
 
       lr = get_lr(steps)
-      loss = train_step(proc[0], proc[1], Tensor([lr], dtype=dtypes.float32))
+      loss = train_step(proc[0], proc[1], Tensor([lr], dtype=dtypes.float32, device="PYTHON"))
       if getenv("NAN", 0):
         loss, gsums, wsums = loss
       pt = time.perf_counter()
