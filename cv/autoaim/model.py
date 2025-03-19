@@ -1,34 +1,49 @@
+from typing import cast
 from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import BatchNorm, LayerNorm, ConvNorm, Attention, SE
+from ..common.nn import BatchNorm, ConvNorm, Attention, SE
 
 def nonlinear(x:Tensor) -> Tensor: return x.gelu()
 
 class TokenMixer:
-  def __init__(self, dim:int, attn:bool=False):
+  def __init__(self, dim:int, attn:bool=False, sideband:int=0):
+    assert sideband == 0 or attn, "attn required for sideband"
     self.has_attn = attn
+    self.sideband = sideband
 
     if self.has_attn:
       self.attn = Attention(dim, dim // 4, heads=1, out="mod")
     else:
       self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
 
-  def __call__(self, x:Tensor) -> Tensor:
+  def __call__(self, x:Tensor, sb:Tensor|None=None) -> Tensor | tuple[Tensor, Tensor]:
     if self.has_attn:
       b, c, h, w = x.shape
+
       x = x.flatten(2).transpose(1, 2)
-      x = self.attn(x).transpose(1, 2).reshape(b, c, h, w)
+      if sb is not None:
+        x = x.cat(sb.reshape(b, self.sideband, c), dim=1)
+
+      x = self.attn(x)
+
+      if sb is not None:
+        x, sb = x.split([h * w, self.sideband], dim=1)
+        sb = sb.reshape(b, -1)
+      x = x.transpose(1, 2).reshape(b, c, h, w)
+
+      if sb is not None: return x, sb
+      else: return x
     else:
       x = self.conv7x7(x)
-
-    return x
+      return x
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2, mix:bool=False):
     if cout == 0: cout = cin
+
     self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
     if mix: self.mix = nn.Conv2d(cout * exp, cout * exp, 3, 1, 1, groups=cout * exp, bias=False)
     self.down = nn.Conv2d((cout * exp)//2 if mix else cout * exp, cout, 1, 1, 0, bias=False)
@@ -43,17 +58,40 @@ class ChannelMixer:
     return self.down(x)
 
 class Block:
-  def __init__(self, dim:int, attn:bool=False):
-    self.tnorm = BatchNorm(dim)
-    self.token_mixer = TokenMixer(dim, attn=attn)
-    self.cnorm = BatchNorm(dim)
-    self.channel_mixer = ChannelMixer(dim, mix=True)
+  def __init__(self, dim:int, attn:bool=False, sideband:int=0, last:bool=False):
+    assert sideband == 0 or attn, "attn required for sideband"
 
-  def __call__(self, x:Tensor) -> Tensor:
-    xx = self.token_mixer(self.tnorm(x))
+    self.tnorm = BatchNorm(dim)
+    if sideband > 0: self.sideband_tnorm = BatchNorm(dim * sideband)
+    self.token_mixer = TokenMixer(dim, attn=attn, sideband=sideband)
+
+    self.last = last
+    if not last:
+      self.cnorm = BatchNorm(dim)
+      self.channel_mixer = ChannelMixer(dim, mix=True)
+
+    if sideband > 0:
+      self.sideband_cnorm = BatchNorm(dim * sideband)
+      self.sideband_channel_mixer = FFN(dim * sideband, dim * sideband, dim * sideband * 2, blocks=0)
+
+  def __call__(self, x:Tensor, sb:Tensor|None=None) -> Tensor | tuple[Tensor, Tensor]:
+    if sb is not None:
+      xx, sbsb = self.token_mixer(self.tnorm(x), self.sideband_tnorm(sb))
+      sb = sb + sbsb
+    else:
+      xx = self.token_mixer(self.tnorm(x))
     x = x + xx
-    xx = self.channel_mixer(self.cnorm(xx))
-    return x + xx
+
+    if not self.last:
+      xx = self.channel_mixer(self.cnorm(x))
+      x = x + xx
+
+    if sb is not None:
+      sbsb = self.sideband_channel_mixer(self.sideband_cnorm(sb))
+      sb = sb + sbsb
+
+    if sb is not None: return x, sb
+    else: return x
 
 class Downsample:
   def __init__(self, cin:int, cout:int):
@@ -71,18 +109,27 @@ class Downsample:
     return x + xx
 
 class Stage:
-  def __init__(self, cin:int, cout:int, num_blocks:int, attn:bool=False):
-    self.downsample = Downsample(cin, cout) if cin != cout else lambda x: x
-    self.blocks = [Block(cout, attn=attn) for _ in range(num_blocks)]
+  def __init__(self, cin:int, cout:int, num_blocks:int, attn:bool=False, sideband:int=0, last:bool=False):
+    if cin != cout: self.downsample = Downsample(cin, cout)
+    self.blocks = [Block(cout, attn=attn, sideband=sideband, last=last and i==num_blocks-1) for i in range(num_blocks)]
 
-  def __call__(self, x:Tensor) -> Tensor:
-    x = self.downsample(x)
-    return x.sequential(self.blocks)
+  def __call__(self, x:Tensor, sb:Tensor|None=None) -> Tensor | tuple[Tensor, Tensor]:
+    if hasattr(self, "downsample"):
+      x = self.downsample(x)
+
+    for block in self.blocks:
+      if sb is not None:
+        x, sb = block(x, sb)
+      else:
+        x = cast(Tensor, block(x))
+
+    if sb is not None: return x, sb
+    return x
 
 class Stem:
   def __init__(self, cin:int, cout:int):
-    self.conv1 = ConvNorm(cin, cout // 2, 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(cout // 2, cout * 2, 5, 2, 2, bias=False)
+    self.conv1 = ConvNorm(cin, min(cin * 2, cout // 2), 5, 2, 2, bias=False)
+    self.conv2 = ConvNorm(min(cin * 2, cout // 2), cout * 2, 5, 2, 2, bias=False)
     self.proj = ConvNorm(cout * 2, cout, 1, 1, 0, bias=False)
     self.se = SE(cout, cout // 8)
 
@@ -93,41 +140,51 @@ class Stem:
     return self.se(x)
 
 class Backbone:
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], attn:bool):
+  def __init__(self, cin:int, cstage:list[int], stages:list[int], attn:bool, sideband:int=0):
     self.stem = Stem(cin, cstage[0])
 
     self.stage0 = Stage(cstage[0], cstage[0], stages[0])
     self.stage1 = Stage(cstage[0], cstage[1], stages[1])
-    self.stage2 = Stage(cstage[1], cstage[2], stages[2], attn=attn)
-    self.stage3 = Stage(cstage[2], cstage[3], stages[3], attn=attn)
+    self.stage2 = Stage(cstage[1], cstage[2], stages[2], attn=attn, sideband=sideband)
+    if sideband > 0: self.stage2_sideband_proj = nn.Linear(cstage[2] * sideband, cstage[3] * sideband, bias=False)
+    self.stage3 = Stage(cstage[2], cstage[3], stages[3], attn=attn, sideband=sideband, last=True)
 
-  def __call__(self, x:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+  def __call__(self, x:Tensor, sb:Tensor|None=None) -> tuple[Tensor, Tensor, Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     x = self.stem(x)
 
-    x0 = self.stage0(x)
-    x1 = self.stage1(x0)
-    x2 = self.stage2(x1)
-    x3 = self.stage3(x2)
+    x0 = cast(Tensor, self.stage0(x))
+    x1 = cast(Tensor, self.stage1(x0))
+    if sb is not None:
+      x2, sb = self.stage2(x1, sb)
+      sb = self.stage2_sideband_proj(sb)
+      x3, sb = self.stage3(x2, sb)
+    else:
+      x2 = cast(Tensor, self.stage2(x1))
+      x3 = cast(Tensor, self.stage3(x2))
 
+    if sb is not None: return x0, x1, x2, x3, sb
     return x0, x1, x2, x3
 
 class FFNBlock:
-  def __init__(self, dim:int, exp:int):
+  def __init__(self, dim:int, exp:int, norm:bool=True):
+    if norm: self.norm = BatchNorm(dim)
     self.up = nn.Linear(dim, dim * exp)
     self.mix = nn.Linear(dim * exp, dim * exp)
     self.down = nn.Linear((dim * exp)//2, dim)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = nonlinear(self.up(x))
+    if hasattr(self, "norm"): xx = self.norm(x)
+    else: xx = x
+    xx = nonlinear(self.up(xx))
     xx, gate = self.mix(xx).chunk(2, dim=-1)
     xx = xx * nonlinear(gate)
     xx = nonlinear(self.down(xx))
     return x + xx
 
 class FFN:
-  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1):
+  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1, norm:bool=True):
     self.up = nn.Linear(in_dim, mid_dim)
-    self.blocks = [FFNBlock(mid_dim, exp) for _ in range(blocks)]
+    self.blocks = [FFNBlock(mid_dim, exp, norm) for _ in range(blocks)]
     self.down = nn.Linear(mid_dim, out_dim)
 
   def __call__(self, x:Tensor) -> Tensor:
@@ -135,52 +192,12 @@ class FFN:
     x = x.sequential(self.blocks)
     return self.down(x)
 
-class DecoderBlock:
-  def __init__(self, dim:int):
-    self.cross_attn_norm = LayerNorm(dim)
-    self.cross_attn = Attention(dim, dim, heads=4)
-    self.ffn_norm = LayerNorm(dim)
-    self.ffn = FFN(dim, dim, dim*2, blocks=0)
-
-  def __call__(self, x:Tensor, kv:Tensor) -> Tensor:
-    if hasattr(self, "self_attn"):
-      xx = self.self_attn(self.self_attn_norm(x))
-      x = x + xx
-    xx = self.cross_attn(self.cross_attn_norm(x), kv)
-    x = x + xx
-    xx = self.ffn(self.ffn_norm(x))
-    return x + xx
-
 class Decoder:
-  def __init__(self, cin:int, cout:int, blocks:int, token_count:int):
-    self.proj = ConvNorm(cin, cout, 1, 1, 0, bias=False)
-    self.token_count = token_count
-    self.pos_emb = nn.Embedding(token_count, cout)
-    self.query_emb = nn.Embedding(1, cout)
-    self.blocks = [DecoderBlock(cout) for _ in range(blocks)]
+  def __init__(self, cin:int, cout:int, blocks:int):
+    self.ffn = FFN(cin, cout, cout, exp=2, blocks=blocks, norm=True)
 
-  def __call__(self, x:Tensor) -> Tensor:
-    x = nonlinear(self.proj(x))
-
-    # flatten
-    x = x.flatten(2).transpose(1, 2)
-    assert x.shape[1] == self.token_count, f"expected {self.token_count} tokens, got {x.shape[1]}"
-
-    # add positional embedding
-    if not hasattr(self, "pos_arange"):
-      self.pos_arange = Tensor.arange(self.token_count).unsqueeze(0)
-    x = x + self.pos_emb(self.pos_arange).expand(x.shape[0], -1, -1)
-
-    # query
-    if not hasattr(self, "query"):
-      self.query = Tensor([0]).unsqueeze(0)
-    query = self.query_emb(self.query).expand(x.shape[0], -1, -1)
-
-    # blocks
-    for block in self.blocks:
-      x = block(query, x)
-
-    return x[:, 0, :]
+  def __call__(self, sb:Tensor) -> Tensor:
+    return self.ffn(sb)
 
 class Head:
   def __init__(self, in_dim:int, mid_dim:int, out_dim:int):
@@ -228,14 +245,10 @@ class Heads:
     return cl, x, y, color, number
 
 class Model:
-  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 5, 2]):
-    # feature extractor
-    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, attn=True)
-
-    # decoder
-    self.decoder = Decoder(cstage[-1], dim, blocks=1, token_count=32)
-
-    # heads
+  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=4):
+    self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
+    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, attn=True, sideband=sideband)
+    self.decoder = Decoder(cstage[-1] * sideband, dim, blocks=1)
     self.heads = Heads(dim)
 
   def __call__(self, img:Tensor):
@@ -243,7 +256,7 @@ class Model:
     img = img.cast(dtypes.default_float)
     img = img.permute(0, 3, 1, 2) / 255
 
-    xs = self.backbone(img)
+    xs = self.backbone(img, self.sideband.expand(img.shape[0], -1))
     f = self.decoder(xs[-1])
     return self.heads(f)
 
