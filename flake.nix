@@ -86,7 +86,7 @@
                       "pillow"
                       "tokenizers"
                     ];
-                    nativeBuildInputs = with p; [poetry-core];
+                    nativeBuildInputs = with p; [ poetry-core ];
                     propagatedBuildInputs = with p; [
                       numpy
                       onnx
@@ -109,6 +109,10 @@
               gobject-introspection
               llvmPackages_latest.clang-unwrapped
             ];
+
+          shellHook = ''
+            export CC=${pkgs-x86_64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
+          '';
         };
         aarch64-linux.default = pkgs-aarch64-linux.mkShell {
           packages =
@@ -149,6 +153,10 @@
               cudaPackages.cudatoolkit
               gcc13
             ];
+
+          shellHook = ''
+            export CC=${pkgs-aarch64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
+          '';
         };
       };
 
