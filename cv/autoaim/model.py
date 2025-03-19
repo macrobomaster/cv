@@ -275,13 +275,17 @@ if __name__ == "__main__":
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
     return model(x)
-  run(Tensor.randn(1, 128, 256, 6))
+  x = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(Tensor.randn(1, 128, 256, 6))
+  run(x)
+  x = Tensor.randn(1, 128, 256, 6).realize()
+  GlobalCounters.reset()
+  run(x)
 
   # full run
+  x = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(Tensor.randn(1, 128, 256, 6))
+  run(x)
 
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
   print(f"backbone parameters: {sum(p.numel() for p in get_parameters(model.backbone))}")
