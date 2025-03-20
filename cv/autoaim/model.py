@@ -41,40 +41,42 @@ class TokenMixer:
       return x
 
 class ChannelMixer:
-  def __init__(self, cin:int, cout:int=0, exp:int=2, mix:bool=False):
+  def __init__(self, cin:int, cout:int=0, exp:int=2):
     if cout == 0: cout = cin
 
     self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
-    if mix: self.mix = nn.Conv2d(cout * exp, cout * exp, 3, 1, 1, groups=cout * exp, bias=False)
-    self.down = nn.Conv2d((cout * exp)//2 if mix else cout * exp, cout, 1, 1, 0, bias=False)
+    self.down = nn.Conv2d(cout * exp, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.up(x)
-    if hasattr(self, "mix"):
-      x, gate = self.mix(x).chunk(2, dim=1)
-      x = x * nonlinear(gate)
-    else:
-      x = nonlinear(x)
+    x = nonlinear(self.up(x))
     return self.down(x)
 
 class Block:
   def __init__(self, dim:int, attn:bool=False, sideband:int=0, last:bool=False):
     assert sideband == 0 or attn, "attn required for sideband"
 
+    if attn:
+      self.cpe_norm = BatchNorm(dim)
+      self.cpe = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
+
     self.tnorm = BatchNorm(dim)
-    if sideband > 0: self.sideband_tnorm = BatchNorm(dim * sideband)
+    if sideband > 0: self.sideband_tnorm = nn.RMSNorm(dim * sideband)
     self.token_mixer = TokenMixer(dim, attn=attn, sideband=sideband)
 
     self.last = last
     if not last:
       self.cnorm = BatchNorm(dim)
-      self.channel_mixer = ChannelMixer(dim, mix=True)
+      self.channel_mixer = ChannelMixer(dim)
 
     if sideband > 0:
-      self.sideband_cnorm = BatchNorm(dim * sideband)
+      self.sideband_cnorm = nn.RMSNorm(dim * sideband)
       self.sideband_channel_mixer = FFN(dim * sideband, dim * sideband, dim * sideband * 2, blocks=0)
 
   def __call__(self, x:Tensor, sb:Tensor|None=None) -> Tensor | tuple[Tensor, Tensor]:
+    if hasattr(self, "cpe"):
+      xx = self.cpe(self.cpe_norm(x))
+      x = x + xx
+
     if sb is not None:
       xx, sbsb = self.token_mixer(self.tnorm(x), self.sideband_tnorm(sb))
       sb = sb + sbsb
@@ -128,8 +130,8 @@ class Stage:
 
 class Stem:
   def __init__(self, cin:int, cout:int):
-    self.conv1 = ConvNorm(cin, min(cin * 2, cout // 2), 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(min(cin * 2, cout // 2), cout * 2, 5, 2, 2, bias=False)
+    self.conv1 = ConvNorm(cin, cout // 2, 5, 2, 2, bias=False)
+    self.conv2 = ConvNorm(cout // 2, cout * 2, 5, 2, 2, bias=False)
     self.proj = ConvNorm(cout * 2, cout, 1, 1, 0, bias=False)
     self.se = SE(cout, cout // 8)
 
@@ -146,7 +148,9 @@ class Backbone:
     self.stage0 = Stage(cstage[0], cstage[0], stages[0])
     self.stage1 = Stage(cstage[0], cstage[1], stages[1])
     self.stage2 = Stage(cstage[1], cstage[2], stages[2], attn=attn, sideband=sideband)
-    if sideband > 0: self.stage2_sideband_proj = nn.Linear(cstage[2] * sideband, cstage[3] * sideband, bias=False)
+    if sideband > 0:
+      self.stage2_sideband_norm = nn.RMSNorm(cstage[2] * sideband)
+      self.stage2_sideband_proj = nn.Linear(cstage[2] * sideband, cstage[3] * sideband, bias=False)
     self.stage3 = Stage(cstage[2], cstage[3], stages[3], attn=attn, sideband=sideband, last=True)
 
   def __call__(self, x:Tensor, sb:Tensor|None=None) -> tuple[Tensor, Tensor, Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -156,7 +160,7 @@ class Backbone:
     x1 = cast(Tensor, self.stage1(x0))
     if sb is not None:
       x2, sb = self.stage2(x1, sb)
-      sb = self.stage2_sideband_proj(sb)
+      sb = self.stage2_sideband_proj(self.stage2_sideband_norm(sb))
       x3, sb = self.stage3(x2, sb)
     else:
       x2 = cast(Tensor, self.stage2(x1))
@@ -201,7 +205,7 @@ class Decoder:
 
 class Head:
   def __init__(self, in_dim:int, mid_dim:int, out_dim:int):
-    self.ffn = FFN(in_dim, mid_dim, out_dim, blocks=1, exp=2)
+    self.ffn = FFN(in_dim, mid_dim, out_dim, blocks=1, exp=2, norm=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     return self.ffn(x)
@@ -245,7 +249,7 @@ class Heads:
     return cl, x, y, color, number
 
 class Model:
-  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=4):
+  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=2):
     self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
     self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, attn=True, sideband=sideband)
     self.decoder = Decoder(cstage[-1] * sideband, dim, blocks=1)

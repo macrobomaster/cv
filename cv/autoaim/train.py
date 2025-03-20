@@ -19,11 +19,11 @@ from ..common.image import rgb_to_yuv420_tensor
 from ..common.dataloader import batch_load, BatchDesc
 
 BS = 256
-WARMUP_STEPS = 200
+WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 10
+EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor, Tensor], y: Tensor):
