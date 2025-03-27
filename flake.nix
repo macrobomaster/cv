@@ -98,6 +98,7 @@
                     ];
                     doCheck = false;
                   })
+                  pyserial
                 ];
               python = pkgs-x86_64-linux.python312;
             in
@@ -136,6 +137,7 @@
                   pygobject3
                   pygobject-stubs
                   onnx
+                  pyserial
                 ];
               python = pkgs-aarch64-linux.python312;
             in
