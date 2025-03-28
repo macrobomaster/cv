@@ -7,11 +7,13 @@ from tinygrad.dtype import dtypes
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from tinygrad.helpers import GlobalCounters, getenv
 import cv2
+import serial
 
 from .model import Model
 from .common import pred
 from ..common import BASE_PATH
 from ..common.camera import setup_aravis, get_aravis_frame
+from ..common.protocol import Protocol, Command
 
 def frame_thread_fn(stop_event: threading.Event, frame_queue: Queue):
   cam, strm = setup_aravis()
@@ -46,6 +48,9 @@ if __name__ == "__main__":
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
+  port = serial.Serial("/dev/ttyUSB0", 115200)
+  protocol = Protocol(port)
+
   st = time.perf_counter()
   img, ft = frame_queue.get()
   imgt = Tensor(img, dtype=dtypes.uint8)
@@ -78,12 +83,15 @@ if __name__ == "__main__":
 
       # draw the annotation
       cv2.putText(img, f"{cl}: {clp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-      if cl == 1 and clp > 0.0:
+      if cl == 1 and clp > 0.6:
         x, y = int(x), int(y)
         cv2.circle(img, (x, y), 5, (0, 255, 0), -1)
         # cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         cv2.putText(img, f"{colorm}: {colorp:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         cv2.putText(img, f"{numberm}: {numberp:.3f}", (x, y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        # send aim error over protocol
+        protocol.msg(Command.AIM_ERROR, (x - 256) / 256, (y - 128) / 128)
 
       # display
       img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
