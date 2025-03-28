@@ -199,3 +199,30 @@ class RecConv:
       x = conv(self.up(x) + f)
 
     return x
+
+class FFNBlock:
+  def __init__(self, dim:int, exp:int, norm:bool=True):
+    if norm: self.norm = BatchNorm(dim)
+    self.up = nn.Linear(dim, dim * exp)
+    self.mix = nn.Linear(dim * exp, dim * exp)
+    self.down = nn.Linear((dim * exp)//2, dim)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    if hasattr(self, "norm"): xx = self.norm(x)
+    else: xx = x
+    xx = self.up(xx).gelu()
+    xx, gate = self.mix(xx).chunk(2, dim=-1)
+    xx = xx * gate.gelu()
+    xx = self.down(xx).gelu()
+    return x + xx
+
+class FFN:
+  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1, norm:bool=True):
+    self.up = nn.Linear(in_dim, mid_dim)
+    self.blocks = [FFNBlock(mid_dim, exp, norm) for _ in range(blocks)]
+    self.down = nn.Linear(mid_dim, out_dim)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    x = self.up(x).gelu()
+    x = x.sequential(self.blocks)
+    return self.down(x)
