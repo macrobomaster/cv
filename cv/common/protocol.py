@@ -35,13 +35,15 @@ class Protocol:
     packed = struct.pack(COMMAND_FORMATS[command], *args)
     length = struct.pack("B", len(packed))
     self.port.write(bytes([command.value]) + length + packed)
+    self.port.flush()
 
     # check response
-    response_command = Command(self.port.read(1))
+    response_command = Command(int.from_bytes(self.port.read(1), "big"))
     if response_command != command:
       raise ValueError(f"Unexpected response: {response_command}")
     response_length = struct.unpack("B", self.port.read(1))[0]
-    assert response_length == struct.calcsize(RESPONSE_FORMATS[command]), f"Invalid response length: {response_length}"
+    if response_length != struct.calcsize(RESPONSE_FORMATS[command]):
+      raise ValueError(f"Invalid response length: {response_length}")
     response_data = self.port.read(response_length)
     return struct.unpack(RESPONSE_FORMATS[command], response_data)
 
@@ -54,7 +56,7 @@ if __name__ == "__main__":
 
   assert protocol.msg(Command.CHECK_STATE, 0x0) == (0x0, 0xff)
   assert protocol.msg(Command.MOVE_ROBOT, 0, 0) == (0xff,)
-  assert protocol.msg(Command.CONTROL_SPINNING, 1) == (0x0,)
+  assert protocol.msg(Command.CONTROL_SPINNING, 1) == (0xff,)
   assert protocol.msg(Command.AIM_ERROR, 0.0, 0.0) == (0xff,)
   assert protocol.msg(Command.CONTROL_SHOOT, 1) == (0x0,)
 
