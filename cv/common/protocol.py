@@ -34,7 +34,7 @@ class Protocol:
       raise ValueError(f"Invalid command: {command}")
     packed = struct.pack(COMMAND_FORMATS[command], *args)
     length = struct.pack("B", len(packed))
-    self.port.write(bytes([command.value]), length, packed)
+    self.port.write(bytes([command.value]) + length + packed)
 
     # check response
     response_command = Command(self.port.read(1))
