@@ -48,7 +48,7 @@ if __name__ == "__main__":
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
-  port = serial.Serial("/dev/ttyUSB0", 115200)
+  port = serial.Serial("/dev/ttyAMA0", 115200)
   protocol = Protocol(port)
 
   st = time.perf_counter()
