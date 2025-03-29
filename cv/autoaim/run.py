@@ -91,7 +91,7 @@ if __name__ == "__main__":
         cv2.putText(img, f"{numberm}: {numberp:.3f}", (x, y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         # send aim error over protocol
-        protocol.msg(Command.AIM_ERROR, (x - 256) / 256, (y - 128) / 128)
+        # protocol.msg(Command.AIM_ERROR, (x - 256) / 256, (y - 128) / 128)
 
       # display
       img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
