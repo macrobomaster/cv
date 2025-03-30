@@ -2,10 +2,13 @@ import logging
 
 class Logger:
   def __init__(self):
-    self.logger = logging.getLogger("system")
+    self.logger = logging.getLogger()
 
   def bind(self, name:str):
     self.logger = self.logger.getChild(name)
+  def unbind(self):
+    if self.logger.parent is not None:
+      self.logger = self.logger.parent
 
   def debug(self, *args, **kwargs): self.logger.debug(*args, **kwargs)
   def info(self, *args, **kwargs): self.logger.info(*args, **kwargs)

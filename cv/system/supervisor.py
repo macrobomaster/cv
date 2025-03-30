@@ -27,6 +27,7 @@ class SupervisedProcess:
 
       setproctitle(name)
 
+      logger.unbind()
       logger.bind(name)
 
       mod.run()
@@ -101,6 +102,7 @@ class Supervisor:
 
   def run(self):
     logger.bind("supervisor")
+    setproctitle("supervisor")
 
     try:
       self.ensure_running()
