@@ -6,16 +6,17 @@ from setproctitle import setproctitle
 from tinygrad.helpers import colored
 
 from .logging import logger
+from .keyvalue import kv_getall
 
 class SupervisedProcess:
   name: str
   module: str
-  should_run: Callable[[], bool]
+  should_run: Callable[[dict], bool]
 
   proc: Process | None = None
   shutting_down: bool = False
 
-  def __init__(self, name:str, module:str, should_run:Callable[[], bool]=lambda: True):
+  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda kv: True):
     self.name = name
     self.module = module
     self.should_run = should_run
@@ -105,12 +106,14 @@ class Supervisor:
     setproctitle("supervisor")
 
     try:
-      self.ensure_running()
+      kv = kv_getall("global")
+      self.ensure_running(kv)
 
       while True:
         time.sleep(1)
 
-        self.ensure_running()
+        kv = kv_getall("global")
+        self.ensure_running(kv)
 
         running = " ".join(colored(p.name, "green" if p.proc.is_alive() else "red") for p in self.sprocs.values() if p.proc is not None)
         logger.debug(f"{running}")
@@ -124,9 +127,9 @@ class Supervisor:
       for p in self.sprocs.values():
         p.stop()
 
-  def ensure_running(self):
+  def ensure_running(self, kv:dict):
     for p in self.sprocs.values():
-      if p.should_run():
+      if p.should_run(kv):
         p.start()
       else:
         p.stop(block=False)

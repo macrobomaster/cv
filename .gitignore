@@ -4,3 +4,6 @@ result
 wandb/
 
 __pycache__/
+
+sys/
+base/
