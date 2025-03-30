@@ -32,14 +32,13 @@ class SupervisedProcess:
       logger.bind(name)
 
       mod.run()
+
+      logger.info(f"{name} exiting")
     except KeyboardInterrupt:
       pass
     except Exception:
       logger.error(f"exception in {name}")
-      logger.error(traceback.format_exc())
       raise
-    finally:
-      logger.info(f"{name} exiting")
 
   def start(self):
     if self.shutting_down:
