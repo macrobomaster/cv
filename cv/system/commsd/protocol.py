@@ -1,4 +1,5 @@
 from enum import Enum
+from re import A
 import struct
 
 class Command(Enum):
@@ -29,23 +30,28 @@ class Protocol:
     self.port = port
 
   def msg(self, command, *args):
-    # send message
+    for _ in range(3):
+      try:
+        self._send(command, *args)
+
+        response_command = Command(int.from_bytes(self.port.read(1), "big"))
+        if response_command != command:
+          raise ValueError(f"Unexpected response: {response_command}")
+        response_length = struct.unpack("B", self.port.read(1))[0]
+        if response_length != struct.calcsize(RESPONSE_FORMATS[command]):
+          raise ValueError(f"Invalid response length: {response_length}")
+        response_data = self.port.read(response_length)
+        return struct.unpack(RESPONSE_FORMATS[command], response_data)
+      except serial.SerialTimeoutException:
+        pass
+    raise TimeoutError()
+
+  def _send(self, command, *args):
     if command not in COMMAND_FORMATS:
       raise ValueError(f"Invalid command: {command}")
     packed = struct.pack(COMMAND_FORMATS[command], *args)
     length = struct.pack("B", len(packed))
     self.port.write(bytes([command.value]) + length + packed)
-    self.port.flush()
-
-    # check response
-    response_command = Command(int.from_bytes(self.port.read(1), "big"))
-    if response_command != command:
-      raise ValueError(f"Unexpected response: {response_command}")
-    response_length = struct.unpack("B", self.port.read(1))[0]
-    if response_length != struct.calcsize(RESPONSE_FORMATS[command]):
-      raise ValueError(f"Invalid response length: {response_length}")
-    response_data = self.port.read(response_length)
-    return struct.unpack(RESPONSE_FORMATS[command], response_data)
 
 if __name__ == "__main__":
   import time
