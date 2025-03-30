@@ -99,6 +99,9 @@
                     doCheck = false;
                   })
                   pyserial
+                  pyzmq
+                  cbor2
+                  setproctitle
                 ];
               python = pkgs-x86_64-linux.python312;
             in
@@ -109,6 +112,7 @@
               aravis.lib
               gobject-introspection
               llvmPackages_latest.clang-unwrapped
+              waypipe
             ];
 
           shellHook = ''
@@ -138,6 +142,9 @@
                   pygobject-stubs
                   onnx
                   pyserial
+                  pyzmq
+                  cbor2
+                  setproctitle
                 ];
               python = pkgs-aarch64-linux.python312;
             in
