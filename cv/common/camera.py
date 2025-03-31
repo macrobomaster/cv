@@ -11,8 +11,7 @@ def setup_aravis():
   Aravis.update_device_list()
   devices = Aravis.get_n_devices()
   if devices == 0:
-    print("No camera found")
-    exit()
+    raise Exception("no cameras found")
 
   print(f"using {Aravis.get_device_id(0)}")
   cam = Aravis.Camera.new(Aravis.get_device_id(0))
