@@ -118,6 +118,7 @@
               gobject-introspection
               llvmPackages_latest.clang-unwrapped
               waypipe
+              sqlite-web
             ];
 
           shellHook = ''
