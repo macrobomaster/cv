@@ -19,7 +19,6 @@ def frame_thread_fn(stop_event: threading.Event, frame_queue: Queue):
   while not stop_event.is_set():
     sft = time.perf_counter()
     img = get_aravis_frame(cam, strm)
-    # resize and convert to yuv
     img = cv2.resize(img, (512, 256))
     ft = time.perf_counter() - sft
     frame_queue.put((img, ft))
