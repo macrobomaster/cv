@@ -6,7 +6,11 @@ from .core.helpers import unblock_stdout
 
 PROCS = [
   SupervisedProcess("commsd", "cv.system.commsd.commsd"),
+  SupervisedProcess("camerad", "cv.system.camerad.camerad"),
   SupervisedProcess("autoaimd", "cv.system.autoaimd.autoaimd"),
+  SupervisedProcess("decisiond", "cv.system.decisiond.decisiond"),
+
+  SupervisedProcess("camviewerd", "cv.system.camviewerd.camviewerd"),
 ]
 
 if __name__ == "__main__":
