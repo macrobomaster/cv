@@ -51,7 +51,7 @@ class SupervisedProcess:
       return
 
     logger.info(f"starting {self.module} as {self.name}")
-    self.proc = Process(name=self.name, target=self._start, args=(self.name, self.module))
+    self.proc = Process(name="MainProcess", target=self._start, args=(self.name, self.module))
     self.proc.start()
     self.shutting_down = False
 
