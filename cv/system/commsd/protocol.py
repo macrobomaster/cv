@@ -47,6 +47,11 @@ class Protocol:
         return struct.unpack(RESPONSE_FORMATS[command], response_data)
       except (serial.SerialTimeoutException, TimeoutError):
         pass
+
+    # if we failed 3 times, we probably timed out
+    # flush the input buffer to prevent desync
+    self.port.reset_input_buffer()
+
     raise TimeoutError()
 
   def _send(self, command, *args):
