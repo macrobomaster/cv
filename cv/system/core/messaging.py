@@ -60,8 +60,8 @@ class Sub:
     for service in self.polled_services:
       if socks.get(self.socks[service]) == zmq.POLLIN:
         data = self._read(service)
-        self.data[service] = data
+        if data is not None: self.data[service] = data
 
     for service in self.non_polled_services:
       data = self._read(service)
-      self.data[service] = data
+      if data is not None: self.data[service] = data
