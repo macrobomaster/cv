@@ -6,7 +6,8 @@ from setproctitle import setproctitle
 from tinygrad.helpers import colored
 
 from .logging import logger
-from .keyvalue import kv_getall
+from .keyvalue import kv_getall, kv_clear
+from . import messaging
 
 class SupervisedProcess:
   name: str
@@ -24,12 +25,14 @@ class SupervisedProcess:
   @staticmethod
   def _start(name:str, module:str):
     try:
-      mod = importlib.import_module(module)
+      logger.unbind()
+      logger.bind(name)
+
+      messaging.reset_context()
 
       setproctitle(name)
 
-      logger.unbind()
-      logger.bind(name)
+      mod = importlib.import_module(module)
 
       mod.run()
 
@@ -99,23 +102,24 @@ class Supervisor:
 
   def __init__(self, procs:list[SupervisedProcess]):
     self.sprocs = {p.name: p for p in procs}
+    kv_clear("global_rt")
 
   def run(self):
     logger.bind("supervisor")
     setproctitle("supervisor")
 
     try:
-      kv = kv_getall("global")
-      self.ensure_running(kv)
-
       while True:
-        time.sleep(1)
-
-        kv = kv_getall("global")
+        kv = kv_getall("global_rt")
         self.ensure_running(kv)
 
         running = " ".join(colored(p.name, "green" if p.proc.is_alive() else "red") for p in self.sprocs.values() if p.proc is not None)
         logger.debug(f"{running}")
+
+        if kv.get("do_shutdown", False):
+          break
+
+        time.sleep(1)
     except Exception:
       logger.error("supervisor exception")
       logger.error(traceback.format_exc())
@@ -125,6 +129,8 @@ class Supervisor:
 
       for p in self.sprocs.values():
         p.stop()
+
+      logger.info("supervisor exiting")
 
   def ensure_running(self, kv:dict):
     for p in self.sprocs.values():
