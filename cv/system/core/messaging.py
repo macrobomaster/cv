@@ -46,22 +46,24 @@ class Sub:
       self.poller.register(self.socks[service], zmq.POLLIN)
 
     self.data = {service: None for service in self.services}
+    self.updated = {service: False for service in self.services}
 
   def __getitem__(self, service:str):
     return self.data[service]
 
-  def _read(self, service:str):
+  def _read_update(self, service:str):
     try: data = self.socks[service].recv(flags=zmq.NOBLOCK)
-    except zmq.error.Again: return None
-    return cbor2.loads(data)
+    except zmq.error.Again: return
+    self.data[service] = cbor2.loads(data)
+    self.updated[service] = True
 
   def update(self, timeout:int=100):
+    self.updated = {service: False for service in self.services}
+
     socks = dict(self.poller.poll(timeout))
     for service in self.polled_services:
       if socks.get(self.socks[service]) == zmq.POLLIN:
-        data = self._read(service)
-        if data is not None: self.data[service] = data
+        self._read_update(service)
 
     for service in self.non_polled_services:
-      data = self._read(service)
-      if data is not None: self.data[service] = data
+      self._read_update(service)
