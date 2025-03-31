@@ -48,6 +48,53 @@ def alpha_overlay(img, background, x, y):
   img = img[:, :, :3]
   background[y:y+img.shape[0], x:x+img.shape[1]] = img * alpha + background[y:y+img.shape[0], x:x+img.shape[1]] * (1 - alpha)
 
+def resize_crop(img, target_width, target_height):
+  if img is None or img.size == 0:
+    raise ValueError("Input image is empty.")
+  if target_width <= 0 or target_height <= 0:
+    raise ValueError("Target width and height must be positive.")
+
+  original_height, original_width = img.shape[:2]
+  target_aspect = target_width / target_height
+  original_aspect = original_width / original_height
+
+  # Calculate scaling factor and intermediate size
+  if original_aspect > target_aspect:
+    # Original image is wider than target aspect ratio
+    scale_ratio = target_height / original_height
+    new_width = int(scale_ratio * original_width)
+    new_height = target_height
+  else:
+    # Original image is taller or same aspect ratio
+    scale_ratio = target_width / original_width
+    new_width = target_width
+    new_height = int(scale_ratio * original_height)
+
+  # Resize the image
+  # Use INTER_AREA for shrinking, INTER_LINEAR for enlarging generally
+  interpolation = cv2.INTER_AREA if scale_ratio < 1 else cv2.INTER_LINEAR
+  resized_img = cv2.resize(img, (new_width, new_height), interpolation=interpolation)
+
+  # Calculate cropping coordinates (center crop)
+  start_x = (new_width - target_width) // 2
+  start_y = (new_height - target_height) // 2
+  # Make sure start coordinates are not negative (can happen with floating point inaccuracies)
+  start_x = max(0, start_x)
+  start_y = max(0, start_y)
+
+  end_x = start_x + target_width
+  end_y = start_y + target_height
+
+  # Crop the image
+  # Ensure cropping bounds do not exceed resized image dimensions
+  cropped_img = resized_img[start_y:min(end_y, new_height), start_x:min(end_x, new_width)]
+
+  # Final resize to guarantee exact target dimensions (handles potential rounding errors)
+  # If cropped_img dimensions are already correct, this won't change much
+  final_img = cv2.resize(cropped_img, (target_width, target_height), interpolation=interpolation)
+
+  return final_img
+
 if __name__ == "__main__":
   img = cv2.imread("test.png")
   img = cv2.resize(img, (812, 1080))
