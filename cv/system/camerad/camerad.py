@@ -7,19 +7,28 @@ from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
 from ...common.image import resize_crop
+from ...common.camera import setup_aravis, get_aravis_frame
 
 def run():
   pub = messaging.Pub(["camera_feed"])
 
-  cap = cv2.VideoCapture(1)
+  if getenv("WEBCAM"):
+    cap = cv2.VideoCapture(1)
+  else:
+    cam, strm = setup_aravis()
 
   while True:
-    ret, frame = cap.read()
-    if not ret:
-      logger.error("failed to read frame")
-      time.sleep(1)
-      continue
+    if getenv("WEBCAM"):
+      ret, frame = cap.read()
+      if not ret:
+        logger.error("failed to read frame")
+        time.sleep(1)
+        continue
+      frame = resize_crop(frame, 512, 256)
+      frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    else:
+      frame = get_aravis_frame(cam, strm)
+      frame = cv2.resize(frame, (512, 256))
+      frame = cv2.rotate(frame, cv2.ROTATE_180)
 
-    frame = resize_crop(frame, 512, 256)
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     pub.send("camera_feed", frame.tobytes())
