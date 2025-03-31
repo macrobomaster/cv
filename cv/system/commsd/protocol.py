@@ -3,6 +3,8 @@ import struct
 
 import serial
 
+from ..core.logging import logger
+
 class Command(Enum):
   CHECK_STATE = 0x00
   MOVE_ROBOT = 0x01
@@ -26,6 +28,9 @@ RESPONSE_FORMATS = {
   Command.CONTROL_SHOOT: 'B',
 }
 
+class State(Enum):
+  GAME_RUNNING = 0x00
+
 class Protocol:
   port: serial.Serial
 
@@ -39,10 +44,10 @@ class Protocol:
 
         response_command = Command(int.from_bytes(self._read(1), "big"))
         if response_command != command:
-          raise ValueError(f"Unexpected response: {response_command}")
+          return None
         response_length = struct.unpack("B", self._read(1))[0]
         if response_length != struct.calcsize(RESPONSE_FORMATS[command]):
-          raise ValueError(f"Invalid response length: {response_length}")
+          return None
         response_data = self._read(response_length)
         return struct.unpack(RESPONSE_FORMATS[command], response_data)
       except (serial.SerialTimeoutException, TimeoutError):
@@ -52,7 +57,7 @@ class Protocol:
     # flush the input buffer to prevent desync
     self.port.reset_input_buffer()
 
-    raise TimeoutError()
+    logger.error(f"command/response timed out")
 
   def _send(self, command, *args):
     if command not in COMMAND_FORMATS:

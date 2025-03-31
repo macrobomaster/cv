@@ -1,20 +1,26 @@
-import time
-
 import serial
 
+from ..core import messaging
 from ..core.logging import logger
-from .protocol import Protocol, Command
+from ..core.keyvalue import kv_get, kv_put
+from .protocol import Protocol, Command, State
 
 def run():
   port = serial.Serial("/dev/ttyUSB0", 115200, timeout=1)
   protocol = Protocol(port)
 
-  while True:
-    time.sleep(1)
-    try:
-      logger.info("checking game running state")
-      state = protocol.msg(Command.CHECK_STATE, 0x0)
-      logger.info(f"game running: {state}")
-    except TimeoutError:
-      logger.error("timeout checking state")
+  pub = messaging.Pub(["game_running"])
+  sub = messaging.Sub(["aim_error"])
 
+  while True:
+    sub.update(10)
+
+    aim_error = sub["aim_error"]
+    if sub.updated["aim_error"] and aim_error is not None:
+      x = aim_error["x"]
+      y = aim_error["y"]
+      protocol.msg(Command.AIM_ERROR, x, y)
+
+    game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
+    if game_running is not None:
+      pub.send("game_state", True if game_running[0] == 0x00 else False)
