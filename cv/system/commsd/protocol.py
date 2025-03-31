@@ -1,6 +1,7 @@
 from enum import Enum
-from re import A
 import struct
+
+import serial
 
 class Command(Enum):
   CHECK_STATE = 0x00
@@ -26,6 +27,8 @@ RESPONSE_FORMATS = {
 }
 
 class Protocol:
+  port: serial.Serial
+
   def __init__(self, port):
     self.port = port
 
@@ -34,15 +37,15 @@ class Protocol:
       try:
         self._send(command, *args)
 
-        response_command = Command(int.from_bytes(self.port.read(1), "big"))
+        response_command = Command(int.from_bytes(self._read(1), "big"))
         if response_command != command:
           raise ValueError(f"Unexpected response: {response_command}")
-        response_length = struct.unpack("B", self.port.read(1))[0]
+        response_length = struct.unpack("B", self._read(1))[0]
         if response_length != struct.calcsize(RESPONSE_FORMATS[command]):
           raise ValueError(f"Invalid response length: {response_length}")
-        response_data = self.port.read(response_length)
+        response_data = self._read(response_length)
         return struct.unpack(RESPONSE_FORMATS[command], response_data)
-      except serial.SerialTimeoutException:
+      except (serial.SerialTimeoutException, TimeoutError):
         pass
     raise TimeoutError()
 
@@ -52,6 +55,12 @@ class Protocol:
     packed = struct.pack(COMMAND_FORMATS[command], *args)
     length = struct.pack("B", len(packed))
     self.port.write(bytes([command.value]) + length + packed)
+
+  def _read(self, length):
+    data = self.port.read(length)
+    if len(data) != length:
+      raise TimeoutError()
+    return data
 
 if __name__ == "__main__":
   import time
