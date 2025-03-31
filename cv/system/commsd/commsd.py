@@ -23,4 +23,4 @@ def run():
 
     game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
     if game_running is not None:
-      pub.send("game_state", True if game_running[0] == 0x00 else False)
+      pub.send("game_running", True if game_running[0] == 0x00 else False)
