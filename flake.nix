@@ -107,6 +107,7 @@
                     ];
                     doCheck = false;
                   })
+                  rerun-sdk
                 ] ++ common-python-packages p;
               python = pkgs-x86_64-linux.python312;
             in
@@ -119,6 +120,7 @@
               llvmPackages_latest.clang-unwrapped
               waypipe
               sqlite-web
+              rerun
             ];
 
           shellHook = ''
