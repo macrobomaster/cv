@@ -53,6 +53,18 @@
         }
         // nixpkgs_config
       );
+
+      common-python-packages = p: with p; [
+        opencv4
+        numpy
+        pygobject3
+        pygobject-stubs
+        pyserial
+        pyzmq
+        cbor2
+        setproctitle
+        xxhash
+      ];
     in
     {
       devShells = {
@@ -62,13 +74,10 @@
               python-packages =
                 p: with p; [
                   albumentations
-                  opencv4
                   pillow
                   pyvips
                   (tinygrad.override { rocmSupport = true; })
                   wandb
-                  pygobject3
-                  pygobject-stubs
                   onnx
                   onnxruntime
                   torchvision
@@ -98,11 +107,7 @@
                     ];
                     doCheck = false;
                   })
-                  pyserial
-                  pyzmq
-                  cbor2
-                  setproctitle
-                ];
+                ] ++ common-python-packages p;
               python = pkgs-x86_64-linux.python312;
             in
             with pkgs-x86_64-linux;
@@ -124,8 +129,6 @@
             let
               python-packages =
                 p: with p; [
-                  opencv4
-                  pillow
                   (
                     (tinygrad.override {
                       cudaSupport = true;
@@ -138,14 +141,7 @@
                       '';
                     })
                   )
-                  pygobject3
-                  pygobject-stubs
-                  onnx
-                  pyserial
-                  pyzmq
-                  cbor2
-                  setproctitle
-                ];
+                ] ++ common-python-packages p;
               python = pkgs-aarch64-linux.python312;
             in
             with pkgs-aarch64-linux;
