@@ -16,7 +16,7 @@ class SupervisedProcess:
   proc: Process | None = None
   shutting_down: bool = False
 
-  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda kv: True):
+  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True):
     self.name = name
     self.module = module
     self.should_run = should_run

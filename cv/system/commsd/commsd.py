@@ -2,7 +2,7 @@ import time
 
 import serial
 
-from ..logging import logger
+from ..core.logging import logger
 from .protocol import Protocol, Command
 
 def run():

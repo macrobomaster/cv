@@ -3,7 +3,7 @@
 import sqlite3, contextlib, pickle
 from typing import Any
 
-from . import SYSTEM_PATH
+from .. import SYSTEM_PATH
 
 KVPATH = SYSTEM_PATH / "keyvalue.db"
 

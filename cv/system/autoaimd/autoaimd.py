@@ -1,6 +1,6 @@
 import time
 
-from ..logging import logger
+from ..core.logging import logger
 
 def run():
   while True:
