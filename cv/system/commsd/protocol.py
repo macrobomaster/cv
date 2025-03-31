@@ -42,8 +42,8 @@ class Protocol:
       try:
         self._send(command, *args)
 
-        response_command = Command(int.from_bytes(self._read(1), "big"))
-        if response_command != command:
+        response_command = int.from_bytes(self._read(1), "big")
+        if response_command != command.value:
           return None
         response_length = struct.unpack("B", self._read(1))[0]
         if response_length != struct.calcsize(RESPONSE_FORMATS[command]):
