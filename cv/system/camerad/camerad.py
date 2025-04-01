@@ -10,6 +10,8 @@ from ...common.image import resize_crop
 from ...common.camera import setup_aravis, get_aravis_frame
 
 def run():
+  kv_put("watchdog", "camerad", time.monotonic())
+
   pub = messaging.Pub(["camera_feed"])
 
   if getenv("WEBCAM"):
@@ -18,6 +20,8 @@ def run():
     cam, strm = setup_aravis()
 
   while True:
+    kv_put("watchdog", "camerad", time.monotonic())
+
     if getenv("WEBCAM"):
       ret, frame = cap.read()
       if not ret:

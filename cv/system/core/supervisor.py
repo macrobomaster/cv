@@ -6,7 +6,7 @@ from setproctitle import setproctitle
 from tinygrad.helpers import colored
 
 from .logging import logger
-from .keyvalue import kv_getall, kv_clear
+from .keyvalue import kv_get, kv_getall, kv_clear
 from . import messaging
 
 class SupervisedProcess:
@@ -17,10 +17,11 @@ class SupervisedProcess:
   proc: Process | None = None
   shutting_down: bool = False
 
-  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True):
+  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True, watchdog_dt:float=-1):
     self.name = name
     self.module = module
     self.should_run = should_run
+    self.watchdog_dt = watchdog_dt
 
   @staticmethod
   def _start(name:str, module:str):
@@ -97,11 +98,27 @@ class SupervisedProcess:
 
     os.kill(self.proc.pid, sig)
 
+  def watchdog(self):
+    if self.watchdog_dt <= 0:
+      return
+
+    if self.proc is None:
+      return
+
+    watchdog_time = kv_get("watchdog", self.name)
+    if watchdog_time is None:
+      return
+
+    if time.monotonic() - watchdog_time > self.watchdog_dt:
+      logger.error(f"{self.name} watchdog timeout")
+      self.restart()
+
 class Supervisor:
   sprocs: dict[str, SupervisedProcess]
 
   def __init__(self, procs:list[SupervisedProcess]):
     self.sprocs = {p.name: p for p in procs}
+
     kv_clear("global_rt")
 
   def run(self):
@@ -138,3 +155,5 @@ class Supervisor:
         p.start()
       else:
         p.stop(block=False)
+
+      p.watchdog()
