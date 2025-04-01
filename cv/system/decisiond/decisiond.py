@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 
 import numpy as np
 import cv2
@@ -7,12 +8,36 @@ from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
 
-class VelocityPlanFollower:
-  def __init__(self):
-    pass
+@dataclass(frozen=True)
+class Waypoint:
+  x: float
+  z: float
+  dt: float
+
+class WaypointFollower:
+  def __init__(self, waypoints:list[Waypoint]):
+    self.waypoints = waypoints
+    self.last_waypoint = Waypoint(0, 0, 0)
+    self.cur_waypoint = self.waypoints.pop(0)
+    self.dt_elapsed = self.cur_waypoint.dt
+    self.elapsed = 0
 
   def step(self, dt:float) -> tuple[float, float]:
-    return 0.0, 0.0
+    self.elapsed += dt
+    if not self.waypoints and self.elapsed > self.dt_elapsed:
+      return 0, 0
+
+    if self.elapsed > self.dt_elapsed:
+      self.last_waypoint = self.cur_waypoint
+      self.cur_waypoint = self.waypoints.pop(0)
+      self.dt_elapsed += self.cur_waypoint.dt
+
+    # compute velocity required to reach the waypoint in the dt
+    dx = self.cur_waypoint.x - self.last_waypoint.x
+    dz = self.cur_waypoint.z - self.last_waypoint.z
+    vx = dx / self.cur_waypoint.dt
+    vz = dz / self.cur_waypoint.dt
+    return vx, vz
 
 class AimErrorKF:
   def __init__(self, dt:float=1/100):
@@ -44,6 +69,13 @@ def run():
 
   aim_error_kf = AimErrorKF()
 
+  follower = WaypointFollower([
+    Waypoint(1, 0, 5),
+    Waypoint(1, 1, 5),
+    Waypoint(0, 1, 5),
+    Waypoint(0, 0, 5),
+  ])
+
   st = time.monotonic()
   while True:
     sub.update(10)
@@ -62,14 +94,7 @@ def run():
     else:
       pub.send("aim_error", {"x": 0.0, "y": 0.0})
 
-    # dt = time.monotonic() - st
-    # if dt < 1:
-    #   pub.send("chassis_velocity", {"x": 1.0, "y": 0.0})
-    # elif dt < 2:
-    #   pub.send("chassis_velocity", {"x": 0.0, "y": 1.0})
-    # elif dt < 3:
-    #   pub.send("chassis_velocity", {"x": -1.0, "y": 0.0})
-    # elif dt < 4:
-    #   pub.send("chassis_velocity", {"x": 0.0, "y": -1.0})
-    # elif dt < 5:
-    #   pub.send("chassis_velocity", {"x": 0.0, "y": 0.0})
+    dt = time.monotonic() - st
+    if dt > 0:
+      vx, vz = follower.step(1/100)
+      pub.send("chassis_velocity", {"x": vx, "z": vz})

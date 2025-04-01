@@ -9,15 +9,18 @@ from scipy.spatial.transform import Rotation as R
 from ..system.core import messaging
 
 class HistoryTracker:
-  def __init__(self):
+  def __init__(self, points_to_track:int=200):
+    self.points_to_track = points_to_track
     self.histories = {}
 
   def __getitem__(self, key:str):
+    if key not in self.histories:
+      self.histories[key] = deque(maxlen=self.points_to_track)
     return self.histories[key]
 
   def __setitem__(self, key:str, value):
     if key not in self.histories:
-      self.histories[key] = deque(maxlen=200)
+      self.histories[key] = deque(maxlen=self.points_to_track)
     self.histories[key].append(value)
 
 rr.init("cv")
@@ -117,3 +120,14 @@ while True:
       # add the first point to close the loop
       imgpts = np.vstack([imgpts, imgpts[0]])
       rr.log("raw_camera/plate", rr.LineStrips2D(imgpts))
+
+  chassis_velocity = sub["chassis_velocity"]
+  if sub.updated["chassis_velocity"] and chassis_velocity is not None:
+    # integrate velocity to get position
+    velx = chassis_velocity["x"]
+    velz = chassis_velocity["z"]
+    x, y, z = ht["chassis_pos"][-1] if ht["chassis_pos"] else (0, 0, 0)
+    x += velx
+    z += velz
+    ht["chassis_pos"] = (x, y, z)
+    rr.log("world/pos", rr.LineStrips3D(ht["chassis_pos"]))
