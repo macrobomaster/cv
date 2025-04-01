@@ -4,6 +4,8 @@ from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.helpers import GlobalCounters, getenv
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
+import numpy as np
+import cv2
 
 from ..core import messaging
 from ..core.logging import logger
@@ -26,6 +28,24 @@ def run():
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
+  plate_width, plate_height = 0.14, 0.125
+  square_points = np.array([
+    [-plate_width/2, plate_height/2, 0], # bottom left
+    [plate_width/2, plate_height/2, 0], # bottom right
+    [plate_width/2, -plate_height/2, 0], # top right
+    [-plate_width/2, -plate_height/2, 0], # top left
+  ])
+
+  f = 16
+  sx, sy = 4.96, 3.72
+  width, height = 512, 256
+  camera_matrix = np.array([
+    [width*f/sx, 0, width/2],
+    [0, height*f/sy, height/2],
+    [0, 0, 1],
+  ], dtype=np.float32)
+  dist_coeffs = np.zeros((4, 1))
+
   pub = messaging.Pub(["autoaim"])
   sub = messaging.Sub(["camera_feed"])
 
@@ -37,19 +57,36 @@ def run():
     if frame is None: continue
     framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
     model_out = pred(model, framet).tolist()[0]
-    cl, clp, x, y, colorm, colorp, numberm, numberp = model_out[0], model_out[1], model_out[2], model_out[3], model_out[4], model_out[5], model_out[6], model_out[7]
+    colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp = model_out
     match colorm:
+      case 0: colorm = "none"
       case 1: colorm = "red"
       case 2: colorm = "blue"
-      case _: colorm = "blank"
+      case 3: colorm = "blank"
+
+    image_points = np.array([
+      [xbl, ybl],
+      [xbr, ybr],
+      [xtr, ytr],
+      [xtl, ytl],
+    ], dtype=np.float32).reshape(-1, 1, 2)
+    _, rvec, tvec = cv2.solvePnP(square_points, image_points, camera_matrix, dist_coeffs)
 
     pub.send("autoaim", {
-      "cl": cl,
-      "clp": clp,
-      "x": x,
-      "y": y,
       "colorm": colorm,
       "colorp": colorp,
+      "xc": xc,
+      "yc": yc,
+      "xtl": xtl,
+      "ytl": ytl,
+      "xtr": xtr,
+      "ytr": ytr,
+      "xbl": xbl,
+      "ybl": ybl,
+      "xbr": xbr,
+      "ybr": ybr,
       "numberm": numberm,
-      "numberp": numberp
+      "numberp": numberp,
+      "rvec": rvec.flatten().tolist(),
+      "tvec": tvec.flatten().tolist(),
     })
