@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import cv2
@@ -97,9 +95,12 @@ def run():
 
         pos, rot = kf.predict_and_correct(pos, rot)
 
+        dist = np.linalg.norm(pos)
+
         pub.send("plate", {
           "rot": rot,
           "pos": pos,
+          "dist": dist,
           "rvec": rvec.flatten().tolist(),
           "tvec": tvec.flatten().tolist(),
         })

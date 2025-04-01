@@ -65,7 +65,7 @@ class AimErrorKF:
 
 def run():
   pub = messaging.Pub(["aim_error", "chassis_velocity"])
-  sub = messaging.Sub(["autoaim"])
+  sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
 
   aim_error_kf = AimErrorKF()
 
@@ -81,13 +81,21 @@ def run():
     sub.update(10)
 
     autoaim = sub["autoaim"]
-    if sub.updated["autoaim"] and autoaim is not None:
+    if autoaim is None: continue
+    plate = sub["plate"]
+    if plate is None: continue
+
+    if sub.updated["autoaim"]:
       colorm = autoaim["colorm"]
       colorp = autoaim["colorp"]
       if colorm != "none" and colorp > 0.6:
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
         x, y = aim_error_kf.predict_and_correct(x, y)
+
+        # offset y by some amount relative to the distance to the plate
+        y -= 0.1 * plate["dist"]
+
         pub.send("aim_error", {"x": x, "y": y})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})

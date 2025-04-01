@@ -103,7 +103,7 @@ while True:
       rr.log("pworld/plate", rr.Transform3D(translation=pos, quaternion=quaternion))
 
       # get distance
-      dist = np.linalg.norm(pos) - 0.5
+      dist = plate["dist"]
       rr.log("pworld/distance", rr.Arrows3D(vectors=[pos], labels=[f"{dist:.3f}m"]))
 
       rvec = np.array(plate["rvec"])
