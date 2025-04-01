@@ -47,46 +47,66 @@ def load_single_file(file):
   global OUTPUT_PIPELINE
   if OUTPUT_PIPELINE is None:
     OUTPUT_PIPELINE = A.Compose([
-      A.HorizontalFlip(p=0.5),
+      # A.HorizontalFlip(p=0.5),
       A.Perspective(p=0.25),
       A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-45, 45), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
-      A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-      A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-      A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
-      A.OneOf([
-        A.RandomGamma(gamma_limit=(80, 120), p=0.5),
-        A.RandomToneCurve(p=0.5),
-      ], p=0.2),
+      # A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+      # A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=30, val_shift_limit=20, p=0.5),
+      # A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=0.5),
+      # A.OneOf([
+      #   A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+      #   A.RandomToneCurve(p=0.5),
+      # ], p=0.2),
+      A.RandomBrightnessContrast(brightness_limit=(-0.4, 0.3), contrast_limit=(-0.3, 0.3), p=0.5),
+      A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.5),
+      # A.Defocus(radius=(1, 3), p=0.1),
+      A.MotionBlur(blur_limit=(3, 5), p=0.5),
+      A.GaussNoise(std_range=(0.05, 0.2), p=0.25),
+      A.PlanckianJitter(p=0.5),
     ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
-  detected, x, y, dist, color, number = 0, 0, 0, -1, -1, -1
   if file.startswith("path:"):
-    img = pyvips.Image.new_from_file(file[5:], access="sequential").numpy()
-    img = img[..., :3]
-    if img.shape[0] != 256 or img.shape[1] != 512:
-      img = cv2.resize(img, (512, 256))
-
-    anno = get_annotation(file[5:])
-    detected, x, y, dist = anno.detected, anno.x, anno.y, anno.dist
-
-    # transform points
-    x, y = x * (img.shape[1] - 1), (1 - y) * (img.shape[0] - 1)
+    raise Exception("not supported")
+    # img = pyvips.Image.new_from_file(file[5:], access="sequential").numpy()
+    # img = img[..., :3]
+    # if img.shape[0] != 256 or img.shape[1] != 512:
+    #   img = cv2.resize(img, (512, 256))
+    #
+    # anno = get_annotation(file[5:])
+    # detected, x, y, dist = anno.detected, anno.x, anno.y, anno.dist
+    #
+    # # transform points
+    # x, y = x * (img.shape[1] - 1), (1 - y) * (img.shape[0] - 1)
   elif file.startswith("fake:"):
-    img, x, y, color, number = generate_sample(file)
+    img, keypoints, color, number = generate_sample(file)
+  else:
+    raise ValueError("unknown file type")
 
-  output = OUTPUT_PIPELINE(image=img, keypoints=[(x, y)])
+  output = OUTPUT_PIPELINE(image=img, keypoints=keypoints)
   img = output["image"]
-  x, y = output["keypoints"][0]
-  if x < 0 or x > img.shape[1] or y < 0 or y > img.shape[0]:
+  xc, yc = output["keypoints"][0]
+  if xc < 0 or xc > img.shape[1] or yc < 0 or yc > img.shape[0]:
     detected = 0
   else:
     detected = 1
+  xtl, ytl = output["keypoints"][1]
+  xtr, ytr = output["keypoints"][2]
+  xbl, ybl = output["keypoints"][3]
+  xbr, ybr = output["keypoints"][4]
 
-  number -= 1
+  # numbers start from 2
+  if detected:
+    number -= 1
+  else:
+    number = 0
+
+  # gate color based on detection
+  if not detected:
+    color = 0
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, x, y, dist, color, number), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
+    "y": np.array((color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
   }
 
 def single_batch(iter):
@@ -102,7 +122,7 @@ if __name__ == "__main__":
   batch_iter = iter(tqdm(batch_load(
     {
       "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-      "y": BatchDesc(shape=(4,), dtype=dtypes.default_float),
+      "y": BatchDesc(shape=(12,), dtype=dtypes.default_float),
     },
     load_single_file, get_train_files, bs=BS, shuffle=True,
   ), total=len(get_train_files())//BS))

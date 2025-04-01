@@ -13,19 +13,14 @@ PLATE2_PIPELINE = None
 BACKGROUND_PIPELINE = None
 plate_images = {}
 background_images = []
-def generate_sample(file) -> tuple[cv2.Mat, float, float, int, int]:
+def generate_sample(file) -> tuple[cv2.Mat, list[tuple[float, float]], int, int]:
   global PLATE_PIPELINE, PLATE2_PIPELINE, BACKGROUND_PIPELINE, plate_images, background_images
   if PLATE_PIPELINE is None:
     PLATE_PIPELINE = A.Compose([
-      A.RandomScale(scale_limit=(0.01-1, 0.5-1), p=1),
+      A.RandomScale(scale_limit=(0.05-1, 0.5-1), p=1),
       A.Perspective(scale=(0.05, 0.15), keep_size=True, fit_output=True, p=1),
+      A.SafeRotate(limit=(-90, 90), p=0.5),
     ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
-    PLATE2_PIPELINE = A.Compose([
-      A.RandomBrightnessContrast(brightness_limit=(-0.4, 0.3), contrast_limit=(-0.3, 0.3), p=0.5),
-      A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.5),
-      A.Defocus(radius=(1, 3), p=0.5),
-      A.MotionBlur(blur_limit=(3, 5), p=0.5),
-    ])
   if BACKGROUND_PIPELINE is None:
     BACKGROUND_PIPELINE = A.Compose([
       A.RandomResizedCrop(size=(256, 512), scale=(0.1, 1.0), ratio=(1.9, 2.1), p=1),
@@ -55,13 +50,16 @@ def generate_sample(file) -> tuple[cv2.Mat, float, float, int, int]:
   # select a random background image
   raw_background = random.choice(background_images)
 
-  plate_out = PLATE_PIPELINE(image=raw_plate, keypoints=[(raw_plate.shape[1]//2, raw_plate.shape[0]//2)])
+  # keypoints are center, top-left, top-right, bottom-left, bottom-right
+  keypoints = []
+  keypoints.append((raw_plate.shape[1]//2, raw_plate.shape[0]//2))
+  keypoints.append((0, 0))
+  keypoints.append((raw_plate.shape[1], 0))
+  keypoints.append((0, raw_plate.shape[0]))
+  keypoints.append((raw_plate.shape[1], raw_plate.shape[0]))
+
+  plate_out = PLATE_PIPELINE(image=raw_plate, keypoints=keypoints)
   plate = plate_out["image"]
-  # keep alpha channel out
-  plate_alpha = plate[..., 3]
-  plate = PLATE2_PIPELINE(image=plate[:, :, :3])["image"]
-  # put alpha channel back
-  plate = cv2.merge([plate, plate_alpha])
   img = BACKGROUND_PIPELINE(image=raw_background)["image"]
 
   # put the plate on the background with alpha blending
@@ -75,4 +73,9 @@ def generate_sample(file) -> tuple[cv2.Mat, float, float, int, int]:
     case "blue": color = 2
     case _: color = 3
 
-  return img, x + plate_out["keypoints"][0][0], y + plate_out["keypoints"][0][1], color, number
+  center = x + plate_out["keypoints"][0][0], y + plate_out["keypoints"][0][1]
+  top_left = x + plate_out["keypoints"][1][0], y + plate_out["keypoints"][1][1]
+  top_right = x + plate_out["keypoints"][2][0], y + plate_out["keypoints"][2][1]
+  bottom_left = x + plate_out["keypoints"][3][0], y + plate_out["keypoints"][3][1]
+  bottom_right = x + plate_out["keypoints"][4][0], y + plate_out["keypoints"][4][1]
+  return img, [center, top_left, top_right, bottom_left, bottom_right], color, number
