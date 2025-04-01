@@ -28,24 +28,6 @@ def run():
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
-  plate_width, plate_height = 0.14, 0.125
-  square_points = np.array([
-    [-plate_width/2, plate_height/2, 0], # bottom left
-    [plate_width/2, plate_height/2, 0], # bottom right
-    [plate_width/2, -plate_height/2, 0], # top right
-    [-plate_width/2, -plate_height/2, 0], # top left
-  ])
-
-  f = 16
-  sx, sy = 4.96, 3.72
-  width, height = 512, 256
-  camera_matrix = np.array([
-    [width*f/sx, 0, width/2],
-    [0, height*f/sy, height/2],
-    [0, 0, 1],
-  ], dtype=np.float32)
-  dist_coeffs = np.zeros((4, 1))
-
   pub = messaging.Pub(["autoaim"])
   sub = messaging.Sub(["camera_feed"])
 
@@ -64,14 +46,6 @@ def run():
       case 2: colorm = "blue"
       case 3: colorm = "blank"
 
-    image_points = np.array([
-      [xbl, ybl],
-      [xbr, ybr],
-      [xtr, ytr],
-      [xtl, ytl],
-    ], dtype=np.float32).reshape(-1, 1, 2)
-    _, rvec, tvec = cv2.solvePnP(square_points, image_points, camera_matrix, dist_coeffs)
-
     pub.send("autoaim", {
       "colorm": colorm,
       "colorp": colorp,
@@ -87,6 +61,4 @@ def run():
       "ybr": ybr,
       "numberm": numberm,
       "numberp": numberp,
-      "rvec": rvec.flatten().tolist(),
-      "tvec": tvec.flatten().tolist(),
     })
