@@ -1,16 +1,19 @@
 import sys, traceback
 
+from tinygrad.helpers import getenv
+
 from .core.logging import logger
 from .core.supervisor import Supervisor, SupervisedProcess
 from .core.helpers import unblock_stdout
 
+def not_pc(_):
+  return getenv("PC", 0) == 0
+
 PROCS = [
-  SupervisedProcess("commsd", "cv.system.commsd.commsd"),
+  SupervisedProcess("commsd", "cv.system.commsd.commsd", not_pc),
   SupervisedProcess("camerad", "cv.system.camerad.camerad"),
   SupervisedProcess("autoaimd", "cv.system.autoaimd.autoaimd"),
   SupervisedProcess("decisiond", "cv.system.decisiond.decisiond"),
-
-  SupervisedProcess("camviewerd", "cv.system.camviewerd.camviewerd"),
 ]
 
 if __name__ == "__main__":
