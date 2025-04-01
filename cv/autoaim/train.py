@@ -1,4 +1,5 @@
 import math, time
+from pathlib import Path
 
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
@@ -23,52 +24,63 @@ WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 40
+EPOCHS = 16
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(pred: tuple[Tensor, Tensor, Tensor, Tensor, Tensor], y: Tensor):
+def loss_fn(pred, y: Tensor):
   B = y.shape[0]
 
-  y_det = y[:, 0] > 0
-  y_x = y[:, 1]
-  y_y = y[:, 2]
-  y_dist = y[:, 3]
-  y_color = y[:, 4]
-  y_number = y[:, 5]
+  y_color = y[:, 0]
+  y_xc = y[:, 1]
+  y_yc = y[:, 2]
+  y_xtl = y[:, 3]
+  y_ytl = y[:, 4]
+  y_xtr = y[:, 5]
+  y_ytr = y[:, 6]
+  y_xbl = y[:, 7]
+  y_ybl = y[:, 8]
+  y_xbr = y[:, 9]
+  y_ybr = y[:, 10]
+  y_number = y[:, 11]
 
-  det_gate = y_det.detach()
+  det_gate = (y_color > 0).detach()
 
-  # position loss
-  x_loss = masked_cross_entropy(pred[1], twohot(y_x, 512), det_gate)
-  y_loss = masked_cross_entropy(pred[2], twohot(y_y, 256), det_gate)
+  # center keypoint loss
+  xc_loss = masked_cross_entropy(pred[1], twohot(y_xc, 512), det_gate)
+  yc_loss = masked_cross_entropy(pred[2], twohot(y_yc, 256), det_gate)
 
-  # distance loss
-  # dist_loss = masked_cross_entropy(pred[3], twohot(y_dist * 4, 64), (det_gate & (y_dist > 0)).detach())
+  # box keypoint loss
+  xtl_loss = masked_cross_entropy(pred[3], twohot(y_xtl, 512), det_gate)
+  ytl_loss = masked_cross_entropy(pred[4], twohot(y_ytl, 256), det_gate)
+  xtr_loss = masked_cross_entropy(pred[5], twohot(y_xtr, 512), det_gate)
+  ytr_loss = masked_cross_entropy(pred[6], twohot(y_ytr, 256), det_gate)
+  xbl_loss = masked_cross_entropy(pred[7], twohot(y_xbl, 512), det_gate)
+  ybl_loss = masked_cross_entropy(pred[8], twohot(y_ybl, 256), det_gate)
+  xbr_loss = masked_cross_entropy(pred[9], twohot(y_xbr, 512), det_gate)
+  ybr_loss = masked_cross_entropy(pred[10], twohot(y_ybr, 256), det_gate)
 
-  # quality factor
+  keypoint_loss = xc_loss + yc_loss + xtl_loss + ytl_loss + xtr_loss + ytr_loss + xbl_loss + ybl_loss + xbr_loss + ybr_loss
+  keypoint_loss = keypoint_loss / 10
+
+  # quality factor from center keypoint
   if not hasattr(loss_fn, "x_arange"): setattr(loss_fn, "x_arange", Tensor.arange(512))
   if not hasattr(loss_fn, "y_arange"): setattr(loss_fn, "y_arange", Tensor.arange(256))
-  point_x = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float() / 512
-  point_y = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float() / 256
-  point_dist = (point_x.sub(y_x / 512).square() + point_y.sub(y_y / 256).square()).sqrt()
+  point_xc = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float() / 512
+  point_yc = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float() / 256
+  point_dist = (point_xc.sub(y_xc / 512).square() + point_yc.sub(y_yc / 256).square()).sqrt()
   quality = (1 - point_dist.clamp(0, 1))
-
-  # detection loss
-  target_cls = y_det.cast(dtypes.int32).one_hot(2)
-  target_quality = target_cls[:, 0].stack(quality, dim=1)
-  det_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
 
   # color loss
   target_cls = y_color.cast(dtypes.int32).one_hot(4)
   target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(B, 3), dim=1)
-  color_loss = mal_loss(pred[3], target_cls, target_quality, gamma=1.5)
+  color_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
 
   # number loss
   target_cls = y_number.cast(dtypes.int32).one_hot(6)
   target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(B, 5), dim=1)
-  number_loss = mal_loss(pred[4], target_cls, target_quality, gamma=1.5)
+  number_loss = mal_loss(pred[11], target_cls, target_quality, gamma=1.5)
 
-  return det_loss + x_loss + y_loss + color_loss + number_loss
+  return color_loss + keypoint_loss + number_loss
 
 @TinyJit
 def train_step(x, y, lr):
@@ -125,6 +137,20 @@ if __name__ == "__main__":
 
   model = Model()
 
+  if getenv("PRETRAINED_BACKBONE"):
+    print(f"loading pretrained backbone")
+    state_dict = safe_load(Path(__file__).parent.parent.parent / "weights/model.safetensors")
+    # remove all keys that don't start with backbone and strip the backbone. prefix
+    state_dict = {k[9:]: v for k,v in state_dict.items() if k.startswith("backbone.")}
+    load_state_dict(model.backbone, state_dict, strict=False)
+
+  if getenv("PRETRAINED_DECODER"):
+    print(f"loading pretrained decoder")
+    state_dict = safe_load(Path(__file__).parent.parent.parent / "weights/model.safetensors")
+    # remove all keys that don't start with decoder and strip the decoder. prefix
+    state_dict = {k[8:]: v for k,v in state_dict.items() if k.startswith("decoder.")}
+    load_state_dict(model.decoder, state_dict, strict=False)
+
   if (ckpt := getenv("CKPT", "")) != "":
     print(f"loading checkpoint {BASE_PATH / 'intermediate' / f'model_{ckpt}.safetensors'}")
     state_dict = safe_load(BASE_PATH / "intermediate" / f"model_{ckpt}.safetensors")
@@ -138,7 +164,7 @@ if __name__ == "__main__":
     batch_iter = iter(tqdm(batch_load(
       {
         "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-        "y": BatchDesc(shape=(6,), dtype=dtypes.default_float),
+        "y": BatchDesc(shape=(12,), dtype=dtypes.default_float),
       },
       load_single_file, get_train_files, bs=BS, shuffle=True,
     ), total=STEPS_PER_EPOCH, desc=f"epoch {epoch}"))

@@ -5,6 +5,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from tinygrad.helpers import GlobalCounters, getenv
 import cv2
+import numpy as np
 
 from .model import Model
 from .common import pred
@@ -37,20 +38,64 @@ if __name__ == "__main__":
 
     # predict
     model_out = pred(model, Tensor(img, device="NPY")).tolist()[0]
-    cl, clp, x, y, colorm, colorp, numberm, numberp = model_out[0], model_out[1], model_out[2], model_out[3], model_out[4], model_out[5], model_out[6], model_out[7]
+    colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp = model_out
     match colorm:
+      case 0: colorm = "none"
       case 1: colorm = "red"
       case 2: colorm = "blue"
-      case _: colorm = "blank"
+      case 3: colorm = "blank"
 
     # draw the annotation
-    cv2.putText(img, f"{cl}: {clp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    if cl == 1 and clp > 0.0:
-      x, y = int(x), int(y)
-      cv2.circle(img, (x, y), 5, (0, 255, 0), -1)
+    cv2.putText(img, f"{colorm}: {colorp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    if colorm != "none" and colorp > 0.0:
+      xc, yc = int(xc), int(yc)
+      cv2.circle(img, (xc, yc), 5, (0, 255, 0), -1)
+      cv2.circle(img, (int(xtl), int(ytl)), 5, (0, 255, 0), -1)
+      cv2.circle(img, (int(xtr), int(ytr)), 5, (0, 255, 0), -1)
+      cv2.circle(img, (int(xbl), int(ybl)), 5, (0, 255, 0), -1)
+      cv2.circle(img, (int(xbr), int(ybr)), 5, (0, 255, 0), -1)
       # cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-      cv2.putText(img, f"{colorm}: {colorp:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-      cv2.putText(img, f"{numberm}: {numberp:.3f}", (x, y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+      cv2.putText(img, f"{numberm}: {numberp:.3f}", (xc, yc - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+      plate_width, plate_height = 0.14, 0.125
+      square_points = np.array([
+        [-plate_width/2, plate_height/2, 0], # bottom left
+        [plate_width/2, plate_height/2, 0], # bottom right
+        [plate_width/2, -plate_height/2, 0], # top right
+        [-plate_width/2, -plate_height/2, 0], # top left
+      ])
+
+      image_points = np.array([
+        [xbl, ybl],
+        [xbr, ybr],
+        [xtr, ytr],
+        [xtl, ytl],
+      ], dtype=np.float32).reshape(-1, 1, 2)
+
+      f = 16
+      sx, sy = 4.96, 3.72
+      width, height = 512, 256
+      camera_matrix = np.array([
+        [width*f/sx, 0, width/2],
+        [0, height*f/sy, height/2],
+        [0, 0, 1],
+      ], dtype=np.float32)
+      dist_coeffs = np.zeros((4, 1))
+
+      # ransac
+      _, rvec, tvec, _ = cv2.solvePnPRansac(square_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_SQPNP, reprojectionError=1.0)
+
+      # project 3d points to 2d
+      imgpts, _ = cv2.projectPoints(square_points, rvec, tvec, camera_matrix, dist_coeffs)
+      imgpts = imgpts.astype(int)
+      cv2.line(img, tuple(imgpts[0].ravel()), tuple(imgpts[1].ravel()), (0, 255, 0), 2)
+      cv2.line(img, tuple(imgpts[1].ravel()), tuple(imgpts[2].ravel()), (0, 255, 0), 2)
+      cv2.line(img, tuple(imgpts[2].ravel()), tuple(imgpts[3].ravel()), (0, 255, 0), 2)
+      cv2.line(img, tuple(imgpts[3].ravel()), tuple(imgpts[0].ravel()), (0, 255, 0), 2)
+
+      # draw frame axes
+      cv2.drawFrameAxes(img, camera_matrix, dist_coeffs, rvec, tvec, 0.1)
+
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     cv2.imshow("img", img)
 

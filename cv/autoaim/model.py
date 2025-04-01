@@ -171,49 +171,48 @@ class Decoder:
     return self.ffn(sb)
 
 class Head:
-  def __init__(self, in_dim:int, mid_dim:int, out_dim:int):
-    self.ffn = FFN(in_dim, mid_dim, out_dim, blocks=1, exp=2, norm=False)
+  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, outputs:int=1):
+    self.ffns = [FFN(in_dim, out_dim, mid_dim, blocks=1, exp=2, norm=False) for _ in range(outputs)]
 
-  def __call__(self, x:Tensor) -> Tensor:
-    return self.ffn(x)
+  def __call__(self, x:Tensor) -> list[Tensor]:
+    return [ffn(x) for ffn in self.ffns]
 
 class Heads:
   def __init__(self, in_dim:int):
-    self.cls_head = Head(in_dim, 2, 64)
-    self.x_head = Head(in_dim, 512, 128)
-    self.y_head = Head(in_dim, 256, 128)
-    # self.dist_head = Head(in_dim, 64, 64)
+    self.x_head = Head(in_dim, 512, 128, outputs=5)
+    self.y_head = Head(in_dim, 256, 128, outputs=5)
     self.color_head = Head(in_dim, 4, 64)
     self.number_head = Head(in_dim, 6, 64)
 
   def __call__(self, f:Tensor):
-    cl = self.cls_head(f)
-    x = self.x_head(f)
-    y = self.y_head(f)
-    # dist = self.dist_head(f)
-    color = self.color_head(f)
-    number = self.number_head(f)
+    xc, xtl, xtr, xbl, xbr = self.x_head(f)
+    yc, ytl, ytr, ybl, ybr = self.y_head(f)
+    (color,) = self.color_head(f)
+    (number,) = self.number_head(f)
 
     if not Tensor.training:
-      cl = cl.softmax(1)
-      clm, clp = cl.argmax(1, keepdim=True), cl.max(1, keepdim=True).float()
+      color = color.softmax(1)
+      colorm, colorp = color.argmax(1, keepdim=True), color.max(1, keepdim=True).float()
 
       if not hasattr(self, "x_arange"): self.x_arange = Tensor.arange(512).unsqueeze(1)
       if not hasattr(self, "y_arange"): self.y_arange = Tensor.arange(256).unsqueeze(1)
-      x = (x.softmax() @ self.x_arange).float()
-      y = (y.softmax() @ self.y_arange).float()
-
-      # dist = (dist.softmax() @ Tensor.arange(64).unsqueeze(1)).float() / 4
-
-      color = color.softmax(1)
-      colorm, colorp = color.argmax(1, keepdim=True), color.max(1, keepdim=True).float()
+      xc = (xc.softmax() @ self.x_arange).float()
+      yc = (yc.softmax() @ self.y_arange).float()
+      xtl = (xtl.softmax() @ self.x_arange).float()
+      ytl = (ytl.softmax() @ self.y_arange).float()
+      xtr = (xtr.softmax() @ self.x_arange).float()
+      ytr = (ytr.softmax() @ self.y_arange).float()
+      xbl = (xbl.softmax() @ self.x_arange).float()
+      ybl = (ybl.softmax() @ self.y_arange).float()
+      xbr = (xbr.softmax() @ self.x_arange).float()
+      ybr = (ybr.softmax() @ self.y_arange).float()
 
       number = number.softmax(1)
       numberm, numberp = number.argmax(1, keepdim=True) + 1, number.max(1, keepdim=True).float()
 
-      return Tensor.cat(clm, clp, x, y, colorm, colorp, numberm, numberp, dim=1)
+      return Tensor.cat(colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp, dim=1)
 
-    return cl, x, y, color, number
+    return color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number
 
 class Model:
   def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=2):
