@@ -27,7 +27,7 @@ def kv_clear(table:str):
 def kv_get(table:str, key:Any) -> Any:
   cur = kv_connection().cursor()
   try:
-    res = cur.execute(f"SELECT val FROM '{table}_{VERSION}' WHERE key = ?", cbor2.dumps(key))
+    res = cur.execute(f"SELECT val FROM '{table}_{VERSION}' WHERE key = ?", (cbor2.dumps(key),))
   except sqlite3.OperationalError:
     return None  # table doesn't exist
   if (val:=res.fetchone()) is not None: return cbor2.loads(val[0])
