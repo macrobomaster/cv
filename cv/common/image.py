@@ -40,9 +40,6 @@ def rgb_to_yuv420_tensor(img:Tensor) -> Tensor:
   return Tensor.stack(y0, y1, y2, y3, u, v, dim=-1).clamp(0, 255)
 
 def alpha_overlay(img, background, x, y):
-  """
-  Overlay img centered at (x, y) on background with alpha blending
-  """
   alpha = img[:, :, 3] / 255.0
   alpha = alpha[:, :, np.newaxis]
   img = img[:, :, :3]
