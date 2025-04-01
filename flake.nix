@@ -108,6 +108,7 @@
                     doCheck = false;
                   })
                   rerun-sdk
+                  scipy
                 ] ++ common-python-packages p;
               python = pkgs-x86_64-linux.python312;
             in
@@ -121,6 +122,10 @@
               waypipe
               sqlite-web
               rerun
+              (pkgs.writeShellScriptBin "rerun-web" ''
+                #!/usr/bin/env bash
+                ${rerun}/bin/rerun --web-viewer
+              '')
             ];
 
           shellHook = ''
