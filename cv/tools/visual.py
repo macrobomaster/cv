@@ -27,7 +27,7 @@ rr.init("cv")
 rr.connect_tcp()
 
 plate_width, plate_height = 0.14, 0.125
-f = 16
+f = math.pi * 4
 sx, sy = 4.96, 3.72
 width, height = 512, 256
 camera_matrix = np.array([
@@ -45,16 +45,16 @@ rr.log("pworld/plate", rr.Asset3D(path="/tmp/armor_plate.gltf", albedo_factor=[0
 
 sub = messaging.Sub(["aim_error", "chassis_velocity", "camera_feed", "autoaim", "plate"])
 
-ht = HistoryTracker()
+ht = HistoryTracker(20)
 while True:
-  sub.update(100)
+  sub.update()
 
   rr.set_time_seconds("time", time.monotonic())
 
   camera_feed = sub["camera_feed"]
   if sub.updated["camera_feed"] and camera_feed is not None:
     frame = np.frombuffer(camera_feed, dtype=np.uint8).reshape(256, 512, 3)
-    rr.log("raw_camera/feed", rr.Image(frame).compress())
+    rr.log("raw_camera/feed", rr.Image(frame).compress(10))
 
   aim_error = sub["aim_error"]
   if sub.updated["aim_error"] and aim_error is not None:
@@ -131,3 +131,5 @@ while True:
     z += velz
     ht["chassis_pos"] = (x, y, z)
     rr.log("world/pos", rr.LineStrips3D(ht["chassis_pos"]))
+
+  time.sleep(0.1)
