@@ -70,6 +70,7 @@
           cbor2
           setproctitle
           xxhash
+          scipy
         ];
     in
     {
@@ -116,7 +117,6 @@
                     doCheck = false;
                   })
                   rerun-sdk
-                  scipy
                 ]
                 ++ common-python-packages p;
               python = pkgs-x86_64-linux.python312;
