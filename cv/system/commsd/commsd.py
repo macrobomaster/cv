@@ -10,7 +10,7 @@ def run():
   protocol = Protocol(port)
 
   pub = messaging.Pub(["game_running"])
-  sub = messaging.Sub(["aim_error"])
+  sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity"])
 
   while True:
     sub.update(10)
@@ -20,6 +20,18 @@ def run():
       x = aim_error["x"]
       y = aim_error["y"]
       protocol.msg(Command.AIM_ERROR, x, y)
+
+    shoot = sub["shoot"]
+    if sub.updated["shoot"] and shoot is not None:
+      protocol.msg(Command.CONTROL_SHOOT, 0xff)
+    else:
+      protocol.msg(Command.CONTROL_SHOOT, 0x00)
+
+    chassis_velocity = sub["chassis_velocity"]
+    if sub.updated["chassis_velocity"] and chassis_velocity is not None:
+      x = chassis_velocity["x"]
+      z = chassis_velocity["z"]
+      protocol.msg(Command.MOVE_ROBOT, x, z)
 
     game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
     if game_running is not None:
