@@ -21,7 +21,7 @@ def run():
 
   model = Model()
   state_dict = safe_load(str(Path(__file__).parent.parent.parent.parent / "weights/model.safetensors"))
-  load_state_dict(model, state_dict)
+  load_state_dict(model, state_dict, verbose=False)
   if getenv("HALF", 0) == 1:
     for key, param in get_state_dict(model).items():
       if "norm" in key: continue
