@@ -27,7 +27,7 @@ rr.init("cv")
 rr.connect_tcp()
 
 plate_width, plate_height = 0.14, 0.125
-f = math.pi * 4
+f = 2 * 6
 sx, sy = 4.96, 3.72
 width, height = 512, 256
 camera_matrix = np.array([

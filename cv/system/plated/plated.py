@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import cv2
@@ -59,7 +61,7 @@ def run():
     [-plate_width/2, -plate_height/2, 0], # top left
   ])
 
-  f = 16
+  f = 2 * 6
   sx, sy = 4.96, 3.72
   width, height = 512, 256
   camera_matrix = np.array([
