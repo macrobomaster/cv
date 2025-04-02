@@ -45,16 +45,19 @@ rr.log("pworld/plate", rr.Asset3D(path="/tmp/armor_plate.gltf", albedo_factor=[0
 
 sub = messaging.Sub(["aim_error", "chassis_velocity", "camera_feed", "autoaim", "plate"])
 
-ht = HistoryTracker(20)
+ht = HistoryTracker(10)
+lt = time.monotonic()
 while True:
   sub.update()
 
   rr.set_time_seconds("time", time.monotonic())
 
   camera_feed = sub["camera_feed"]
-  if sub.updated["camera_feed"] and camera_feed is not None:
-    frame = np.frombuffer(camera_feed, dtype=np.uint8).reshape(256, 512, 3)
-    rr.log("raw_camera/feed", rr.Image(frame).compress(10))
+  if time.monotonic() - lt >= 0.1:
+    if camera_feed is not None:
+      frame = np.frombuffer(camera_feed, dtype=np.uint8).reshape(256, 512, 3)
+      rr.log("raw_camera/feed", rr.Image(frame).compress(70))
+    lt = time.monotonic()
 
   aim_error = sub["aim_error"]
   if sub.updated["aim_error"] and aim_error is not None:
@@ -73,7 +76,7 @@ while True:
       y = autoaim["yc"]
       ht["autoaim_c"] = (x, y)
       rr.log("raw_camera/autoaim_c", rr.LineStrips2D(ht["autoaim_c"]))
-      rr.log("raw_camera/autoaim_c_cursor", rr.Points2D([(x, y)], radii=[2]))
+      rr.log("raw_camera/autoaim_c_cursor", rr.Points2D([(x, y)], radii=[2], labels=[f"{autoaim['colorm']}"]))
       x = autoaim["xtl"]
       y = autoaim["ytl"]
       ht["autoaim_tl"] = (x, y)
@@ -131,5 +134,3 @@ while True:
     z += velz
     ht["chassis_pos"] = (x, y, z)
     rr.log("world/pos", rr.LineStrips3D(ht["chassis_pos"]))
-
-  time.sleep(0.1)
