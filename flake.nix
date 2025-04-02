@@ -40,7 +40,7 @@
           })
         ] ++ common_overlays;
       });
-      pkgs-aarch64-linux-nixpkgs = {
+      pkgs-aarch64-linux = import nixpkgs ({
         system = "aarch64-linux";
         config = {
           allowUnfree = true;
@@ -57,9 +57,7 @@
             ];
           })
         ] ++ common_overlays;
-      };
-
-      pkgs-aarch64-linux = import nixpkgs pkgs-aarch64-linux-nixpkgs;
+      });
 
       common-python-packages =
         p: with p; [
@@ -223,7 +221,7 @@
         };
         orin-nano = pkgs-aarch64-linux.nixos {
           _module.args = { inherit inputs; };
-          nixpkgs = pkgs-aarch64-linux-nixpkgs;
+          nixpkgs.overlays = common_overlays;
 
           imports = [
             inputs.jetpack-nixos.nixosModules.default
