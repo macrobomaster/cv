@@ -56,6 +56,19 @@
           };
         }
         // nixpkgs_config
+        // {
+          overlays = [
+            (final: prev: {
+              pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+                (python-final: python-prev: {
+                  opencv4 = python-prev.opencv4.override {
+                    cudaSupport = false;
+                  };
+                })
+              ];
+            })
+          ];
+        }
       );
 
       common-python-packages =
