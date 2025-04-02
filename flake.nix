@@ -21,55 +21,45 @@
     let
       inherit (nixpkgs) lib;
 
-      nixpkgs_config = {
+      common_overlays = [
+        inputs.tinygrad.overlays.default
+        (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
+      ];
+
+      pkgs-x86_64-linux = import nixpkgs ({
+        system = "x86_64-linux";
         overlays = [
-          inputs.tinygrad.overlays.default
-          (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
-        ];
+          (final: prev: {
+            pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+              (python-final: python-prev: {
+                opencv4 = python-prev.opencv4.override {
+                  enableGtk3 = true;
+                };
+              })
+            ];
+          })
+        ] ++ common_overlays;
+      });
+      pkgs-aarch64-linux-nixpkgs = {
+        system = "aarch64-linux";
+        config = {
+          allowUnfree = true;
+          cudaSupport = true;
+        };
+        overlays = [
+          (final: prev: {
+            pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+              (python-final: python-prev: {
+                opencv4 = python-prev.opencv4.override {
+                  enableCuda = false;
+                };
+              })
+            ];
+          })
+        ] ++ common_overlays;
       };
 
-      pkgs-x86_64-linux = import nixpkgs (
-        {
-          system = "x86_64-linux";
-        }
-        // nixpkgs_config
-        // {
-          overlays = [
-            (final: prev: {
-              pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
-                (python-final: python-prev: {
-                  opencv4 = python-prev.opencv4.override {
-                    enableGtk3 = true;
-                  };
-                })
-              ];
-            })
-          ];
-        }
-      );
-      pkgs-aarch64-linux = import nixpkgs (
-        {
-          system = "aarch64-linux";
-          config = {
-            allowUnfree = true;
-            cudaSupport = true;
-          };
-        }
-        // nixpkgs_config
-        // {
-          overlays = [
-            (final: prev: {
-              pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
-                (python-final: python-prev: {
-                  opencv4 = python-prev.opencv4.override {
-                    enableCuda = false;
-                  };
-                })
-              ];
-            })
-          ];
-        }
-      );
+      pkgs-aarch64-linux = import nixpkgs pkgs-aarch64-linux-nixpkgs;
 
       common-python-packages =
         p: with p; [
@@ -233,7 +223,7 @@
         };
         orin-nano = pkgs-aarch64-linux.nixos {
           _module.args = { inherit inputs; };
-          nixpkgs = nixpkgs_config;
+          nixpkgs = pkgs-aarch64-linux-nixpkgs;
 
           imports = [
             inputs.jetpack-nixos.nixosModules.default
