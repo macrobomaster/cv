@@ -120,6 +120,7 @@ class Supervisor:
     self.sprocs = {p.name: p for p in procs}
 
     kv_clear("global_rt")
+    kv_clear("watchdog")
 
   def run(self):
     logger.bind("supervisor")
