@@ -24,15 +24,6 @@
       nixpkgs_config = {
         overlays = [
           inputs.tinygrad.overlays.default
-          (final: prev: {
-            pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
-              (python-final: python-prev: {
-                opencv4 = python-prev.opencv4.override {
-                  enableGtk3 = true;
-                };
-              })
-            ];
-          })
           (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
         ];
       };
@@ -42,6 +33,19 @@
           system = "x86_64-linux";
         }
         // nixpkgs_config
+        // {
+          overlays = [
+            (final: prev: {
+              pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+                (python-final: python-prev: {
+                  opencv4 = python-prev.opencv4.override {
+                    enableGtk3 = true;
+                  };
+                })
+              ];
+            })
+          ];
+        }
       );
       pkgs-aarch64-linux = import nixpkgs (
         {
@@ -54,17 +58,18 @@
         // nixpkgs_config
       );
 
-      common-python-packages = p: with p; [
-        opencv4
-        numpy
-        pygobject3
-        pygobject-stubs
-        pyserial
-        pyzmq
-        cbor2
-        setproctitle
-        xxhash
-      ];
+      common-python-packages =
+        p: with p; [
+          opencv4
+          numpy
+          pygobject3
+          pygobject-stubs
+          pyserial
+          pyzmq
+          cbor2
+          setproctitle
+          xxhash
+        ];
     in
     {
       devShells = {
@@ -72,7 +77,9 @@
           packages =
             let
               python-packages =
-                p: with p; [
+                p:
+                with p;
+                [
                   albumentations
                   pillow
                   pyvips
@@ -109,7 +116,8 @@
                   })
                   rerun-sdk
                   scipy
-                ] ++ common-python-packages p;
+                ]
+                ++ common-python-packages p;
               python = pkgs-x86_64-linux.python312;
             in
             with pkgs-x86_64-linux;
@@ -136,7 +144,9 @@
           packages =
             let
               python-packages =
-                p: with p; [
+                p:
+                with p;
+                [
                   (
                     (tinygrad.override {
                       cudaSupport = true;
@@ -149,7 +159,8 @@
                       '';
                     })
                   )
-                ] ++ common-python-packages p;
+                ]
+                ++ common-python-packages p;
               python = pkgs-aarch64-linux.python312;
             in
             with pkgs-aarch64-linux;
