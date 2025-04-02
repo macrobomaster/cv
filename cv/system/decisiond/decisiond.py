@@ -58,7 +58,13 @@ class AimErrorKF:
     measurement_matrix[1, 1] = 1
     self.km.measurementMatrix = measurement_matrix
 
+    self.last_x, self.last_y = 0, 0
+
   def predict_and_correct(self, x:float, y:float) -> tuple[float, float]:
+    # if the error is too large, reset the state
+    if abs(x - self.last_x) > 0.5 or abs(y - self.last_y) > 0.5:
+      self.km.statePost = np.array([[x], [y], [0], [0], [0], [0]], dtype=np.float32)
+
     self.km.predict()
     est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten().tolist()
     return est[0], est[1]
@@ -95,6 +101,7 @@ def run():
 
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
+        y += 0.4
 
         pub.send("aim_error", {"x": x, "y": y})
       else:
