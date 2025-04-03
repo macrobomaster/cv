@@ -12,9 +12,8 @@ from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
 from ...autoaim.model import Model
-from ...autoaim.common import pred
+from ...autoaim.common import pred, MODEL_VERSION
 
-MODEL_VERSION = 0
 HALF = getenv("HALF", 0)
 BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
 
@@ -42,15 +41,17 @@ def run():
 
     # run to initialize jit
     fake_input = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
+    fake_input_2 = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
     for _ in range(3):
-      pred(model, fake_input).tolist()
+      pred(model, fake_input, fake_input_2).tolist()
 
     kv_put("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run", pickle.dumps(pred))
 
   # load model
-  logger.info(f"loading cached model_{MODEL_VERSION}_{HALF}_run")
-  model_pred = pickle.loads(kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_run"))
+  logger.info(f"loading cached model_{MODEL_VERSION}_{HALF}_{BEAM}_run")
+  model_pred = pickle.loads(kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run"))
 
+  last_frame = None
   while True:
     sub.update(0)
     GlobalCounters.reset()
@@ -59,7 +60,14 @@ def run():
     if frame is None: continue
 
     framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
-    model_out = model_pred(None, framet).tolist()[0]
+    if last_frame is None:
+      last_frame = framet
+      continue
+
+    model_out = model_pred(None, framet, last_frame).tolist()[0]
+
+    last_frame = framet
+
     colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp = model_out
     match colorm:
       case 0: colorm = "none"

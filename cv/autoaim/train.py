@@ -24,7 +24,7 @@ WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 16
+EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(pred, y: Tensor):
@@ -46,18 +46,18 @@ def loss_fn(pred, y: Tensor):
   det_gate = (y_color > 0).detach()
 
   # center keypoint loss
-  xc_loss = masked_cross_entropy(pred[1], twohot(y_xc, 512), det_gate)
-  yc_loss = masked_cross_entropy(pred[2], twohot(y_yc, 256), det_gate)
+  xc_loss = masked_cross_entropy(pred[1], twohot((y_xc + 256) / 2, 512), det_gate)
+  yc_loss = masked_cross_entropy(pred[2], twohot((y_yc + 128) / 2, 256), det_gate)
 
   # box keypoint loss
-  xtl_loss = masked_cross_entropy(pred[3], twohot(y_xtl, 512), det_gate)
-  ytl_loss = masked_cross_entropy(pred[4], twohot(y_ytl, 256), det_gate)
-  xtr_loss = masked_cross_entropy(pred[5], twohot(y_xtr, 512), det_gate)
-  ytr_loss = masked_cross_entropy(pred[6], twohot(y_ytr, 256), det_gate)
-  xbl_loss = masked_cross_entropy(pred[7], twohot(y_xbl, 512), det_gate)
-  ybl_loss = masked_cross_entropy(pred[8], twohot(y_ybl, 256), det_gate)
-  xbr_loss = masked_cross_entropy(pred[9], twohot(y_xbr, 512), det_gate)
-  ybr_loss = masked_cross_entropy(pred[10], twohot(y_ybr, 256), det_gate)
+  xtl_loss = masked_cross_entropy(pred[3], twohot((y_xtl + 256) / 2, 512), det_gate)
+  ytl_loss = masked_cross_entropy(pred[4], twohot((y_ytl + 128) / 2, 256), det_gate)
+  xtr_loss = masked_cross_entropy(pred[5], twohot((y_xtr + 256) / 2, 512), det_gate)
+  ytr_loss = masked_cross_entropy(pred[6], twohot((y_ytr + 128) / 2, 256), det_gate)
+  xbl_loss = masked_cross_entropy(pred[7], twohot((y_xbl + 256) / 2, 512), det_gate)
+  ybl_loss = masked_cross_entropy(pred[8], twohot((y_ybl + 128) / 2, 256), det_gate)
+  xbr_loss = masked_cross_entropy(pred[9], twohot((y_xbr + 256) / 2, 512), det_gate)
+  ybr_loss = masked_cross_entropy(pred[10], twohot((y_ybr + 126) / 2, 256), det_gate)
 
   keypoint_loss = xc_loss + yc_loss + xtl_loss + ytl_loss + xtr_loss + ytr_loss + xbl_loss + ybl_loss + xbr_loss + ybr_loss
   keypoint_loss = keypoint_loss / 10
@@ -65,8 +65,8 @@ def loss_fn(pred, y: Tensor):
   # quality factor from center keypoint
   if not hasattr(loss_fn, "x_arange"): setattr(loss_fn, "x_arange", Tensor.arange(512))
   if not hasattr(loss_fn, "y_arange"): setattr(loss_fn, "y_arange", Tensor.arange(256))
-  point_xc = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float() / 512
-  point_yc = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float() / 256
+  point_xc = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float().mul(2).sub(256) / 512
+  point_yc = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float().mul(2).sub(128) / 256
   point_dist = (point_xc.sub(y_xc / 512).square() + point_yc.sub(y_yc / 256).square()).sqrt()
   quality = (1 - point_dist.clamp(0, 1))
 
@@ -83,12 +83,13 @@ def loss_fn(pred, y: Tensor):
   return color_loss + keypoint_loss + number_loss
 
 @TinyJit
-def train_step(x, y, lr):
+def train_step(x, x2, y, lr):
   optim.zero_grad()
 
   yuv = rgb_to_yuv420_tensor(x)
+  yuv2 = rgb_to_yuv420_tensor(x2)
 
-  pred = model(yuv)
+  pred = model((yuv, yuv2))
   loss = loss_fn(pred, y)
 
   # (loss * 1024).backward()
@@ -164,6 +165,7 @@ if __name__ == "__main__":
     batch_iter = iter(tqdm(batch_load(
       {
         "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
+        "x2": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
         "y": BatchDesc(shape=(12,), dtype=dtypes.default_float),
       },
       load_single_file, get_train_files, bs=BS, shuffle=True,
@@ -174,7 +176,7 @@ if __name__ == "__main__":
       GlobalCounters.reset()
 
       lr = get_lr(steps)
-      loss = train_step(proc[0], proc[1], Tensor([lr], dtype=dtypes.float32, device="PYTHON"))
+      loss = train_step(proc[0], proc[1], proc[2], Tensor([lr], dtype=dtypes.float32, device="PYTHON"))
       if getenv("NAN", 0):
         loss, gsums, wsums = loss
       pt = time.perf_counter()

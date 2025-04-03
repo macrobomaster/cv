@@ -145,18 +145,21 @@ class Stem:
     return self.se(x)
 
 class Backbone:
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int):
-    self.stem = Stem(cin, cstage[0])
+  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, frames:int):
+    self.stems = [Stem(cin, cstage[0]) for _ in range(frames)]
 
     self.stage0 = ConvStage(cstage[0], cstage[0], stages[0])
     self.stage1 = ConvStage(cstage[0], cstage[1], stages[1])
     self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband=sideband)
     self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband=sideband, sideband_proj=True, output_sideband_only=True)
 
-  def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    x = self.stem(x)
+  def __call__(self, x:tuple[Tensor, ...], sb:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    x = tuple(stem(xx) for stem, xx in zip(self.stems, x))
+    xx = Tensor(0)
+    for xx_ in x:
+      xx = xx + xx_
 
-    x0 = self.stage0(x)
+    x0 = self.stage0(xx)
     x1 = self.stage1(x0)
     x2, sb = self.stage2(x1, sb)
     x3, sb = self.stage3(x2, sb)
@@ -165,7 +168,7 @@ class Backbone:
 
 class Decoder:
   def __init__(self, cin:int, cout:int, blocks:int):
-    self.ffn = FFN(cin, cout, cout, exp=2, blocks=blocks, norm=True)
+    self.ffn = FFN(cin, cout, cout, exp=3, blocks=blocks, norm=True)
 
   def __call__(self, sb:Tensor) -> Tensor:
     return self.ffn(sb)
@@ -174,8 +177,8 @@ class Head:
   def __init__(self, in_dim:int, out_dim:int, mid_dim:int, outputs:int=1):
     self.ffns = [FFN(in_dim, out_dim, mid_dim, blocks=1, exp=2, norm=False) for _ in range(outputs)]
 
-  def __call__(self, x:Tensor) -> list[Tensor]:
-    return [ffn(x) for ffn in self.ffns]
+  def __call__(self, x:Tensor) -> tuple[Tensor, ...]:
+    return tuple(ffn(x) for ffn in self.ffns)
 
 class Heads:
   def __init__(self, in_dim:int):
@@ -196,16 +199,16 @@ class Heads:
 
       if not hasattr(self, "x_arange"): self.x_arange = Tensor.arange(512).unsqueeze(1)
       if not hasattr(self, "y_arange"): self.y_arange = Tensor.arange(256).unsqueeze(1)
-      xc = (xc.softmax() @ self.x_arange).float()
-      yc = (yc.softmax() @ self.y_arange).float()
-      xtl = (xtl.softmax() @ self.x_arange).float()
-      ytl = (ytl.softmax() @ self.y_arange).float()
-      xtr = (xtr.softmax() @ self.x_arange).float()
-      ytr = (ytr.softmax() @ self.y_arange).float()
-      xbl = (xbl.softmax() @ self.x_arange).float()
-      ybl = (ybl.softmax() @ self.y_arange).float()
-      xbr = (xbr.softmax() @ self.x_arange).float()
-      ybr = (ybr.softmax() @ self.y_arange).float()
+      xc = (xc.softmax() @ self.x_arange).float().mul(2).sub(256)
+      yc = (yc.softmax() @ self.y_arange).float().mul(2).sub(128)
+      xtl = (xtl.softmax() @ self.x_arange).float().mul(2).sub(256)
+      ytl = (ytl.softmax() @ self.y_arange).float().mul(2).sub(128)
+      xtr = (xtr.softmax() @ self.x_arange).float().mul(2).sub(256)
+      ytr = (ytr.softmax() @ self.y_arange).float().mul(2).sub(128)
+      xbl = (xbl.softmax() @ self.x_arange).float().mul(2).sub(256)
+      ybl = (ybl.softmax() @ self.y_arange).float().mul(2).sub(128)
+      xbr = (xbr.softmax() @ self.x_arange).float().mul(2).sub(256)
+      ybr = (ybr.softmax() @ self.y_arange).float().mul(2).sub(128)
 
       number = number.softmax(1)
       numberm, numberp = number.argmax(1, keepdim=True) + 1, number.max(1, keepdim=True).float()
@@ -215,18 +218,16 @@ class Heads:
     return color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number
 
 class Model:
-  def __init__(self, dim:int=128, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=2):
+  def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=2, frames:int=2):
     self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
-    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband)
+    self.frames = frames
+    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband, frames=frames)
     self.decoder = Decoder(cstage[-1] * sideband, dim, blocks=1)
     self.heads = Heads(dim)
 
-  def __call__(self, img:Tensor):
-    # image normalization
-    img = img.cast(dtypes.default_float)
-    img = img.permute(0, 3, 1, 2) / 255
-
-    xs = self.backbone(img, self.sideband.expand(img.shape[0], -1))
+  def __call__(self, imgs:tuple[Tensor, ...]):
+    imgs = tuple(img.cast(dtypes.default_float).permute(0, 3, 1, 2).div(255) for img in imgs)
+    xs = self.backbone(imgs, self.sideband.expand(imgs[0].shape[0], -1))
     f = self.decoder(xs[-1])
     return self.heads(f)
 
@@ -242,19 +243,22 @@ if __name__ == "__main__":
   model = Model()
 
   @partial(TinyJit, prune=True)
-  def run(x:Tensor):
-    return model(x)
+  def run(x:Tensor, x2:Tensor):
+    return model((x, x2))
   x = Tensor.randn(1, 128, 256, 6).realize()
+  x2 = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(x)
+  run(x, x2)
   x = Tensor.randn(1, 128, 256, 6).realize()
+  x2 = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(x)
+  run(x, x2)
 
   # full run
   x = Tensor.randn(1, 128, 256, 6).realize()
+  x2 = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(x)
+  run(x, x2)
 
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
   print(f"backbone parameters: {sum(p.numel() for p in get_parameters(model.backbone))}")

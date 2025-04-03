@@ -43,6 +43,7 @@ def get_train_files():
     return fake_files
 
 OUTPUT_PIPELINE = None
+SHIFT_PIPELINE = None
 def load_single_file(file):
   global OUTPUT_PIPELINE
   if OUTPUT_PIPELINE is None:
@@ -60,9 +61,15 @@ def load_single_file(file):
       A.RandomBrightnessContrast(brightness_limit=(-0.4, 0.3), contrast_limit=(-0.3, 0.3), p=0.5),
       A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.5),
       # A.Defocus(radius=(1, 3), p=0.1),
-      A.MotionBlur(blur_limit=(3, 5), p=0.5),
+      A.MotionBlur(blur_limit=(3, 7), p=0.5),
       A.GaussNoise(std_range=(0.05, 0.2), p=0.25),
       A.PlanckianJitter(p=0.5),
+    ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
+  global SHIFT_PIPELINE
+  if SHIFT_PIPELINE is None:
+    SHIFT_PIPELINE = A.Compose([
+      A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-10, 10), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=1),
+      A.MotionBlur(blur_limit=(3, 7), p=0.5),
     ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
   if file.startswith("path:"):
@@ -78,17 +85,16 @@ def load_single_file(file):
     # # transform points
     # x, y = x * (img.shape[1] - 1), (1 - y) * (img.shape[0] - 1)
   elif file.startswith("fake:"):
-    img, keypoints, color, number = generate_sample(file)
+    img, detected, keypoints, color, number = generate_sample(file)
   else:
     raise ValueError("unknown file type")
 
   output = OUTPUT_PIPELINE(image=img, keypoints=keypoints)
   img = output["image"]
   xc, yc = output["keypoints"][0]
-  if xc < 0 or xc > img.shape[1] or yc < 0 or yc > img.shape[0]:
-    detected = 0
-  else:
-    detected = 1
+  if detected:
+    if xc < 0 or xc > img.shape[1] or yc < 0 or yc > img.shape[0]:
+      detected = 0
   xtl, ytl = output["keypoints"][1]
   xtr, ytr = output["keypoints"][2]
   xbl, ybl = output["keypoints"][3]
@@ -104,31 +110,46 @@ def load_single_file(file):
   if not detected:
     color = 0
 
+  # create a shifted image
+  shift = SHIFT_PIPELINE(image=img)
+  img_shift = shift["image"]
+
   return {
     "x": img.tobytes(),
+    "x2": img_shift.tobytes(),
     "y": np.array((color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number), dtype=_to_np_dtype(dtypes.default_float)).tobytes(),
   }
 
 def single_batch(iter):
   d, c = next(iter)
-  return d["x"].to(Device.DEFAULT), d["y"].to(Device.DEFAULT), c
+  return d["x"].to(Device.DEFAULT), d["x2"].to(Device.DEFAULT), d["y"].to(Device.DEFAULT), c
 
 if __name__ == "__main__":
   from tinygrad.helpers import tqdm
   from ..common.dataloader import batch_load, BatchDesc
 
-  BS = 256
+  BS = 1
 
   batch_iter = iter(tqdm(batch_load(
     {
       "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
+      "x2": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
       "y": BatchDesc(shape=(12,), dtype=dtypes.default_float),
     },
     load_single_file, get_train_files, bs=BS, shuffle=True,
   ), total=len(get_train_files())//BS))
 
-  i, proc = 0, single_batch(batch_iter)
+  proc = single_batch(batch_iter)
   while proc is not None:
     try: next_proc = single_batch(batch_iter)
     except StopIteration: next_proc = None
+
+    img = proc[0][0].numpy()
+    shift_img = proc[1][0].numpy()
+    stack = np.hstack((img, shift_img))
+    print(proc[2][0].numpy())
+    cv2.imshow("x", stack)
+    if cv2.waitKey(0) == ord("q"):
+      break
+
     proc, next_proc = next_proc, None

@@ -10,15 +10,23 @@ from tinygrad.helpers import tqdm
 from ..common import BASE_PATH
 from ..common.image import rgb_to_yuv420_tensor
 
+MODEL_VERSION = 1
+
 @partial(TinyJit, prune=True)
-def pred(model, img):
+def pred(model, img, img2):
   img = img.to(Device.DEFAULT)
+  img2 = img2.to(Device.DEFAULT)
   if img.ndim == 3: img = img.unsqueeze(0)
   if img.shape[3] == 3:
     yuv = rgb_to_yuv420_tensor(img)
   else:
     yuv = img
-  return model(yuv).to("CPU")
+  if img2.ndim == 3: img2 = img2.unsqueeze(0)
+  if img2.shape[3] == 3:
+    yuv2 = rgb_to_yuv420_tensor(img2)
+  else:
+    yuv2 = img2
+  return model((yuv, yuv2)).to("CPU")
 
 @dataclass
 class Annotation:

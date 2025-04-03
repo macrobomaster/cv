@@ -13,7 +13,7 @@ PLATE2_PIPELINE = None
 BACKGROUND_PIPELINE = None
 plate_images = {}
 background_images = []
-def generate_sample(file) -> tuple[cv2.Mat, list[tuple[float, float]], int, int]:
+def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int, int]:
   global PLATE_PIPELINE, PLATE2_PIPELINE, BACKGROUND_PIPELINE, plate_images, background_images
   if PLATE_PIPELINE is None:
     PLATE_PIPELINE = A.Compose([
@@ -62,10 +62,14 @@ def generate_sample(file) -> tuple[cv2.Mat, list[tuple[float, float]], int, int]
   plate = plate_out["image"]
   img = BACKGROUND_PIPELINE(image=raw_background)["image"]
 
-  # put the plate on the background with alpha blending
   x = random.randint(0, img.shape[1] - plate.shape[1])
   y = random.randint(0, img.shape[0] - plate.shape[0])
-  alpha_overlay(plate, img, x, y)
+
+  # sometimes don't have a plate at all for a negative sample
+  detected = random.random() > 0.05
+  if detected:
+    # put the plate on the background with alpha blending
+    alpha_overlay(plate, img, x, y)
 
   # turn color into int
   match color:
@@ -78,4 +82,4 @@ def generate_sample(file) -> tuple[cv2.Mat, list[tuple[float, float]], int, int]
   top_right = x + plate_out["keypoints"][2][0], y + plate_out["keypoints"][2][1]
   bottom_left = x + plate_out["keypoints"][3][0], y + plate_out["keypoints"][3][1]
   bottom_right = x + plate_out["keypoints"][4][0], y + plate_out["keypoints"][4][1]
-  return img, [center, top_left, top_right, bottom_left, bottom_right], color, number
+  return img, int(detected), [center, top_left, top_right, bottom_left, bottom_right], color, number
