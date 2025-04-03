@@ -1,3 +1,5 @@
+import time
+
 import serial
 
 from ..core import messaging
@@ -6,6 +8,8 @@ from ..core.keyvalue import kv_get, kv_put
 from .protocol import Protocol, Command, State
 
 def run():
+  kv_put("watchdog", "commsd", time.monotonic())
+
   port = serial.Serial("/dev/ttyUSB0", 115200, timeout=1)
   protocol = Protocol(port)
 
@@ -13,6 +17,8 @@ def run():
   sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity"])
 
   while True:
+    kv_put("watchdog", "commsd", time.monotonic())
+
     sub.update()
 
     aim_error = sub["aim_error"]
