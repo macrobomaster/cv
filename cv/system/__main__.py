@@ -10,7 +10,7 @@ def not_pc(_):
   return getenv("PC", 0) == 0
 
 PROCS = [
-  SupervisedProcess("commsd", "cv.system.commsd.commsd", not_pc, watchdog_dt=10),
+  SupervisedProcess("commsd", "cv.system.commsd.commsd", not_pc, watchdog_dt=5),
   SupervisedProcess("camerad", "cv.system.camerad.camerad", watchdog_dt=5),
   SupervisedProcess("autoaimd", "cv.system.autoaimd.autoaimd"),
   SupervisedProcess("plated", "cv.system.plated.plated"),
