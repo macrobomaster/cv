@@ -14,7 +14,8 @@ def run():
 
   pub = messaging.Pub(["camera_feed"])
 
-  if (wc := getenv("WEBCAM", -1)) != -1:
+  wc = getenv("WEBCAM", -1)
+  if wc != -1:
     cap = cv2.VideoCapture(wc)
   else:
     cam, strm = setup_aravis()
@@ -22,7 +23,7 @@ def run():
   while True:
     kv_put("watchdog", "camerad", time.monotonic())
 
-    if getenv("WEBCAM"):
+    if wc != -1:
       ret, frame = cap.read()
       if not ret:
         logger.error("failed to read frame")
