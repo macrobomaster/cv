@@ -1,4 +1,4 @@
-import os, signal, sys, fcntl, errno
+import os, signal, sys, fcntl, errno, time
 
 # from https://github.com/commaai/openpilot/blob/e674bc1355a4c85c807b3494b26090f7b7d4c99e/system/manager/helpers.py#L15
 def unblock_stdout() -> None:
@@ -32,3 +32,16 @@ def unblock_stdout() -> None:
     # whose low byte is the signal number and whose high byte is the exit status
     exit_status = os.wait()[1] >> 8
     os._exit(exit_status)
+
+class FrequencyKeeper:
+  def __init__(self, freq:int):
+    self.freq = freq
+    self.dt = 1 / freq
+    self.last_time = 0
+
+  def step(self):
+    now = time.monotonic()
+    dt = now - self.last_time
+    if dt < self.dt:
+      time.sleep(self.dt - dt)
+    self.last_time = now
