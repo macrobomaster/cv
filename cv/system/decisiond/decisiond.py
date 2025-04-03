@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass
+from collections import deque
 
 import numpy as np
 import cv2
@@ -69,11 +70,39 @@ class AimErrorKF:
     est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten().tolist()
     return est[0], est[1]
 
+class AimErrorSpinCompensator:
+  def __init__(self, size:int=100):
+    self.size = size
+    self.xs = deque(maxlen=size)
+    self.maxs = deque(maxlen=size // 10)
+    self.mins = deque(maxlen=size // 10)
+
+  def correct(self, x:float) -> float:
+    self.xs.append(x)
+    if len(self.xs) < self.size:
+      return x
+
+    # see if we have clustering of max and min values
+    # self.maxs.append(max(self.xs))
+    # self.mins.append(min(self.xs))
+    # if len(self.maxs) == self.maxs.maxlen and len(self.mins) == self.mins.maxlen:
+    #   max_avg = sum(self.maxs) / len(self.maxs)
+    #   min_avg = sum(self.mins) / len(self.mins)
+    #   # see if all maxs and mins are near their average
+    #   for i in range(len(self.maxs)):
+    #     if abs(self.maxs[i] - max_avg) > 0.1 or abs(self.mins[i] - min_avg) > 0.1:
+    #       return x
+
+    # compute the average of the last size elements
+    avg = sum(self.xs) / len(self.xs)
+    return avg
+
 def run():
   pub = messaging.Pub(["aim_error", "chassis_velocity"])
   sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
 
   aim_error_kf = AimErrorKF()
+  aim_error_spin_comp = AimErrorSpinCompensator()
 
   follower = WaypointFollower([
     Waypoint(1, 0, 5),
@@ -98,6 +127,7 @@ def run():
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
         x, y = aim_error_kf.predict_and_correct(x, y)
+        x = aim_error_spin_comp.correct(x)
 
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
