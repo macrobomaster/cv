@@ -13,26 +13,32 @@ def run():
   sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity"])
 
   while True:
-    sub.update(10)
+    sub.update()
 
     aim_error = sub["aim_error"]
-    if sub.updated["aim_error"] and aim_error is not None:
+    if sub.uav["aim_error"]:
       x = aim_error["x"]
       y = aim_error["y"]
       protocol.msg(Command.AIM_ERROR, x, y)
+    else:
+      protocol.msg(Command.AIM_ERROR, 0.0, 0.0)
 
     shoot = sub["shoot"]
-    if sub.updated["shoot"] and shoot is not None:
-      protocol.msg(Command.CONTROL_SHOOT, 0xff)
+    if sub.uav["shoot"]:
+      protocol.msg(Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
     else:
       protocol.msg(Command.CONTROL_SHOOT, 0x00)
 
     chassis_velocity = sub["chassis_velocity"]
-    if sub.updated["chassis_velocity"] and chassis_velocity is not None:
+    if sub.uav["chassis_velocity"]:
       x = chassis_velocity["x"]
       z = chassis_velocity["z"]
       protocol.msg(Command.MOVE_ROBOT, x, z)
+    else:
+      protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
 
+    game_running_msg = None
     game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
     if game_running is not None:
-      pub.send("game_running", True if game_running[0] == 0x00 else False)
+      game_running_msg = True if game_running[0] == 0x00 else False
+    pub.send("game_running", game_running_msg)

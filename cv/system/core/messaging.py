@@ -29,12 +29,13 @@ class Pub:
     self.socks[service].send(cbor2.dumps(data))
 
 class AliveChecker:
-  def __init__(self, count:int=100):
-    self.count = count
+  def __init__(self, count:int=1000):
+    self.count, self.recent_count = count, count // 10
     self.lt = 0
     self.avg_dt = 0
-    self.dts = deque(maxlen=count)
-    self.missed_dt = 0
+    self.dts = deque(maxlen=self.count)
+    self.recent_avg_dt = 0
+    self.recent_dts = deque(maxlen=self.recent_count)
 
   def update(self, t:float):
     dt = t - self.lt
@@ -46,13 +47,20 @@ class AliveChecker:
     self.avg_dt += dt / self.count
     self.dts.append(dt)
 
+    # add new dt to recent moving average
+    if len(self.recent_dts) == self.recent_count:
+      self.recent_avg_dt -= self.recent_dts.popleft() / self.recent_count
+    self.recent_avg_dt += dt / self.recent_count
+    self.recent_dts.append(dt)
+
   def alive(self, t:float) -> bool:
     dt = t - self.lt
 
-    # check if dt is too large compared to the average
+    # check if dt is too large compared to the averages
     if len(self.dts) == self.count:
       if dt > 10 * self.avg_dt:
-        return False
+        if dt > 10 * self.recent_avg_dt:
+          return False
     return True
 
 class Sub:
@@ -77,10 +85,11 @@ class Sub:
     self.data = {service: None for service in self.services}
     self.valid = {service: False for service in self.services}
     self.updated = {service: False for service in self.services}
+    self.uav = {service: False for service in self.services}
     self.alive_checker = {service: AliveChecker() for service in self.services}
     self.alive = {service: False for service in self.services}
 
-  def __getitem__(self, service:str):
+  def __getitem__(self, service:str) -> Any:
     return self.data[service]
 
   def _read_update(self, service:str):
@@ -114,3 +123,7 @@ class Sub:
         self.alive_checker[service].update(t)
       if self.data[service] is not None:
         self.alive[service] = self.alive_checker[service].alive(t)
+
+    # updated and valid
+    for service in self.services:
+      self.uav[service] = self.updated[service] and self.valid[service]
