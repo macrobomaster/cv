@@ -206,4 +206,7 @@
   # containers
   virtualisation.podman.enable = true;
   virtualisation.podman.enableNvidia = true;
+
+  # wireless
+  networking.wireless.iwd.enable = true;
 }
