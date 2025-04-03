@@ -106,6 +106,6 @@ def run():
         pub.send("aim_error", {"x": x, "y": y})
 
     dt = time.monotonic() - st
-    if dt > 0:
+    if dt > 0 and dt <= 20:
       vx, vz = follower.step(1/100)
       pub.send("chassis_velocity", {"x": vx, "z": vz})
