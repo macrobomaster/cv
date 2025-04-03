@@ -1,6 +1,7 @@
 import time
 
 import serial
+from tinygrad.helpers import getenv
 
 from ..core import messaging
 from ..core.logging import logger
@@ -10,7 +11,11 @@ from .protocol import Protocol, Command, State
 def run():
   kv_put("watchdog", "commsd", time.monotonic())
 
-  port = serial.Serial("/dev/ttyUSB0", 115200, timeout=1)
+  if getenv("PC"):
+    device = "/dev/ttyUSB0"
+  else:
+    device = "/dev/ttyTHS1"
+  port = serial.Serial(device, 115200, timeout=1)
   protocol = Protocol(port)
 
   pub = messaging.Pub(["game_running"])
