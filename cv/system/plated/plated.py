@@ -79,31 +79,32 @@ def run():
     autoaim = sub["autoaim"]
     if autoaim is None: continue
 
-    if autoaim["colorm"] != "none" and autoaim["colorp"] > 0.6:
-      xbl, ybl = autoaim["xbl"], autoaim["ybl"]
-      xbr, ybr = autoaim["xbr"], autoaim["ybr"]
-      xtr, ytr = autoaim["xtr"], autoaim["ytr"]
-      xtl, ytl = autoaim["xtl"], autoaim["ytl"]
+    if sub.updated["autoaim"]:
+      if autoaim["colorm"] != "none" and autoaim["colorp"] > 0.6:
+        xbl, ybl = autoaim["xbl"], autoaim["ybl"]
+        xbr, ybr = autoaim["xbr"], autoaim["ybr"]
+        xtr, ytr = autoaim["xtr"], autoaim["ytr"]
+        xtl, ytl = autoaim["xtl"], autoaim["ytl"]
 
-      image_points = np.array([
-        [xbl, ybl],
-        [xbr, ybr],
-        [xtr, ytr],
-        [xtl, ytl],
-      ], dtype=np.float32).reshape(-1, 1, 2)
-      _, rvec, tvec = cv2.solvePnP(square_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        image_points = np.array([
+          [xbl, ybl],
+          [xbr, ybr],
+          [xtr, ytr],
+          [xtl, ytl],
+        ], dtype=np.float32).reshape(-1, 1, 2)
+        _, rvec, tvec = cv2.solvePnP(square_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
 
-      rot = R.from_rotvec(rvec.flatten()).as_euler("xyz")
-      pos = tvec.flatten()
+        rot = R.from_rotvec(rvec.flatten()).as_euler("xyz")
+        pos = tvec.flatten()
 
-      pos, rot = kf.predict_and_correct(pos, rot)
+        pos, rot = kf.predict_and_correct(pos, rot)
 
-      dist = np.linalg.norm(pos)
+        dist = np.linalg.norm(pos)
 
-      pub.send("plate", {
-        "rot": rot,
-        "pos": pos,
-        "dist": dist,
-        "rvec": rvec.flatten().tolist(),
-        "tvec": tvec.flatten().tolist(),
-      })
+        pub.send("plate", {
+          "rot": rot,
+          "pos": pos,
+          "dist": dist,
+          "rvec": rvec.flatten().tolist(),
+          "tvec": tvec.flatten().tolist(),
+        })
