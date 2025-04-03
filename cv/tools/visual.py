@@ -7,6 +7,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from ..system.core import messaging
+from ..system.core.helpers import FrequencyKeeper
 
 class HistoryTracker:
   def __init__(self, points_to_track:int=200):
@@ -25,6 +26,8 @@ class HistoryTracker:
 
 rr.init("cv")
 rr.connect_tcp()
+
+fk = FrequencyKeeper(30)
 
 plate_width, plate_height = 0.14, 0.125
 f = 2 * 6
@@ -142,3 +145,5 @@ while True:
   # log alive status
   for k, v in sub.alive.items():
     rr.log(f"alive/{k}", rr.Scalar(int(v)))
+
+  fk.step()
