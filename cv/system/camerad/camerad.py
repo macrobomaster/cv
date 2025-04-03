@@ -14,8 +14,8 @@ def run():
 
   pub = messaging.Pub(["camera_feed"])
 
-  if getenv("WEBCAM"):
-    cap = cv2.VideoCapture(1)
+  if (wc := getenv("WEBCAM", -1)) != -1:
+    cap = cv2.VideoCapture(wc)
   else:
     cam, strm = setup_aravis()
 
