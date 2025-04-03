@@ -89,8 +89,7 @@ def run():
     autoaim = sub["autoaim"]
     plate = sub["plate"]
 
-    aim_error_msg = None
-    if sub.uav["autoaim"]:
+    if sub.updated["autoaim"]:
       colorm = autoaim["colorm"]
       colorp = autoaim["colorp"]
       if colorm != "none" and colorp > 0.6:
@@ -102,12 +101,9 @@ def run():
         y -= 0.1 * plate["dist"]
         y += 0.4
 
-        aim_error_msg = {"x": x, "y": y}
-    pub.send("aim_error", aim_error_msg)
+        pub.send("aim_error", {"x": x, "y": y})
 
-    chassis_velocity_msg = None
     dt = time.monotonic() - st
     if dt > 0:
       vx, vz = follower.step(1/100)
-      chassis_velocity_msg = {"x": vx, "z": vz}
-    pub.send("chassis_velocity", chassis_velocity_msg)
+      pub.send("chassis_velocity", {"x": vx, "z": vz})

@@ -83,9 +83,7 @@ class Sub:
       self.poller.register(self.socks[service], zmq.POLLIN)
 
     self.data = {service: None for service in self.services}
-    self.valid = {service: False for service in self.services}
     self.updated = {service: False for service in self.services}
-    self.uav = {service: False for service in self.services}
     self.alive_checker = {service: AliveChecker() for service in self.services}
     self.alive = {service: False for service in self.services}
 
@@ -95,12 +93,7 @@ class Sub:
   def _read_update(self, service:str):
     try: data = self.socks[service].recv(flags=zmq.NOBLOCK)
     except zmq.error.Again: return
-    data = cbor2.loads(data)
-    if data is None:
-      self.valid[service] = False
-    else:
-      self.valid[service] = True
-      self.data[service] = data
+    self.data[service] = cbor2.loads(data)
     self.updated[service] = True
 
   def update(self, timeout:int=100):
@@ -123,7 +116,3 @@ class Sub:
         self.alive_checker[service].update(t)
       if self.data[service] is not None:
         self.alive[service] = self.alive_checker[service].alive(t)
-
-    # updated and valid
-    for service in self.services:
-      self.uav[service] = self.updated[service] and self.valid[service]

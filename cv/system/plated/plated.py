@@ -78,8 +78,7 @@ def run():
 
     autoaim = sub["autoaim"]
 
-    plate_msg = None
-    if sub.uav["autoaim"]:
+    if sub.updated["autoaim"]:
       if autoaim["colorm"] != "none" and autoaim["colorp"] > 0.6:
         xbl, ybl = autoaim["xbl"], autoaim["ybl"]
         xbr, ybr = autoaim["xbr"], autoaim["ybr"]
@@ -101,11 +100,10 @@ def run():
 
         dist = np.linalg.norm(pos)
 
-        plate_msg = {
+        pub.send("plate", {
           "rot": rot,
           "pos": pos,
           "dist": dist,
           "rvec": rvec.flatten().tolist(),
           "tvec": tvec.flatten().tolist(),
-        }
-    pub.send("plate", plate_msg)
+        })

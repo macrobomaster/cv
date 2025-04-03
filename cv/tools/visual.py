@@ -48,7 +48,6 @@ sub = messaging.Sub(["aim_error", "chassis_velocity", "camera_feed", "autoaim", 
 
 for service in sub.services:
   rr.log(f"alive/{service}", rr.SeriesLine(width=10), static=True)
-  rr.log(f"valid/{service}", rr.SeriesLine(width=10), static=True)
 
 ht = HistoryTracker(10)
 lt = time.monotonic()
@@ -59,13 +58,12 @@ while True:
 
   camera_feed = sub["camera_feed"]
   if time.monotonic() - lt >= 0.1:
-    if camera_feed is not None:
-      frame = np.frombuffer(camera_feed, dtype=np.uint8).reshape(256, 512, 3)
-      rr.log("raw_camera/feed", rr.Image(frame).compress(70))
+    frame = np.frombuffer(camera_feed, dtype=np.uint8).reshape(256, 512, 3)
+    rr.log("raw_camera/feed", rr.Image(frame).compress(70))
     lt = time.monotonic()
 
   aim_error = sub["aim_error"]
-  if sub.updated["aim_error"] and aim_error is not None:
+  if sub.updated["aim_error"]:
     rr.set_time_seconds("time", time.monotonic())
     x = aim_error["x"] * 256 + 256
     y = aim_error["y"] * 128 + 128
@@ -75,7 +73,7 @@ while True:
     rr.log("raw_camera/cursor", rr.Points2D([(x, y)], radii=[5]))
 
   autoaim = sub["autoaim"]
-  if sub.updated["autoaim"] and autoaim is not None:
+  if sub.updated["autoaim"]:
     if autoaim["colorm"] != "none" and autoaim["colorp"] > 0.6:
       x = autoaim["xc"]
       y = autoaim["yc"]
@@ -104,7 +102,7 @@ while True:
       rr.log("raw_camera/autoaim_br_cursor", rr.Points2D([(x, y)], radii=[2]))
 
     plate = sub["plate"]
-    if sub.updated["plate"] and plate is not None:
+    if sub.updated["plate"]:
       pos = np.array(plate["pos"])
       rot = np.array(plate["rot"]) + np.array([0, math.pi, math.pi])
       quaternion = R.from_euler("xyz", rot.flatten()).as_quat()
@@ -130,7 +128,7 @@ while True:
       rr.log("raw_camera/plate", rr.LineStrips2D(imgpts))
 
   chassis_velocity = sub["chassis_velocity"]
-  if sub.updated["chassis_velocity"] and chassis_velocity is not None:
+  if sub.updated["chassis_velocity"]:
     # integrate velocity to get position
     velx = chassis_velocity["x"]
     velz = chassis_velocity["z"]
@@ -143,6 +141,3 @@ while True:
   # log alive status
   for k, v in sub.alive.items():
     rr.log(f"alive/{k}", rr.Scalar(int(v)))
-  # log valid status
-  for k, v in sub.valid.items():
-    rr.log(f"valid/{k}", rr.Scalar(int(v)))
