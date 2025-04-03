@@ -28,6 +28,8 @@ def run():
 
   # cache model jit
   if kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_run") is None:
+    logger.info("building cached model")
+
     model = Model()
     state_dict = safe_load(str(Path(__file__).parent.parent.parent.parent / "weights/model.safetensors"))
     load_state_dict(model, state_dict, verbose=False)
