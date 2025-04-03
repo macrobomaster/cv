@@ -33,36 +33,41 @@ class AliveChecker:
   def __init__(self, count:int=1000):
     self.count, self.recent_count = count, count // 10
     self.lt = 0
-    self.avg_dt = 0
+    self.sum_dt = 0
     self.dts = deque(maxlen=self.count)
-    self.recent_avg_dt = 0
+    self.recent_sum_dt = 0
     self.recent_dts = deque(maxlen=self.recent_count)
 
   def update(self, t:float):
+    if self.lt == 0:
+      self.lt = t
+      return
+
     dt = t - self.lt
     self.lt = t
 
     # add new dt to moving average
     if len(self.dts) == self.count:
-      self.avg_dt -= self.dts.popleft() / self.count
-    self.avg_dt += dt / self.count
+      self.sum_dt -= self.dts.popleft()
+    self.sum_dt += dt
     self.dts.append(dt)
 
     # add new dt to recent moving average
     if len(self.recent_dts) == self.recent_count:
-      self.recent_avg_dt -= self.recent_dts.popleft() / self.recent_count
-    self.recent_avg_dt += dt / self.recent_count
+      self.recent_sum_dt -= self.recent_dts.popleft()
+    self.recent_sum_dt += dt
     self.recent_dts.append(dt)
 
   def alive(self, t:float) -> bool:
     dt = t - self.lt
 
     # check if dt is too large compared to the averages
-    if len(self.dts) == self.count:
-      if dt > 10 * self.avg_dt:
-        if dt > 10 * self.recent_avg_dt:
+    if len(self.dts) > 0:
+      if dt > 10 * (self.sum_dt / len(self.dts)):
+        if dt > 10 * (self.recent_sum_dt / len(self.recent_dts)):
           return False
-    return True
+      return True
+    return False
 
 class Sub:
   def __init__(self, services:list[str], poll:str|None=None, addr:str="127.0.0.1"):
