@@ -1,7 +1,7 @@
 import time
+from pathlib import Path
 
 import serial
-from tinygrad.helpers import getenv
 
 from ..core import messaging
 from ..core.logging import logger
@@ -11,10 +11,11 @@ from .protocol import Protocol, Command, State
 def run():
   kv_put("watchdog", "commsd", time.monotonic())
 
-  if getenv("PC"):
-    device = "/dev/ttyUSB0"
-  else:
+  if Path("/dev/ttyTHS1").exists():
     device = "/dev/ttyTHS1"
+  else:
+    device = "/dev/ttyUSB0"
+  logger.info(f"using device {device}")
   port = serial.Serial(device, 115200, timeout=1)
   protocol = Protocol(port)
 
