@@ -47,7 +47,7 @@ rr.log("pworld/camera", rr.Pinhole(resolution=(512, 256), image_from_camera=came
 rr.log("pworld/plate", rr.Asset3D(path="/tmp/armor_plate.gltf", albedo_factor=[0.1, 0.1, 0.1, 1]), static=True)
 
 addr = sys.argv[1]
-sub = messaging.Sub(["aim_error", "chassis_velocity", "camera_feed", "autoaim", "plate"], addr=addr)
+sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "camera_feed", "autoaim", "plate"], addr=addr)
 
 for service in sub.services:
   rr.log(f"alive/{service}", rr.SeriesLine(width=10), static=True)
@@ -130,6 +130,10 @@ while True:
       # add the first point to close the loop
       imgpts = np.vstack([imgpts, imgpts[0]])
       rr.log("raw_camera/plate", rr.LineStrips2D(imgpts))
+
+  shoot = sub["shoot"]
+  if sub.updated["shoot"] and shoot is not None:
+    rr.log("shoot", rr.Scalar(int(shoot)))
 
   chassis_velocity = sub["chassis_velocity"]
   if sub.updated["chassis_velocity"] and chassis_velocity is not None:

@@ -1,4 +1,4 @@
-import time
+import time, math
 from dataclasses import dataclass
 from collections import deque
 
@@ -97,12 +97,45 @@ class AimErrorSpinCompensator:
     avg = sum(self.xs) / len(self.xs)
     return avg
 
+class ShootDecision:
+  def __init__(self):
+    self.window = deque(maxlen=10)
+
+    # only shoot a 3 round burst
+    self.burst_start = 0
+    self.last_burst = 0
+
+  def step(self, x:float, y:float) -> bool:
+    # add distance to the window
+    dist = math.sqrt(x*x + y*y)
+    self.window.append(dist)
+
+    now = time.monotonic()
+    if now - self.last_burst > 1:
+      # if the average distance is less than 0.1, shoot
+      if len(self.window) == self.window.maxlen:
+        avg = sum(self.window) / len(self.window)
+        if avg < 0.1:
+          self.burst_start = now
+
+    if self.burst_start > 0:
+      # if the burst has been going for more than 0.5 seconds, stop shooting
+      if now - self.burst_start > 0.5:
+        self.last_burst = now
+        self.burst_start = 0
+        return False
+      else:
+        # shoot
+        return True
+    return False
+
 def run():
-  pub = messaging.Pub(["aim_error", "chassis_velocity"])
+  pub = messaging.Pub(["aim_error", "chassis_velocity", "shoot"])
   sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
 
   aim_error_kf = AimErrorKF()
   aim_error_spin_comp = AimErrorSpinCompensator()
+  shoot_decision = ShootDecision()
 
   follower = WaypointFollower([
     Waypoint(1, 0, 5),
@@ -129,11 +162,14 @@ def run():
         x, y = aim_error_kf.predict_and_correct(x, y)
         x = aim_error_spin_comp.correct(x)
 
+        shoot = shoot_decision.step(x, y)
+
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
         y += 0.4
 
         pub.send("aim_error", {"x": x, "y": y})
+        pub.send("shoot", shoot)
 
     dt = time.monotonic() - st
     if dt > 0 and dt <= 120:
