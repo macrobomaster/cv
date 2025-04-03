@@ -16,6 +16,7 @@ from ...autoaim.common import pred
 
 MODEL_VERSION = 0
 HALF = getenv("HALF", 0)
+BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
 
 def run():
   pub = messaging.Pub(["autoaim"])
@@ -27,7 +28,7 @@ def run():
     dtypes.default_float = dtypes.float16
 
   # cache model jit
-  if kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_run") is None:
+  if kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run") is None:
     logger.info("building cached model")
 
     model = Model()
@@ -44,7 +45,7 @@ def run():
     for _ in range(3):
       pred(model, fake_input).tolist()
 
-    kv_put("autoaim", f"model_{MODEL_VERSION}_{HALF}_run", pickle.dumps(pred))
+    kv_put("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run", pickle.dumps(pred))
 
   # load model
   logger.info(f"loading cached model_{MODEL_VERSION}_{HALF}_run")
