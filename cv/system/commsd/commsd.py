@@ -16,8 +16,11 @@ def run():
     sub.update()
 
     aim_error = sub["aim_error"]
+    if aim_error is None: continue
     shoot = sub["shoot"]
+    if shoot is None: continue
     chassis_velocity = sub["chassis_velocity"]
+    if chassis_velocity is None: continue
 
     if sub.updated["aim_error"]:
       x = aim_error["x"]

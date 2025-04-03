@@ -36,6 +36,7 @@ def run():
     GlobalCounters.reset()
 
     frame = sub["camera_feed"]
+    if frame is None: continue
 
     framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
     model_out = pred(model, framet).tolist()[0]

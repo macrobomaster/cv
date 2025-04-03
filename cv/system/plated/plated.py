@@ -77,6 +77,7 @@ def run():
     sub.update()
 
     autoaim = sub["autoaim"]
+    if autoaim is None: continue
 
     if sub.updated["autoaim"]:
       if autoaim["colorm"] != "none" and autoaim["colorp"] > 0.6:

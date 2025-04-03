@@ -87,7 +87,9 @@ def run():
     sub.update()
 
     autoaim = sub["autoaim"]
+    if autoaim is None: continue
     plate = sub["plate"]
+    if plate is None: continue
 
     if sub.updated["autoaim"]:
       colorm = autoaim["colorm"]

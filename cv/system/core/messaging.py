@@ -26,6 +26,7 @@ class Pub:
       self.socks[service] = sock
 
   def send(self, service:str, data:Any|None):
+    assert data is not None, "data cannot be None"
     self.socks[service].send(cbor2.dumps(data))
 
 class AliveChecker:
@@ -87,7 +88,7 @@ class Sub:
     self.alive_checker = {service: AliveChecker() for service in self.services}
     self.alive = {service: False for service in self.services}
 
-  def __getitem__(self, service:str) -> Any:
+  def __getitem__(self, service:str):
     return self.data[service]
 
   def _read_update(self, service:str):
