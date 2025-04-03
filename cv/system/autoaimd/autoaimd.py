@@ -47,6 +47,7 @@ def run():
     kv_put("autoaim", f"model_{MODEL_VERSION}_{HALF}_run", pickle.dumps(pred))
 
   # load model
+  logger.info(f"loading cached model_{MODEL_VERSION}_{HALF}_run")
   model_pred = pickle.loads(kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_run"))
 
   while True:
