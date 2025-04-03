@@ -26,19 +26,19 @@ def run():
       x = aim_error["x"]
       y = aim_error["y"]
       protocol.msg(Command.AIM_ERROR, x, y)
-    else:
+    if not sub.alive["aim_error"]:
       protocol.msg(Command.AIM_ERROR, 0.0, 0.0)
 
     if sub.updated["shoot"]:
       protocol.msg(Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
-    else:
+    if not sub.alive["shoot"]:
       protocol.msg(Command.CONTROL_SHOOT, 0x00)
 
     if sub.updated["chassis_velocity"]:
       x = chassis_velocity["x"]
       z = chassis_velocity["z"]
       protocol.msg(Command.MOVE_ROBOT, x, z)
-    else:
+    if not sub.alive["chassis_velocity"]:
       protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
 
     game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
