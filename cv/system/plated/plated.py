@@ -106,3 +106,5 @@ def run():
           "rvec": rvec.flatten().tolist(),
           "tvec": tvec.flatten().tolist(),
         })
+      else:
+        pub.send("plate", None)

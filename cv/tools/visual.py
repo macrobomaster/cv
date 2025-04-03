@@ -1,4 +1,4 @@
-import time, math
+import time, math, sys
 from collections import deque
 
 import cv2
@@ -43,7 +43,12 @@ rr.log("pworld", rr.ViewCoordinates.RDF, static=True)
 rr.log("pworld/camera", rr.Pinhole(resolution=(512, 256), image_from_camera=camera_matrix, camera_xyz=rr.ViewCoordinates.RDF), static=True)
 rr.log("pworld/plate", rr.Asset3D(path="/tmp/armor_plate.gltf", albedo_factor=[0.1, 0.1, 0.1, 1]), static=True)
 
-sub = messaging.Sub(["aim_error", "chassis_velocity", "camera_feed", "autoaim", "plate"])
+addr = sys.argv[1]
+sub = messaging.Sub(["aim_error", "chassis_velocity", "camera_feed", "autoaim", "plate"], addr=addr)
+
+for service in sub.services:
+  rr.log(f"alive/{service}", rr.SeriesLine(width=10), static=True)
+  rr.log(f"valid/{service}", rr.SeriesLine(width=10), static=True)
 
 ht = HistoryTracker(10)
 lt = time.monotonic()
@@ -134,3 +139,10 @@ while True:
     z += velz
     ht["chassis_pos"] = (x, y, z)
     rr.log("world/pos", rr.LineStrips3D(ht["chassis_pos"]))
+
+  # log alive status
+  for k, v in sub.alive.items():
+    rr.log(f"alive/{k}", rr.Scalar(int(v)))
+  # log valid status
+  for k, v in sub.valid.items():
+    rr.log(f"valid/{k}", rr.Scalar(int(v)))
