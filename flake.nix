@@ -242,6 +242,7 @@
                 BLK_DEV_NVME y
                 NVME_CORE y
                 FB_SIMPLE y
+                IWLWIFI m
               '';
             }
           ];
