@@ -115,7 +115,7 @@ class ShootDecision:
       # if the average distance is less than 0.1, shoot
       if len(self.window) == self.window.maxlen:
         avg = sum(self.window) / len(self.window)
-        if avg < 0.1:
+        if avg < 0.2:
           self.burst_start = now
 
     if self.burst_start > 0:
