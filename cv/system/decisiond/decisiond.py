@@ -112,15 +112,13 @@ class ShootDecision:
 
     now = time.monotonic()
     if now - self.last_burst > 1:
-      # if the average distance is less than 0.1, shoot
       if len(self.window) == self.window.maxlen:
         avg = sum(self.window) / len(self.window)
-        if avg < 0.2:
+        if avg < 0.5:
           self.burst_start = now
 
     if self.burst_start > 0:
-      # if the burst has been going for more than 0.5 seconds, stop shooting
-      if now - self.burst_start > 0.5:
+      if now - self.burst_start > 3:
         self.last_burst = now
         self.burst_start = 0
         return False
