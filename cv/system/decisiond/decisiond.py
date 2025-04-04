@@ -172,7 +172,7 @@ def run():
         pub.send("shoot", shoot)
 
         if plate["dist"] > 1:
-          pub.send("chassis_velocity", {"x": 0.0, "z": 0.1})
+          pub.send("chassis_velocity", {"x": 0.2, "z": 0.0})
 
     # dt = time.monotonic() - st
     # if dt > 0 and dt <= 120:
