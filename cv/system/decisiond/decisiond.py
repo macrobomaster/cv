@@ -157,12 +157,13 @@ def run():
       if colorm != "none" and colorp > 0.6:
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
-        x *= 10
-        y *= 10
         x, y = aim_error_kf.predict_and_correct(x, y)
         # x = aim_error_spin_comp.correct(x)
 
         shoot = shoot_decision.step(x, y)
+
+        x *= 10
+        y *= 10
 
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
