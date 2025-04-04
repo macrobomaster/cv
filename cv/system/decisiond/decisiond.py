@@ -111,20 +111,20 @@ class ShootDecision:
     self.window.append(dist)
 
     now = time.monotonic()
-    if now - self.last_burst > 1:
-      if len(self.window) == self.window.maxlen:
-        avg = sum(self.window) / len(self.window)
-        if avg < 0.5:
-          self.burst_start = now
-
     if self.burst_start > 0:
-      if now - self.burst_start > 3:
+      if now - self.burst_start > 1:
         self.last_burst = now
         self.burst_start = 0
         return False
       else:
         # shoot
         return True
+    else:
+      if now - self.last_burst > 1:
+        if len(self.window) == self.window.maxlen:
+          avg = sum(self.window) / len(self.window)
+          if avg < 0.5:
+            self.burst_start = now
     return False
 
 def run():
