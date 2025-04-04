@@ -162,9 +162,6 @@ def run():
 
         shoot = shoot_decision.step(x, y)
 
-        x *= 10
-        y *= 10
-
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
         y += 0.4
