@@ -173,15 +173,15 @@ def run():
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
         if plate["dist"] > 1.2:
-          chassis_velocity["x"] = 0.2
+          chassis_velocity["x"] = max(0.5, plate["dist"] / 2)
         elif plate["dist"] < 1:
-          chassis_velocity["x"] = -0.2
+          chassis_velocity["x"] = -max(0.5, plate["dist"] / 2)
 
         pos = plate["pos"]
         if pos[0] > 0.1:
-          chassis_velocity["z"] = -0.2
+          chassis_velocity["z"] = -max(0.5, abs(pos[0]))
         elif pos[0] < -0.1:
-          chassis_velocity["z"] = 0.2
+          chassis_velocity["z"] = max(0.5, abs(pos[0]))
 
         pub.send("chassis_velocity", chassis_velocity)
 
