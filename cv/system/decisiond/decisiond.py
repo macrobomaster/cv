@@ -171,10 +171,19 @@ def run():
         pub.send("aim_error", {"x": x, "y": y})
         pub.send("shoot", shoot)
 
-        if plate["dist"] > 2:
-          pub.send("chassis_velocity", {"x": 0.2, "z": 0.0})
+        chassis_velocity = {"x": 0.0, "z": 0.0}
+        if plate["dist"] > 1.2:
+          chassis_velocity["x"] = 0.2
         elif plate["dist"] < 1:
-          pub.send("chassis_velocity", {"x": -0.2, "z": 0.0})
+          chassis_velocity["x"] = -0.2
+
+        pos = plate["pos"]
+        if pos[0] > 0.1:
+          chassis_velocity["z"] = -0.2
+        elif pos[0] < -0.1:
+          chassis_velocity["z"] = 0.2
+
+        pub.send("chassis_velocity", chassis_velocity)
 
     # dt = time.monotonic() - st
     # if dt > 0 and dt <= 120:
