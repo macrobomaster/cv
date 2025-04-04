@@ -1,4 +1,4 @@
-import glob, random
+import glob, random, json
 
 from tinygrad.helpers import tqdm
 import cv2
@@ -9,12 +9,13 @@ from ...common import BASE_PATH
 from ...common.image import alpha_overlay
 
 PLATE_PIPELINE = None
-PLATE2_PIPELINE = None
 BACKGROUND_PIPELINE = None
+RESIZE_PIPELINE = None
 plate_images = {}
+plate_corners = {}
 background_images = []
 def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int, int]:
-  global PLATE_PIPELINE, PLATE2_PIPELINE, BACKGROUND_PIPELINE, plate_images, background_images
+  global PLATE_PIPELINE, BACKGROUND_PIPELINE, RESIZE_PIPELINE, plate_images, background_images
   if PLATE_PIPELINE is None:
     PLATE_PIPELINE = A.Compose([
       A.RandomScale(scale_limit=(0.05-1, 0.5-1), p=1),
@@ -25,6 +26,10 @@ def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int,
     BACKGROUND_PIPELINE = A.Compose([
       A.RandomResizedCrop(size=(256, 512), scale=(0.1, 1.0), ratio=(1.9, 2.1), p=1),
     ])
+  if RESIZE_PIPELINE is None:
+    RESIZE_PIPELINE = A.Compose([
+      A.LongestMaxSize(max_size=512, p=1),
+    ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
   # preload plate image
   plate = file.split(":")[1]
@@ -34,11 +39,11 @@ def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int,
     tqdm.write(f"loading plate {plate}")
     plate_img = pyvips.Image.new_from_file(str(BASE_PATH / "armor_plate" / f"{plate}.png"), access="sequential").numpy()
     # resize so that max side length is 512
-    if plate_img.shape[0] > plate_img.shape[1]:
-      plate_img = cv2.resize(plate_img, (int(512 * plate_img.shape[1] / plate_img.shape[0]), 512))
-    else:
-      plate_img = cv2.resize(plate_img, (512, int(512 * plate_img.shape[0] / plate_img.shape[1])))
-    plate_images[plate] = plate_img
+    with open(str(BASE_PATH / "armor_plate" / f"{plate}.json"), "r") as f:
+      keypoints = json.load(f)
+    resized = RESIZE_PIPELINE(image=plate_img, keypoints=keypoints)
+    plate_images[plate] = resized["image"]
+    plate_corners[plate] = resized["keypoints"]
 
   # load background images
   if len(background_images) == 0:
@@ -53,10 +58,7 @@ def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int,
   # keypoints are center, top-left, top-right, bottom-left, bottom-right
   keypoints = []
   keypoints.append((raw_plate.shape[1]//2, raw_plate.shape[0]//2))
-  keypoints.append((0, 0))
-  keypoints.append((raw_plate.shape[1], 0))
-  keypoints.append((0, raw_plate.shape[0]))
-  keypoints.append((raw_plate.shape[1], raw_plate.shape[0]))
+  keypoints.extend(plate_corners[plate])
 
   plate_out = PLATE_PIPELINE(image=raw_plate, keypoints=keypoints)
   plate = plate_out["image"]
@@ -66,7 +68,7 @@ def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int,
   y = random.randint(0, img.shape[0] - plate.shape[0])
 
   # sometimes don't have a plate at all for a negative sample
-  detected = random.random() > 0.05
+  detected = random.random() > 0.2
   if detected:
     # put the plate on the background with alpha blending
     alpha_overlay(plate, img, x, y)
@@ -82,4 +84,5 @@ def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int,
   top_right = x + plate_out["keypoints"][2][0], y + plate_out["keypoints"][2][1]
   bottom_left = x + plate_out["keypoints"][3][0], y + plate_out["keypoints"][3][1]
   bottom_right = x + plate_out["keypoints"][4][0], y + plate_out["keypoints"][4][1]
+
   return img, int(detected), [center, top_left, top_right, bottom_left, bottom_right], color, number
