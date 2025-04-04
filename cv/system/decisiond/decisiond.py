@@ -123,7 +123,7 @@ class ShootDecision:
       if now - self.last_burst > 1:
         if len(self.window) == self.window.maxlen:
           avg = sum(self.window) / len(self.window)
-          if avg < 0.5:
+          if avg < 0.2:
             self.burst_start = now
     return False
 
@@ -157,6 +157,8 @@ def run():
       if colorm != "none" and colorp > 0.6:
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
+        x *= 2
+        y *= 2
         x, y = aim_error_kf.predict_and_correct(x, y)
         # x = aim_error_spin_comp.correct(x)
 
