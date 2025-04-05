@@ -5,8 +5,6 @@ from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.helpers import GlobalCounters, getenv
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
-import numpy as np
-import cv2
 
 from ..core import messaging
 from ..core.logging import logger
