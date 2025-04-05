@@ -62,13 +62,17 @@ class AimErrorKF:
     self.last_x, self.last_y = 0, 0
 
   def predict_and_correct(self, x:float, y:float) -> tuple[float, float]:
-    # if the error is too large, reset the state
+    # if the error is too large, reset the filter
     if abs(x - self.last_x) > 0.5 or abs(y - self.last_y) > 0.5:
-      self.km.statePost = np.array([[x], [y], [0], [0], [0], [0]], dtype=np.float32)
+      self.reset()
+    self.last_x, self.last_y = x, y
 
     self.km.predict()
     est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten().tolist()
     return est[0], est[1]
+
+  def reset(self):
+    self.km.statePost = np.zeros((6, 1), dtype=np.float32)
 
 class AimErrorSpinCompensator:
   def __init__(self, size:int=100):
