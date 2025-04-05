@@ -23,7 +23,7 @@ BS = 256
 WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
-END_LR = 1e-4
+END_LR = 1e-5
 EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 

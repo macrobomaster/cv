@@ -61,16 +61,6 @@ while True:
       rr.log("raw_camera/feed", rr.Image(frame).compress(70))
     lt = time.monotonic()
 
-  aim_error = sub["aim_error"]
-  if sub.updated["aim_error"] and aim_error is not None:
-    rr.set_time_seconds("time", time.monotonic())
-    x = aim_error["x"] * 256 + 256
-    y = aim_error["y"] * 128 + 128
-    ht["aim_error"] = (x, y)
-
-    rr.log("raw_camera/aim_error", rr.LineStrips2D(ht["aim_error"]))
-    rr.log("raw_camera/cursor", rr.Points2D([(x, y)], radii=[5]))
-
   aim_angle = sub["aim_angle"]
   if sub.updated["aim_angle"] and aim_angle is not None:
     rr.log("aim_angle/x", rr.Scalar(aim_angle["x"]))
@@ -83,7 +73,7 @@ while True:
       y = autoaim["yc"]
       ht["autoaim_c"] = (x, y)
       rr.log("raw_camera/autoaim_c", rr.LineStrips2D(ht["autoaim_c"]))
-      rr.log("raw_camera/autoaim_c_cursor", rr.Points2D([(x, y)], radii=[2], labels=[f"{autoaim['colorm']}"]))
+      rr.log("raw_camera/autoaim_c_cursor", rr.Points2D([(x, y)], radii=[2]))
       x = autoaim["xtl"]
       y = autoaim["ytl"]
       ht["autoaim_tl"] = (x, y)
@@ -130,6 +120,16 @@ while True:
       # add the first point to close the loop
       imgpts = np.vstack([imgpts, imgpts[0]])
       rr.log("raw_camera/plate", rr.LineStrips2D(imgpts))
+
+    aim_error = sub["aim_error"]
+    if sub.updated["aim_error"] and aim_error is not None:
+      rr.set_time_seconds("time", time.monotonic())
+      x = aim_error["x"] * 256 + 256
+      y = aim_error["y"] * 128 + 128
+      ht["aim_error"] = (x, y)
+
+      rr.log("raw_camera/aim_error", rr.LineStrips2D(ht["aim_error"]))
+      rr.log("raw_camera/cursor", rr.Points2D([(x, y)], radii=[5], labels=[f"{autoaim['colorm']} {autoaim['numberm']}"]))
 
   shoot = sub["shoot"]
   if sub.updated["shoot"] and shoot is not None:
