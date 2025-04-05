@@ -109,5 +109,5 @@ def run():
             "tvec": tvec.flatten().tolist(),
           })
 
-      if autoaim_valid_debounce.debounce(autoaim["valid"]):
+      if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         kf.reset()

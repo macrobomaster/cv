@@ -188,7 +188,7 @@ def run():
 
         pub.send("chassis_velocity", chassis_velocity)
 
-      if autoaim_valid_debounce.debounce(autoaim["valid"]):
+      if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         aim_error_kf.reset()
 
     # dt = time.monotonic() - st
