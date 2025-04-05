@@ -1,4 +1,4 @@
-import time
+import time, subprocess
 
 import cv2
 from tinygrad.helpers import getenv
@@ -32,8 +32,13 @@ def run():
       frame = resize_crop(frame, 512, 256)
       frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     else:
-      frame = get_aravis_frame(cam, strm)
-      frame = cv2.resize(frame, (512, 256))
-      frame = cv2.rotate(frame, cv2.ROTATE_180)
+      try:
+        frame = get_aravis_frame(cam, strm)
+        frame = cv2.resize(frame, (512, 256))
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
+      except Exception:
+        logger.error("failed to get frame, restarting camera")
+        subprocess.run(["usbreset", "MVC"])
+        exit(1)
 
     pub.send("camera_feed", frame.tobytes())
