@@ -7,6 +7,7 @@ import cv2
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
+from ..core.helpers import Debounce
 
 CAMERA_MATRIX = np.array([[648.61571459, 0., 319.61015676],
                           [0., 647.78450976, 223.20112071],
@@ -22,30 +23,38 @@ PLATE_POINTS = np.array([
 
 class PlateKF:
   def __init__(self, dt:float=1/100):
+    self.dt = dt
+    self.reset()
+
+  def predict_and_correct(self, pos, rot) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    self.km.predict()
+    est = self.km.correct(np.array([*pos, *rot], dtype=np.float32).reshape(6, 1)).flatten().tolist()
+    return (est[0], est[1], est[2]), (est[9], est[10], est[11])
+
+  def reset(self):
     self.km = cv2.KalmanFilter(18, 6, 0)
     self.km.processNoiseCov = np.eye(18, dtype=np.float32) * 1e-5
     self.km.measurementNoiseCov = np.eye(6, dtype=np.float32) * 1e-4
     self.km.errorCovPost = np.eye(18, dtype=np.float32)
-    dt = 1/100
     transition_matrix = np.eye(18, dtype=np.float32)
-    transition_matrix[0, 3] = dt
-    transition_matrix[1, 4] = dt
-    transition_matrix[2, 5] = dt
-    transition_matrix[3, 6] = dt
-    transition_matrix[4, 7] = dt
-    transition_matrix[5, 8] = dt
-    transition_matrix[0, 6] = 0.5 * dt * dt
-    transition_matrix[1, 7] = 0.5 * dt * dt
-    transition_matrix[2, 8] = 0.5 * dt * dt
-    transition_matrix[9, 12] = dt
-    transition_matrix[10, 13] = dt
-    transition_matrix[11, 14] = dt
-    transition_matrix[12, 15] = dt
-    transition_matrix[13, 16] = dt
-    transition_matrix[14, 17] = dt
-    transition_matrix[9, 15] = 0.5 * dt * dt
-    transition_matrix[10, 16] = 0.5 * dt * dt
-    transition_matrix[11, 17] = 0.5 * dt * dt
+    transition_matrix[0, 3] = self.dt
+    transition_matrix[1, 4] = self.dt
+    transition_matrix[2, 5] = self.dt
+    transition_matrix[3, 6] = self.dt
+    transition_matrix[4, 7] = self.dt
+    transition_matrix[5, 8] = self.dt
+    transition_matrix[0, 6] = 0.5 * self.dt * self.dt
+    transition_matrix[1, 7] = 0.5 * self.dt * self.dt
+    transition_matrix[2, 8] = 0.5 * self.dt * self.dt
+    transition_matrix[9, 12] = self.dt
+    transition_matrix[10, 13] = self.dt
+    transition_matrix[11, 14] = self.dt
+    transition_matrix[12, 15] = self.dt
+    transition_matrix[13, 16] = self.dt
+    transition_matrix[14, 17] = self.dt
+    transition_matrix[9, 15] = 0.5 * self.dt * self.dt
+    transition_matrix[10, 16] = 0.5 * self.dt * self.dt
+    transition_matrix[11, 17] = 0.5 * self.dt * self.dt
     self.km.transitionMatrix = transition_matrix
     measurement_matrix = np.zeros((6, 18), dtype=np.float32)
     measurement_matrix[0, 0] = 1
@@ -56,15 +65,11 @@ class PlateKF:
     measurement_matrix[5, 11] = 1
     self.km.measurementMatrix = measurement_matrix
 
-  def predict_and_correct(self, pos, rot) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    self.km.predict()
-    est = self.km.correct(np.array([*pos, *rot], dtype=np.float32).reshape(6, 1)).flatten().tolist()
-    return (est[0], est[1], est[2]), (est[9], est[10], est[11])
-
 def run():
   pub = messaging.Pub(["plate"])
   sub = messaging.Sub(["autoaim"])
 
+  autoaim_valid_debounce = Debounce(0.1)
   kf = PlateKF()
 
   while True:
@@ -103,3 +108,6 @@ def run():
             "rvec": rvec.flatten().tolist(),
             "tvec": tvec.flatten().tolist(),
           })
+
+      if autoaim_valid_debounce.debounce(autoaim["valid"]):
+        kf.reset()

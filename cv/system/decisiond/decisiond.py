@@ -8,6 +8,7 @@ import cv2
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
+from ..core.helpers import Debounce
 
 @dataclass(frozen=True)
 class Waypoint:
@@ -42,37 +43,31 @@ class WaypointFollower:
 
 class AimErrorKF:
   def __init__(self, dt:float=1/100):
-    self.km = cv2.KalmanFilter(6, 2, 0)
-    self.km.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-5
-    self.km.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-4
-    self.km.errorCovPost = np.eye(6, dtype=np.float32)
-    transition_matrix = np.eye(6, dtype=np.float32)
-    transition_matrix[0, 2] = dt
-    transition_matrix[1, 3] = dt
-    transition_matrix[2, 4] = dt
-    transition_matrix[3, 5] = dt
-    transition_matrix[0, 4] = 0.5 * dt * dt
-    transition_matrix[1, 5] = 0.5 * dt * dt
-    self.km.transitionMatrix = transition_matrix
-    measurement_matrix = np.zeros((2, 6), dtype=np.float32)
-    measurement_matrix[0, 0] = 1
-    measurement_matrix[1, 1] = 1
-    self.km.measurementMatrix = measurement_matrix
-
-    self.last_x, self.last_y = 0, 0
+    self.dt = dt
+    self.reset()
 
   def predict_and_correct(self, x:float, y:float) -> tuple[float, float]:
-    # if the error is too large, reset the filter
-    if abs(x - self.last_x) > 0.5 or abs(y - self.last_y) > 0.5:
-      self.reset()
-    self.last_x, self.last_y = x, y
-
     self.km.predict()
     est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten().tolist()
     return est[0], est[1]
 
   def reset(self):
-    self.km.statePost = np.zeros((6, 1), dtype=np.float32)
+    self.km = cv2.KalmanFilter(6, 2, 0)
+    self.km.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-5
+    self.km.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-4
+    self.km.errorCovPost = np.eye(6, dtype=np.float32)
+    transition_matrix = np.eye(6, dtype=np.float32)
+    transition_matrix[0, 2] = self.dt
+    transition_matrix[1, 3] = self.dt
+    transition_matrix[2, 4] = self.dt
+    transition_matrix[3, 5] = self.dt
+    transition_matrix[0, 4] = 0.5 * self.dt * self.dt
+    transition_matrix[1, 5] = 0.5 * self.dt * self.dt
+    self.km.transitionMatrix = transition_matrix
+    measurement_matrix = np.zeros((2, 6), dtype=np.float32)
+    measurement_matrix[0, 0] = 1
+    measurement_matrix[1, 1] = 1
+    self.km.measurementMatrix = measurement_matrix
 
 class AimErrorSpinCompensator:
   def __init__(self, size:int=100):
@@ -135,6 +130,7 @@ def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
   sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
 
+  autoaim_valid_debounce = Debounce(0.1)
   aim_error_kf = AimErrorKF()
   aim_error_spin_comp = AimErrorSpinCompensator()
   shoot_decision = ShootDecision()
@@ -191,6 +187,9 @@ def run():
           chassis_velocity["z"] = min(0.5, abs(angle_x) / 10)
 
         pub.send("chassis_velocity", chassis_velocity)
+
+      if autoaim_valid_debounce.debounce(autoaim["valid"]):
+        aim_error_kf.reset()
 
     # dt = time.monotonic() - st
     # if dt > 0 and dt <= 120:
