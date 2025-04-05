@@ -128,7 +128,7 @@ class ShootDecision:
     return False
 
 def run():
-  pub = messaging.Pub(["aim_error", "chassis_velocity", "shoot"])
+  pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
   sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
 
   aim_error_kf = AimErrorKF()
@@ -152,9 +152,7 @@ def run():
     if plate is None: continue
 
     if sub.updated["autoaim"]:
-      colorm = autoaim["colorm"]
-      colorp = autoaim["colorp"]
-      if colorm != "none" and colorp > 0.6:
+      if autoaim["valid"]:
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
         x, y = aim_error_kf.predict_and_correct(x, y)
@@ -170,16 +168,23 @@ def run():
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
-        if plate["dist"] > 1.2:
-          chassis_velocity["x"] = max(0.5, plate["dist"] / 2)
-        elif plate["dist"] < 1:
-          chassis_velocity["x"] = -max(0.5, (1 - plate["dist"]) / 2)
+        if plate["dist"] >= 1.1:
+          chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - 1))
+        elif plate["dist"] <= 0.9:
+          chassis_velocity["x"] = -max(0.5, 1 - min(1, plate["dist"]))
 
         pos = plate["pos"]
-        if pos[0] > 0.1:
-          chassis_velocity["z"] = -max(0.5, abs(pos[0]))
-        elif pos[0] < -0.1:
-          chassis_velocity["z"] = max(0.5, abs(pos[0]))
+
+        # compute angle on xz plane
+        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 90
+        # compute angle on yz plane
+        angle_y = math.degrees(math.atan2(pos[1], pos[2]))
+        pub.send("aim_angle", {"x": angle_x, "y": angle_y})
+
+        if angle_x > 1:
+          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 10)
+        elif angle_x < -1:
+          chassis_velocity["z"] = min(0.5, abs(angle_x) / 10)
 
         pub.send("chassis_velocity", chassis_velocity)
 

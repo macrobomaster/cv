@@ -75,7 +75,10 @@ def run():
       case 2: colorm = "blue"
       case 3: colorm = "blank"
 
+    valid = colorm != "none" and colorp > 0.6
+
     pub.send("autoaim", {
+      "valid": valid,
       "colorm": colorm,
       "colorp": colorp,
       "xc": xc,

@@ -27,18 +27,13 @@ class HistoryTracker:
 rr.init("cv")
 rr.connect_tcp()
 
-fk = FrequencyKeeper(30)
+fk = FrequencyKeeper(20)
 
-plate_width, plate_height = 0.14, 0.125
-f = 2 * 6
-sx, sy = 4.96, 3.72
-width, height = 512, 256
-camera_matrix = np.array([
-  [width*f/sx, 0, width/2],
-  [0, height*f/sy, height/2],
-  [0, 0, 1],
-], dtype=np.float32)
-dist_coeffs = np.zeros((4, 1))
+plate_width, plate_height = 0.095, 0.104
+camera_matrix = np.array([[648.61571459, 0., 319.61015676],
+                          [0., 647.78450976, 223.20112071],
+                          [0., 0., 1.]], dtype=np.float32)
+dist_coeffs = np.array([[1.47598037e-01, -4.55973540e-01, -9.40033852e-04, 2.76093725e-04, 3.40995419e-01]], dtype=np.float32)
 
 rr.log("world", rr.ViewCoordinates.RDF, static=True)
 
@@ -47,7 +42,7 @@ rr.log("pworld/camera", rr.Pinhole(resolution=(512, 256), image_from_camera=came
 rr.log("pworld/plate", rr.Asset3D(path="/tmp/armor_plate.gltf", albedo_factor=[0.1, 0.1, 0.1, 1]), static=True)
 
 addr = sys.argv[1]
-sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "camera_feed", "autoaim", "plate"], addr=addr)
+sub = messaging.Sub(["aim_error", "aim_angle", "shoot", "chassis_velocity", "camera_feed", "autoaim", "plate"], addr=addr)
 
 for service in sub.services:
   rr.log(f"alive/{service}", rr.SeriesLine(width=10), static=True)
@@ -76,9 +71,14 @@ while True:
     rr.log("raw_camera/aim_error", rr.LineStrips2D(ht["aim_error"]))
     rr.log("raw_camera/cursor", rr.Points2D([(x, y)], radii=[5]))
 
+  aim_angle = sub["aim_angle"]
+  if sub.updated["aim_angle"] and aim_angle is not None:
+    rr.log("aim_angle/x", rr.Scalar(aim_angle["x"]))
+    rr.log("aim_angle/y", rr.Scalar(aim_angle["y"]))
+
   autoaim = sub["autoaim"]
   if sub.updated["autoaim"] and autoaim is not None:
-    if autoaim["colorm"] != "none" and autoaim["colorp"] > 0.6:
+    if autoaim["valid"]:
       x = autoaim["xc"]
       y = autoaim["yc"]
       ht["autoaim_c"] = (x, y)

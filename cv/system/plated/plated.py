@@ -8,6 +8,18 @@ from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
 
+CAMERA_MATRIX = np.array([[648.61571459, 0., 319.61015676],
+                          [0., 647.78450976, 223.20112071],
+                          [0., 0., 1.]], dtype=np.float32)
+DIST_COEFFS = np.array([[1.47598037e-01, -4.55973540e-01, -9.40033852e-04, 2.76093725e-04, 3.40995419e-01]], dtype=np.float32)
+PLATE_WIDTH, PLATE_HEIGHT = 0.095, 0.104
+PLATE_POINTS = np.array([
+  [-PLATE_WIDTH/2, PLATE_HEIGHT/2, 0], # bottom left
+  [PLATE_WIDTH/2, PLATE_HEIGHT/2, 0], # bottom right
+  [PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # top right
+  [-PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # top left
+])
+
 class PlateKF:
   def __init__(self, dt:float=1/100):
     self.km = cv2.KalmanFilter(18, 6, 0)
@@ -53,24 +65,6 @@ def run():
   pub = messaging.Pub(["plate"])
   sub = messaging.Sub(["autoaim"])
 
-  plate_width, plate_height = 0.14, 0.125
-  square_points = np.array([
-    [-plate_width/2, plate_height/2, 0], # bottom left
-    [plate_width/2, plate_height/2, 0], # bottom right
-    [plate_width/2, -plate_height/2, 0], # top right
-    [-plate_width/2, -plate_height/2, 0], # top left
-  ])
-
-  f = 2 * 6
-  sx, sy = 4.96, 3.72
-  width, height = 512, 256
-  camera_matrix = np.array([
-    [width*f/sx, 0, width/2],
-    [0, height*f/sy, height/2],
-    [0, 0, 1],
-  ], dtype=np.float32)
-  dist_coeffs = np.zeros((4, 1))
-
   kf = PlateKF()
 
   while True:
@@ -80,7 +74,7 @@ def run():
     if autoaim is None: continue
 
     if sub.updated["autoaim"]:
-      if autoaim["colorm"] != "none" and autoaim["colorp"] > 0.6:
+      if autoaim["valid"]:
         xbl, ybl = autoaim["xbl"], autoaim["ybl"]
         xbr, ybr = autoaim["xbr"], autoaim["ybr"]
         xtr, ytr = autoaim["xtr"], autoaim["ytr"]
@@ -92,19 +86,20 @@ def run():
           [xtr, ytr],
           [xtl, ytl],
         ], dtype=np.float32).reshape(-1, 1, 2)
-        _, rvec, tvec = cv2.solvePnP(square_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        ret, rvec, tvec = cv2.solvePnP(PLATE_POINTS, image_points, CAMERA_MATRIX, DIST_COEFFS)
 
-        rot = R.from_rotvec(rvec.flatten()).as_euler("xyz")
-        pos = tvec.flatten()
+        if ret:
+          rot = R.from_rotvec(rvec.flatten()).as_euler("xyz")
+          pos = tvec.flatten()
 
-        pos, rot = kf.predict_and_correct(pos, rot)
+          pos, rot = kf.predict_and_correct(pos, rot)
 
-        dist = np.linalg.norm(pos)
+          dist = np.linalg.norm(pos)
 
-        pub.send("plate", {
-          "rot": rot,
-          "pos": pos,
-          "dist": dist,
-          "rvec": rvec.flatten().tolist(),
-          "tvec": tvec.flatten().tolist(),
-        })
+          pub.send("plate", {
+            "rot": rot,
+            "pos": pos,
+            "dist": dist,
+            "rvec": rvec.flatten().tolist(),
+            "tvec": tvec.flatten().tolist(),
+          })
