@@ -122,7 +122,7 @@ class ShootDecision:
       if now - self.last_burst > 1:
         if len(self.window) == self.window.maxlen:
           avg = sum(self.window) / len(self.window)
-          if avg < 0.2:
+          if avg < 0.3:
             self.burst_start = now
     return False
 
