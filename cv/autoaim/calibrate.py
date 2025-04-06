@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from ..common.camera import setup_aravis, get_aravis_frame
 
 # termination criteria
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
@@ -11,15 +12,19 @@ objp[:,:2] = np.mgrid[0:9,0:6].T.reshape(-1,2)
 objpoints = [] # 3d point in real world space
 imgpoints = [] # 2d points in image plane.
 
-cap = cv2.VideoCapture(1)
+# cap = cv2.VideoCapture(1)
+cam, strm = setup_aravis()
+
 
 while len(objpoints) < 20:
-  ret, frame = cap.read()
-  if not ret:
-    break
+  # ret, frame = cap.read()
+  # if not ret:
+  #   break
+
+  frame = get_aravis_frame(cam, strm)
 
   # Convert the frame to grayscale
-  gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+  gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
   # find chessboard corners
   ret, corners = cv2.findChessboardCorners(gray, (9, 6), None)
