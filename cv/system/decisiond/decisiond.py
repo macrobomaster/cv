@@ -176,14 +176,14 @@ def run():
         pos = plate["pos"]
 
         # compute angle on xz plane
-        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 90
+        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
         # compute angle on yz plane
         angle_y = math.degrees(math.atan2(pos[1], pos[2]))
         pub.send("aim_angle", {"x": angle_x, "y": angle_y})
 
-        if angle_x > 1:
+        if angle_x > 5:
           chassis_velocity["z"] = -min(0.5, abs(angle_x) / 20)
-        elif angle_x < -1:
+        elif angle_x < -5:
           chassis_velocity["z"] = min(0.5, abs(angle_x) / 20)
 
         pub.send("chassis_velocity", chassis_velocity)
