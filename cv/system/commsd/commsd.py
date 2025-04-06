@@ -42,7 +42,7 @@ def run():
       protocol.msg(Command.AIM_ERROR, 0.0, 0.0)
 
     if sub.updated["shoot"]:
-      logger.info(protocol.msg(Command.CONTROL_SHOOT, 0xff if shoot else 0x00))
+      protocol.msg(Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
     if not sub.alive["shoot"]:
       protocol.msg(Command.CONTROL_SHOOT, 0x00)
 

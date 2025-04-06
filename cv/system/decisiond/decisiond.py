@@ -182,9 +182,9 @@ def run():
         pub.send("aim_angle", {"x": angle_x, "y": angle_y})
 
         if angle_x > 1:
-          chassis_velocity["z"] = min(0.5, abs(angle_x) / 20)
+          chassis_velocity["z"] = min(0.5, abs(angle_x) / 10)
         elif angle_x < -1:
-          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 20)
+          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 10)
 
         pub.send("chassis_velocity", chassis_velocity)
 
