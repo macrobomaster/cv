@@ -9,7 +9,6 @@ from .. import SYSTEM_PATH
 
 KVPATH = SYSTEM_PATH / "keyvalue.db"
 
-VERSION = 0
 _kv_connection = None
 def kv_connection():
   global _kv_connection
@@ -22,12 +21,12 @@ def kv_connection():
 
 def kv_clear(table:str):
   cur = kv_connection().cursor()
-  cur.executescript(f"DROP TABLE IF EXISTS '{table}_{VERSION}';" + "VACUUM;")
+  cur.executescript(f"DROP TABLE IF EXISTS '{table}';" + "VACUUM;")
 
 def kv_get(table:str, key:Any) -> Any:
   cur = kv_connection().cursor()
   try:
-    res = cur.execute(f"SELECT val FROM '{table}_{VERSION}' WHERE key = ?", (cbor2.dumps(key),))
+    res = cur.execute(f"SELECT val FROM '{table}' WHERE key = ?", (cbor2.dumps(key),))
   except sqlite3.OperationalError:
     return None  # table doesn't exist
   if (val:=res.fetchone()) is not None: return cbor2.loads(val[0])
@@ -36,7 +35,7 @@ def kv_get(table:str, key:Any) -> Any:
 def kv_getall(table:str) -> dict:
   cur = kv_connection().cursor()
   try:
-    res = cur.execute(f"SELECT * FROM '{table}_{VERSION}'")
+    res = cur.execute(f"SELECT * FROM '{table}'")
   except sqlite3.OperationalError:
     return {}  # table doesn't exist
   return {cbor2.loads(row[0]): cbor2.loads(row[1]) for row in res.fetchall()}
@@ -46,9 +45,9 @@ def kv_put(table:str, key:Any, val:Any):
   conn = kv_connection()
   cur = conn.cursor()
   if table not in _db_tables:
-    cur.execute(f"CREATE TABLE IF NOT EXISTS '{table}_{VERSION}' (key blob, val blob, PRIMARY KEY (key))")
+    cur.execute(f"CREATE TABLE IF NOT EXISTS '{table}' (key blob, val blob, PRIMARY KEY (key))")
     _db_tables.add(table)
-  cur.execute(f"REPLACE INTO '{table}_{VERSION}' (key, val) VALUES (?, ?)", (cbor2.dumps(key), cbor2.dumps(val)))
+  cur.execute(f"REPLACE INTO '{table}' (key, val) VALUES (?, ?)", (cbor2.dumps(key), cbor2.dumps(val)))
   conn.commit()
   cur.close()
   return val

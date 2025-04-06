@@ -25,7 +25,7 @@ class Pub:
       sock.bind(f"tcp://*:{get_port(service)}")
       self.socks[service] = sock
 
-  def send(self, service:str, data:Any|None):
+  def send(self, service:str, data:Any):
     assert data is not None, "data cannot be None"
     self.socks[service].send(cbor2.dumps(data))
 
@@ -102,7 +102,7 @@ class Sub:
     self.data[service] = cbor2.loads(data)
     self.updated[service] = True
 
-  def update(self, timeout:int=100):
+  def update(self, timeout:int|None=100):
     self.updated = {service: False for service in self.services}
 
     # check for polled services
@@ -122,3 +122,44 @@ class Sub:
         self.alive_checker[service].update(t)
       if self.data[service] is not None:
         self.alive[service] = self.alive_checker[service].alive(t)
+
+class PushPull:
+  def __init__(self, service:str):
+    self.push_service = service + "_push"
+    self.pull_service = service + "_pull"
+
+    self.push_sock = context.socket(zmq.PUSH)
+    self.push_sock.set(zmq.LINGER, 0)
+    self.push_sock.bind(f"tcp://*:{get_port(self.push_service)}")
+
+    self.pull_sock = context.socket(zmq.PULL)
+    self.pull_sock.set(zmq.LINGER, 0)
+    self.pull_sock.bind(f"tcp://*:{get_port(self.pull_service)}")
+
+  def push(self, data:Any):
+    self.push_sock.send(cbor2.dumps(data))
+
+  def pull(self, block:bool=True) -> Any:
+    try: data = self.pull_sock.recv(flags=0 if block else zmq.NOBLOCK)
+    except zmq.error.Again: return None
+    return cbor2.loads(data)
+
+class PullPush:
+  def __init__(self, service:str, addr:str="127.0.0.1"):
+    self.push_service = service + "_pull"
+    self.pull_service = service + "_push"
+
+    self.pull_sock = context.socket(zmq.PULL)
+    self.pull_sock.set(zmq.LINGER, 0)
+    self.pull_sock.connect(f"tcp://{addr}:{get_port(self.pull_service)}")
+
+    self.push_sock = context.socket(zmq.PUSH)
+    self.push_sock.set(zmq.LINGER, 0)
+    self.push_sock.connect(f"tcp://{addr}:{get_port(self.push_service)}")
+
+  def pull(self):
+    data = self.pull_sock.recv()
+    return cbor2.loads(data)
+
+  def push(self, data:Any):
+    self.push_sock.send(cbor2.dumps(data))
