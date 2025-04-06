@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as R
 
 from ..system.core import messaging
 from ..system.core.helpers import FrequencyKeeper
+from ..system.plated.plated import PLATE_WIDTH, PLATE_HEIGHT, CAMERA_MATRIX, DIST_COEFFS
 
 class HistoryTracker:
   def __init__(self, points_to_track:int=200):
@@ -29,16 +30,10 @@ rr.connect_tcp()
 
 fk = FrequencyKeeper(20)
 
-plate_width, plate_height = 0.095, 0.104
-camera_matrix = np.array([[648.61571459, 0., 319.61015676],
-                          [0., 647.78450976, 223.20112071],
-                          [0., 0., 1.]], dtype=np.float32)
-dist_coeffs = np.array([[1.47598037e-01, -4.55973540e-01, -9.40033852e-04, 2.76093725e-04, 3.40995419e-01]], dtype=np.float32)
-
 rr.log("world", rr.ViewCoordinates.RDF, static=True)
 
 rr.log("pworld", rr.ViewCoordinates.RDF, static=True)
-rr.log("pworld/camera", rr.Pinhole(resolution=(512, 256), image_from_camera=camera_matrix, camera_xyz=rr.ViewCoordinates.RDF), static=True)
+rr.log("pworld/camera", rr.Pinhole(resolution=(512, 256), image_from_camera=CAMERA_MATRIX, camera_xyz=rr.ViewCoordinates.RDF), static=True)
 rr.log("pworld/plate", rr.Asset3D(path="/tmp/armor_plate.gltf", albedo_factor=[0.1, 0.1, 0.1, 1]), static=True)
 
 addr = sys.argv[1]
@@ -109,13 +104,13 @@ while True:
       rvec = np.array(plate["rvec"])
       tvec = np.array(plate["tvec"])
       square_points = np.array([
-        [-plate_width/2, plate_height/2, 0], # bottom left
-        [plate_width/2, plate_height/2, 0], # bottom right
-        [plate_width/2, -plate_height/2, 0], # top right
-        [-plate_width/2, -plate_height/2, 0], # top left
+        [-PLATE_WIDTH/2, PLATE_HEIGHT/2, 0], # bottom left
+        [PLATE_WIDTH/2, PLATE_HEIGHT/2, 0], # bottom right
+        [PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # top right
+        [-PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # top left
       ])
 
-      imgpts, _ = cv2.projectPoints(square_points, rvec, tvec, camera_matrix, dist_coeffs)
+      imgpts, _ = cv2.projectPoints(square_points, rvec, tvec, CAMERA_MATRIX, DIST_COEFFS)
       imgpts = imgpts.astype(int)[:, 0]
       # add the first point to close the loop
       imgpts = np.vstack([imgpts, imgpts[0]])

@@ -9,10 +9,10 @@ from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
 from ..core.helpers import Debounce
 
-CAMERA_MATRIX = np.array([[648.61571459, 0., 319.61015676],
-                          [0., 647.78450976, 223.20112071],
-                          [0., 0., 1.]], dtype=np.float32)
-DIST_COEFFS = np.array([[1.47598037e-01, -4.55973540e-01, -9.40033852e-04, 2.76093725e-04, 3.40995419e-01]], dtype=np.float32)
+CAMERA_MATRIX = np.array([[399.45565755,   0.        , 251.96075421],
+                          [  0.        , 638.73049345, 118.7094448 ],
+                          [  0.        ,   0.        ,   1.        ]], dtype=np.float32)
+DIST_COEFFS = np.array([[-0.27979428,  1.17138547,  0.07265935,  0.07784827, -1.45824292]], dtype=np.float32)
 PLATE_WIDTH, PLATE_HEIGHT = 0.095, 0.104
 PLATE_POINTS = np.array([
   [-PLATE_WIDTH/2, PLATE_HEIGHT/2, 0], # bottom left
