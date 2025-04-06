@@ -158,11 +158,11 @@ def run():
         x, y = aim_error_kf.predict_and_correct(x, y)
         # x = aim_error_spin_comp.correct(x)
 
-        shoot = shoot_decision.step(x, y)
-
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
         y += 0.4
+
+        shoot = shoot_decision.step(x, y)
 
         pub.send("aim_error", {"x": x, "y": y})
         pub.send("shoot", shoot)
