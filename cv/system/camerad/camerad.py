@@ -38,7 +38,7 @@ def run():
         frame = cv2.rotate(frame, cv2.ROTATE_180)
       except Exception:
         logger.error("failed to get frame, restarting camera")
-        subprocess.run(["usbreset", "MVC"])
+        subprocess.run(["usbreset", "MV-CS016-10UC"])
         exit(1)
 
     pub.send("camera_feed", frame.tobytes())
