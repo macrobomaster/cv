@@ -1,5 +1,6 @@
 import time, math, sys
 from collections import deque
+from pathlib import Path
 
 import cv2
 import rerun as rr
@@ -34,7 +35,7 @@ rr.log("world", rr.ViewCoordinates.RDF, static=True)
 
 rr.log("pworld", rr.ViewCoordinates.RDF, static=True)
 rr.log("pworld/camera", rr.Pinhole(resolution=(512, 256), image_from_camera=CAMERA_MATRIX, camera_xyz=rr.ViewCoordinates.RDF), static=True)
-rr.log("pworld/plate", rr.Asset3D(path="/tmp/armor_plate.gltf", albedo_factor=[0.1, 0.1, 0.1, 1]), static=True)
+rr.log("pworld/plate", rr.Asset3D(path=Path(__file__).parent.parent.parent / "weights/armor_plate.gltf", albedo_factor=[0.1, 0.1, 0.1, 1]), static=True)
 
 addr = sys.argv[1]
 sub = messaging.Sub(["aim_error", "aim_angle", "shoot", "chassis_velocity", "camera_feed", "autoaim", "plate"], addr=addr)
