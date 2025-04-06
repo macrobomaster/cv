@@ -181,10 +181,10 @@ def run():
         angle_y = math.degrees(math.atan2(pos[1], pos[2]))
         pub.send("aim_angle", {"x": angle_x, "y": angle_y})
 
-        if angle_x > 5:
-          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 20)
-        elif angle_x < -5:
+        if angle_x > 1:
           chassis_velocity["z"] = min(0.5, abs(angle_x) / 20)
+        elif angle_x < -1:
+          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 20)
 
         pub.send("chassis_velocity", chassis_velocity)
 
