@@ -190,7 +190,12 @@ def run():
 
         shoot = shoot_decision.step(x, y)
 
-        pub.send("aim_error", {"x": x * 0.25, "y": y * 0.25})
+        # scale error based on distance
+        x = x / max(1, plate["dist"])
+        y = y / max(1, plate["dist"])
+
+
+        pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
