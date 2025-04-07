@@ -130,7 +130,7 @@ def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
   sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
 
-  autoaim_valid_debounce = Debounce(0.1)
+  autoaim_valid_debounce = Debounce(1)
   aim_error_kf = AimErrorKF()
   aim_error_spin_comp = AimErrorSpinCompensator()
   shoot_decision = ShootDecision()

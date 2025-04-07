@@ -69,7 +69,7 @@ def run():
   pub = messaging.Pub(["plate"])
   sub = messaging.Sub(["autoaim"])
 
-  autoaim_valid_debounce = Debounce(0.1)
+  autoaim_valid_debounce = Debounce(1)
   kf = PlateKF()
 
   while True:
