@@ -197,7 +197,7 @@ def run():
         y = y / max(1, plate["dist"])
 
         pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
-        pub.send("shoot", shoot)
+        # pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
         if plate["dist"] > MAINTAIN_DIST + 0.1:
