@@ -194,7 +194,6 @@ def run():
         x = x / max(1, plate["dist"])
         y = y / max(1, plate["dist"])
 
-
         pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
         pub.send("shoot", shoot)
 
@@ -218,6 +217,8 @@ def run():
         #   chassis_velocity["z"] = -min(0.5, abs(angle_x) / 5)
 
         pub.send("chassis_velocity", chassis_velocity)
+      else:
+        pub.send("shoot", False)
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         aim_error_kf.reset()
