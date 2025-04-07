@@ -186,7 +186,7 @@ def run():
         elif angle_x < -5:
           chassis_velocity["z"] = -min(0.5, abs(angle_x) / 5)
 
-        pub.send("chassis_velocity", chassis_velocity)
+        # pub.send("chassis_velocity", chassis_velocity)
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         aim_error_kf.reset()
