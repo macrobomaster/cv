@@ -94,9 +94,7 @@ class AimErrorSpinCompensator:
 
     # compute the average of the last size elements
     avg = sum(self.xs) / len(self.xs)
-
-    # return the error to the average
-    return x - avg
+    return avg
 
 class ShootDecision:
   def __init__(self):
@@ -158,7 +156,7 @@ def run():
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
         x, y = aim_error_kf.predict_and_correct(x, y)
-        x = aim_error_spin_comp.correct(x)
+        # x = aim_error_spin_comp.correct(x)
 
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
@@ -191,6 +189,7 @@ def run():
         pub.send("chassis_velocity", chassis_velocity)
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
+        logger.info("reset")
         aim_error_kf.reset()
 
     # dt = time.monotonic() - st
