@@ -235,7 +235,9 @@ def run():
       vx, vz = follower.step(dt)
       logger.debug(f"vx: {vx}, vz: {vz}")
       pub.send("chassis_velocity", {"x": vx, "z": vz})
-      pub.send("aim_error", {"x": 0.0, "y": 0.0})
     st = time.monotonic()
+
+    pub.send("aim_error", {"x": 0.0, "y": 0.0})
+    pub.send("shoot", False)
 
     fk.step()
