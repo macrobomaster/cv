@@ -164,13 +164,13 @@ def run():
   shoot_decision = ShootDecision()
 
   follower = WaypointFollower([
-    Waypoint(6.2, 0, 3),
-    Waypoint(6.2, 6.2, 3),
-    Waypoint(0, 6, 3),
-    Waypoint(0, 0.1, 3),
+    Waypoint(6.2, 0, 5),
+    Waypoint(6.2, 6.2, 5),
+    Waypoint(0, 6, 5),
+    Waypoint(0, 0.1, 5),
   ])
 
-  fk = FrequencyKeeper(100)
+  fk = FrequencyKeeper(200)
 
   ste = time.monotonic()
   st = time.monotonic()
