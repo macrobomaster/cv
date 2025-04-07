@@ -164,10 +164,10 @@ def run():
   shoot_decision = ShootDecision()
 
   follower = WaypointFollower([
-    Waypoint(1, 0, 1),
-    Waypoint(1, 1, 1),
-    Waypoint(0, 1, 1),
-    Waypoint(0, 0, 1),
+    Waypoint(6, 0, 12),
+    Waypoint(6, 6, 12),
+    Waypoint(0, 6, 12),
+    Waypoint(0, 0, 12),
   ])
 
   fk = FrequencyKeeper(100)
