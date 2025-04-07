@@ -146,7 +146,7 @@ class ShootDecision:
       if now - self.last_burst > 1:
         if len(self.window) == self.window.maxlen:
           avg = sum(self.window) / len(self.window)
-          if avg < 0.3:
+          if avg < 0.2:
             self.burst_start = now
     return False
 
@@ -190,7 +190,7 @@ def run():
 
         shoot = shoot_decision.step(x, y)
 
-        pub.send("aim_error", {"x": x, "y": y})
+        pub.send("aim_error", {"x": x, "y": y * 0.5})
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
