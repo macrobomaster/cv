@@ -231,7 +231,7 @@ def run():
 
     dte = time.monotonic() - ste
     dt = time.monotonic() - st
-    if dte > 0 and dte <= 120:
+    if dte > 10 and dte <= 120:
       vx, vz = follower.step(dt)
       logger.debug(f"vx: {vx}, vz: {vz}")
       pub.send("chassis_velocity", {"x": vx, "z": vz})
