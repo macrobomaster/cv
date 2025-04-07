@@ -10,6 +10,8 @@ from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
 from ..core.helpers import Debounce
 
+MAINTAIN_DIST = 2
+
 @dataclass(frozen=True)
 class Waypoint:
   x: float
@@ -198,23 +200,23 @@ def run():
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
-        # if plate["dist"] >= 3.1:
-        #   chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - 3))
-        # elif plate["dist"] <= 2.9:
-        #   chassis_velocity["x"] = -min(0.5, 3 - min(3, plate["dist"]))
-        #
-        # pos = plate["pos"]
-        #
-        # # compute angle on xz plane
-        # angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
-        # # compute angle on yz plane
-        # angle_y = math.degrees(math.atan2(pos[1], pos[2]))
-        # pub.send("aim_angle", {"x": angle_x, "y": angle_y})
-        #
-        # if angle_x > 5:
-        #   chassis_velocity["z"] = min(0.5, abs(angle_x) / 5)
-        # elif angle_x < -5:
-        #   chassis_velocity["z"] = -min(0.5, abs(angle_x) / 5)
+        if plate["dist"] > MAINTAIN_DIST + 0.1:
+          chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - MAINTAIN_DIST))
+        elif plate["dist"] < MAINTAIN_DIST - 0.1:
+          chassis_velocity["x"] = -min(0.5, MAINTAIN_DIST - min(MAINTAIN_DIST, plate["dist"]))
+
+        pos = plate["pos"]
+
+        # compute angle on xz plane
+        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
+        # compute angle on yz plane
+        angle_y = math.degrees(math.atan2(pos[1], pos[2]))
+        pub.send("aim_angle", {"x": angle_x, "y": angle_y})
+
+        if angle_x > 1:
+          chassis_velocity["z"] = min(0.5, abs(angle_x) / 5)
+        elif angle_x < -1:
+          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 5)
 
         pub.send("chassis_velocity", chassis_velocity)
       else:
