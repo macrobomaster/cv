@@ -69,6 +69,30 @@ class AimErrorKF:
     measurement_matrix[1, 1] = 1
     self.km.measurementMatrix = measurement_matrix
 
+class AimAhead:
+  def __init__(self):
+    self.vx = 0
+    self.x_queue = deque(maxlen=10)
+
+  def step(self, x:float) -> float:
+    # add x to the queue
+    self.x_queue.append(x)
+
+    # average velocity over the last 10 samples
+    if len(self.x_queue) == self.x_queue.maxlen:
+      vx = 0
+      for i in range(len(self.x_queue) - 1):
+        vx += self.x_queue[i + 1] - self.x_queue[i]
+      self.vx = vx / (len(self.x_queue) - 1)
+
+    # shoot slightly ahead of the target
+    if self.vx > 0.1:
+      x += self.vx * 0.1
+    elif self.vx < 0.1:
+      x -= self.vx * 0.1
+
+    return x
+
 class AimErrorSpinCompensator:
   def __init__(self, size:int=100):
     self.size = size
@@ -132,6 +156,7 @@ def run():
 
   autoaim_valid_debounce = Debounce(1)
   aim_error_kf = AimErrorKF()
+  aim_ahead = AimAhead()
   aim_error_spin_comp = AimErrorSpinCompensator()
   shoot_decision = ShootDecision()
 
@@ -156,6 +181,7 @@ def run():
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
         x, y = aim_error_kf.predict_and_correct(x, y)
+        x = aim_ahead.step(x)
         # x = aim_error_spin_comp.correct(x)
 
         # offset y by some amount relative to the distance to the plate
