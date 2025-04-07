@@ -191,7 +191,7 @@ def run():
         shoot = shoot_decision.step(x, y)
 
         pub.send("aim_error", {"x": x, "y": y})
-        # pub.send("shoot", shoot)
+        pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
         # if plate["dist"] >= 3.1:
