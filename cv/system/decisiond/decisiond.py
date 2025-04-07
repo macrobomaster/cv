@@ -96,7 +96,7 @@ class AimErrorSpinCompensator:
     avg = sum(self.xs) / len(self.xs)
 
     # return the error to the average
-    return avg - x
+    return x - avg
 
 class ShootDecision:
   def __init__(self):
