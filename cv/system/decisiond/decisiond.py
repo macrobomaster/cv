@@ -180,8 +180,8 @@ def run():
       if autoaim["valid"]:
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
-        x, y = aim_error_kf.predict_and_correct(x, y)
-        x = aim_ahead.step(x)
+        # x, y = aim_error_kf.predict_and_correct(x, y)
+        # x = aim_ahead.step(x)
         # x = aim_error_spin_comp.correct(x)
 
         # offset y by some amount relative to the distance to the plate
@@ -190,7 +190,7 @@ def run():
 
         shoot = shoot_decision.step(x, y)
 
-        pub.send("aim_error", {"x": x, "y": y * 0.5})
+        pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
