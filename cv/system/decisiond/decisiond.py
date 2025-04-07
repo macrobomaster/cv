@@ -231,9 +231,11 @@ def run():
 
     dte = time.monotonic() - ste
     dt = time.monotonic() - st
+    logger.debug(dte)
     if dte > 30 and dte <= 120:
       vx, vz = follower.step(dt)
       pub.send("chassis_velocity", {"x": vx, "z": vz})
+      pub.send("aim_error", {"x": 0.0, "y": 0.0})
     st = time.monotonic()
 
     fk.step()
