@@ -164,10 +164,10 @@ def run():
   shoot_decision = ShootDecision()
 
   follower = WaypointFollower([
-    Waypoint(1, 0, 5),
-    Waypoint(1, 1, 5),
-    Waypoint(0, 1, 5),
-    Waypoint(0, 0, 5),
+    Waypoint(1, 0, 1),
+    Waypoint(1, 1, 1),
+    Waypoint(0, 1, 1),
+    Waypoint(0, 0, 1),
   ])
 
   fk = FrequencyKeeper(100)
@@ -233,7 +233,6 @@ def run():
     dt = time.monotonic() - st
     if dte > 10 and dte <= 120:
       vx, vz = follower.step(dt)
-      logger.debug(f"vx: {vx}, vz: {vz}")
       pub.send("chassis_velocity", {"x": vx, "z": vz})
     st = time.monotonic()
 
