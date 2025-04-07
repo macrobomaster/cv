@@ -145,7 +145,7 @@ class ShootDecision:
         # shoot
         return True
     else:
-      if now - self.last_burst > 1:
+      if now - self.last_burst > 0.5:
         if len(self.window) == self.window.maxlen:
           avg = sum(self.window) / len(self.window)
           if avg < 0.25:
