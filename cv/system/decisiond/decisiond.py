@@ -166,8 +166,8 @@ def run():
   follower = WaypointFollower([
     Waypoint(6.2, 0, 5),
     Waypoint(6.2, 6.2, 5),
-    Waypoint(0, 6, 5),
-    Waypoint(0, 0.1, 5),
+    Waypoint(0, 6.2, 5),
+    Waypoint(0, 0, 5),
   ])
 
   fk = FrequencyKeeper(200)
