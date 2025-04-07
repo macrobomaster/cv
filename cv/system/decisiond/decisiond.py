@@ -11,6 +11,7 @@ from ..core.keyvalue import kv_get, kv_put
 from ..core.helpers import Debounce
 
 MAINTAIN_DIST = 2
+CHASE_SPEED = 2
 
 @dataclass(frozen=True)
 class Waypoint:
@@ -201,9 +202,9 @@ def run():
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
         if plate["dist"] > MAINTAIN_DIST + 0.1:
-          chassis_velocity["x"] = min(1, max(0, plate["dist"] - MAINTAIN_DIST))
+          chassis_velocity["x"] = min(CHASE_SPEED, max(0, plate["dist"] - MAINTAIN_DIST))
         elif plate["dist"] < MAINTAIN_DIST - 0.1:
-          chassis_velocity["x"] = -min(1, MAINTAIN_DIST - min(MAINTAIN_DIST, plate["dist"]))
+          chassis_velocity["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, plate["dist"]))
 
         pos = plate["pos"]
 
@@ -214,9 +215,9 @@ def run():
         pub.send("aim_angle", {"x": angle_x, "y": angle_y})
 
         if angle_x > 1:
-          chassis_velocity["z"] = min(1, abs(angle_x) / 5)
+          chassis_velocity["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
         elif angle_x < -1:
-          chassis_velocity["z"] = -min(1, abs(angle_x) / 5)
+          chassis_velocity["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
 
         pub.send("chassis_velocity", chassis_velocity)
       else:
