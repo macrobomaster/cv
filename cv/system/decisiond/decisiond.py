@@ -168,9 +168,9 @@ def run():
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
-        if plate["dist"] >= 1.1:
+        if plate["dist"] >= 3.1:
           chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - 1))
-        elif plate["dist"] <= 0.9:
+        elif plate["dist"] <= 2.9:
           chassis_velocity["x"] = -min(0.5, 1 - min(1, plate["dist"]))
 
         pos = plate["pos"]
