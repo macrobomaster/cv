@@ -162,6 +162,8 @@ def run():
         y -= 0.1 * plate["dist"]
         y += 0.4
 
+        y *= 0.5
+
         shoot = shoot_decision.step(x, y)
 
         pub.send("aim_error", {"x": x, "y": y})
