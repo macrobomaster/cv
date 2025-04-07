@@ -177,6 +177,7 @@
               cudaPackages.cuda_cudart
               cudaPackages.cudatoolkit
               gcc13
+              tmux
             ];
 
           shellHook = ''
