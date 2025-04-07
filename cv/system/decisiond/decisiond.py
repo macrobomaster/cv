@@ -169,9 +169,9 @@ def run():
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
         if plate["dist"] >= 3.1:
-          chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - 1))
+          chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - 3))
         elif plate["dist"] <= 2.9:
-          chassis_velocity["x"] = -min(0.5, 1 - min(1, plate["dist"]))
+          chassis_velocity["x"] = -min(0.5, 3 - min(3, plate["dist"]))
 
         pos = plate["pos"]
 
