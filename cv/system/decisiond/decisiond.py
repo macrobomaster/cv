@@ -135,7 +135,7 @@ class ShootDecision:
 
     now = time.monotonic()
     if self.burst_start > 0:
-      if now - self.burst_start > 1:
+      if now - self.burst_start > 0.5:
         self.last_burst = now
         self.burst_start = 0
         return False
@@ -143,10 +143,10 @@ class ShootDecision:
         # shoot
         return True
     else:
-      if now - self.last_burst > 1:
+      if now - self.last_burst > 2:
         if len(self.window) == self.window.maxlen:
           avg = sum(self.window) / len(self.window)
-          if avg < 0.2:
+          if avg < 0.1:
             self.burst_start = now
     return False
 
