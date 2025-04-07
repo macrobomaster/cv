@@ -168,25 +168,25 @@ def run():
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
-        if plate["dist"] >= 3.1:
-          chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - 3))
-        elif plate["dist"] <= 2.9:
-          chassis_velocity["x"] = -min(0.5, 3 - min(3, plate["dist"]))
+        # if plate["dist"] >= 3.1:
+        #   chassis_velocity["x"] = min(0.5, max(0, plate["dist"] - 3))
+        # elif plate["dist"] <= 2.9:
+        #   chassis_velocity["x"] = -min(0.5, 3 - min(3, plate["dist"]))
+        #
+        # pos = plate["pos"]
+        #
+        # # compute angle on xz plane
+        # angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
+        # # compute angle on yz plane
+        # angle_y = math.degrees(math.atan2(pos[1], pos[2]))
+        # pub.send("aim_angle", {"x": angle_x, "y": angle_y})
+        #
+        # if angle_x > 5:
+        #   chassis_velocity["z"] = min(0.5, abs(angle_x) / 5)
+        # elif angle_x < -5:
+        #   chassis_velocity["z"] = -min(0.5, abs(angle_x) / 5)
 
-        pos = plate["pos"]
-
-        # compute angle on xz plane
-        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
-        # compute angle on yz plane
-        angle_y = math.degrees(math.atan2(pos[1], pos[2]))
-        pub.send("aim_angle", {"x": angle_x, "y": angle_y})
-
-        if angle_x > 5:
-          chassis_velocity["z"] = min(0.5, abs(angle_x) / 5)
-        elif angle_x < -5:
-          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 5)
-
-        # pub.send("chassis_velocity", chassis_velocity)
+        pub.send("chassis_velocity", chassis_velocity)
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         aim_error_kf.reset()
