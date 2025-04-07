@@ -155,8 +155,8 @@ def run():
       if autoaim["valid"]:
         x = (autoaim["xc"] - 256) / 256
         y = (autoaim["yc"] - 128) / 128
-        # x, y = aim_error_kf.predict_and_correct(x, y)
-        # x = aim_error_spin_comp.correct(x)
+        x, y = aim_error_kf.predict_and_correct(x, y)
+        x = aim_error_spin_comp.correct(x)
 
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
@@ -181,10 +181,10 @@ def run():
         angle_y = math.degrees(math.atan2(pos[1], pos[2]))
         pub.send("aim_angle", {"x": angle_x, "y": angle_y})
 
-        if angle_x > 1:
-          chassis_velocity["z"] = min(0.5, abs(angle_x) / 10)
-        elif angle_x < -1:
-          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 10)
+        if angle_x > 5:
+          chassis_velocity["z"] = min(0.5, abs(angle_x) / 5)
+        elif angle_x < -5:
+          chassis_velocity["z"] = -min(0.5, abs(angle_x) / 5)
 
         pub.send("chassis_velocity", chassis_velocity)
 
