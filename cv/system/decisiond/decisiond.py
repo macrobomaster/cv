@@ -70,7 +70,7 @@ class AimErrorKF:
     self.km.measurementMatrix = measurement_matrix
 
 class AimErrorSpinCompensator:
-  def __init__(self, size:int=1000):
+  def __init__(self, size:int=100):
     self.size = size
     self.xs = deque(maxlen=size)
     self.maxs = deque(maxlen=size // 10)
@@ -94,7 +94,9 @@ class AimErrorSpinCompensator:
 
     # compute the average of the last size elements
     avg = sum(self.xs) / len(self.xs)
-    return avg
+
+    # return the error to the average
+    return avg - x
 
 class ShootDecision:
   def __init__(self):
