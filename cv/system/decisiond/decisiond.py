@@ -190,7 +190,7 @@ def run():
 
         shoot = shoot_decision.step(x, y)
 
-        pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
+        pub.send("aim_error", {"x": x * 0.25, "y": y * 0.25})
         pub.send("shoot", shoot)
 
         chassis_velocity = {"x": 0.0, "z": 0.0}
