@@ -9,7 +9,7 @@ from ...common.image import alpha_overlay
 from ...system.core.logging import logger
 
 PLATE_PIPELINE = A.Compose([
-  A.RandomScale(scale_limit=(0.025-1, 0.5-1), p=1),
+  A.RandomScale(scale_limit=(0.01-1, 0.5-1), p=1),
   A.Perspective(scale=(0.05, 0.2), keep_size=True, fit_output=True, p=1),
   A.SafeRotate(limit=(-90, 90), p=0.5),
 ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
