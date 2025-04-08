@@ -27,7 +27,7 @@ if __name__ == "__main__":
       param.replace(param.half()).realize()
 
   preprocessed_train_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
-  i = 1
+  i = 0
   while i < len(preprocessed_train_files):
     GlobalCounters.reset()
 
@@ -35,13 +35,9 @@ if __name__ == "__main__":
     img = cv2.imread(file)
     img = cv2.resize(img, (512, 256))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    file2 = preprocessed_train_files[i - 1]
-    img2 = cv2.imread(file2)
-    img2 = cv2.resize(img2, (512, 256))
-    img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
 
     # predict
-    model_out = pred(model, Tensor(img, device="NPY"), Tensor(img2, device="NPY")).tolist()[0]
+    model_out = pred(model, Tensor(img, device="NPY")).tolist()[0]
     colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp = model_out
     match colorm:
       case 0: colorm = "none"

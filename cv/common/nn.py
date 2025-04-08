@@ -202,18 +202,15 @@ class RecConv:
 
 class FFNBlock:
   def __init__(self, dim:int, exp:int, norm:bool=True):
-    if norm: self.norm = BatchNorm(dim)
+    if norm: self.norm = nn.RMSNorm(dim)
     self.up = nn.Linear(dim, dim * exp)
-    self.mix = nn.Linear(dim * exp, dim * exp)
-    self.down = nn.Linear((dim * exp)//2, dim)
+    self.down = nn.Linear(dim * exp, dim)
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "norm"): xx = self.norm(x)
     else: xx = x
     xx = self.up(xx).gelu()
-    xx, gate = self.mix(xx).chunk(2, dim=-1)
-    xx = xx * gate.gelu()
-    xx = self.down(xx).gelu()
+    xx = self.down(xx)
     return x + xx
 
 class FFN:

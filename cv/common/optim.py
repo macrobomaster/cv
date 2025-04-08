@@ -1,10 +1,13 @@
+import math
+
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.nn.optim import Optimizer
 from tinygrad.helpers import dedup
+from tinygrad.extra.lr_scheduler import LR_Scheduler
 
 class CLAMB(Optimizer):
-  def __init__(self, params: list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-5, weight_decay=0.0, adam=False):
+  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-5, weight_decay=0.0, adam=False):
     super().__init__(params, lr)
     self.b1, self.b2, self.eps, self.wd, self.adam = b1, b2, eps, weight_decay, adam
     self.b1_t, self.b2_t = (Tensor.ones((1,), dtype=dtypes.float32, device=self.device, requires_grad=False).contiguous() for _ in [b1, b2])
@@ -32,7 +35,7 @@ class CLAMB(Optimizer):
     return [self.b1_t, self.b2_t] + self.m + self.v
 
 class GrokfastEMA:
-  def __init__(self, params: list[Tensor], momentum, factor):
+  def __init__(self, params:list[Tensor], momentum, factor):
     self.params, self.momentum, self.factor = dedup([x for x in params if x.requires_grad]), momentum, factor
     self.t = [Tensor.zeros_like(p) for p in self.params]
   def update(self):
@@ -40,3 +43,16 @@ class GrokfastEMA:
       assert p.grad is not None
       t.assign(self.momentum * t + (1 - self.momentum) * p.grad)
       p.grad.assign(p.grad + t * self.factor)
+
+class CosineWarmupLR(LR_Scheduler):
+  def __init__(self, optimizer:Optimizer, warmup_steps:int, warmup_lr:float, start_lr:float, end_lr:float, epochs:int, steps_per_epoch:int):
+    super().__init__(optimizer)
+    self.warmup_steps, self.epochs, self.steps_per_epoch = warmup_steps, epochs, steps_per_epoch
+    self.warmup_lr, self.start_lr, self.end_lr = warmup_lr, start_lr, end_lr
+    self.optimizer.lr.assign(self.get_lr()).realize()
+
+  def get_lr(self):
+    return (self.epoch_counter < self.warmup_steps).where(
+      self.start_lr * (self.epoch_counter / self.warmup_steps) + self.warmup_lr * (1 - self.epoch_counter / self.warmup_steps),
+      self.end_lr + 0.5 * (self.start_lr - self.end_lr) * (1 + (((self.epoch_counter - self.warmup_steps) / ((self.epochs * self.steps_per_epoch) - self.warmup_steps)) * math.pi).cos())
+    ).cast(self.optimizer.lr.dtype)

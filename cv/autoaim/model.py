@@ -1,12 +1,9 @@
-from typing import cast
 from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention, SE, FFN
-
-def nonlinear(x:Tensor) -> Tensor: return x.gelu()
+from ..common.nn import BatchNorm, ConvNorm, Attention, FFN
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2):
@@ -16,13 +13,21 @@ class ChannelMixer:
     self.down = nn.Conv2d(cout * exp, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = nonlinear(self.up(x))
+    x = self.up(x).gelu()
     return self.down(x)
+
+class TokenMixer:
+  def __init__(self, dim:int):
+    self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
+    self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    return self.conv7x7(x) + self.conv3x3(x)
 
 class ConvBlock:
   def __init__(self, dim:int):
     self.tnorm = BatchNorm(dim)
-    self.token_mixer = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
+    self.token_mixer = TokenMixer(dim)
 
     self.cnorm = BatchNorm(dim)
     self.channel_mixer = ChannelMixer(dim)
@@ -71,11 +76,11 @@ class AttnBlock:
     xx, sbsb = xx.split([h * w, self.sideband], dim=1)
     xx = xx.transpose(1, 2).reshape(b, c, h, w)
 
-    # residual
+    # residuals
     sb = sb + sbsb.reshape(b, -1)
     x = x + xx
 
-    # don't run last channel mixer if sideband_only
+    # run channel mixer if not sideband only
     if not self.sideband_only:
       xx = self.channel_mixer(self.cnorm(x))
       x = x + xx
@@ -136,30 +141,25 @@ class Stem:
     self.conv1 = ConvNorm(cin, cout // 2, 5, 2, 2, bias=False)
     self.conv2 = ConvNorm(cout // 2, cout * 2, 5, 2, 2, bias=False)
     self.proj = ConvNorm(cout * 2, cout, 1, 1, 0, bias=False)
-    self.se = SE(cout, cout // 8)
 
   def __call__(self, x: Tensor) -> Tensor:
-    x = nonlinear(self.conv1(x))
-    x = nonlinear(self.conv2(x))
-    x = self.proj(x)
-    return self.se(x)
+    x = self.conv1(x).gelu()
+    x = self.conv2(x).gelu()
+    return self.proj(x)
 
 class Backbone:
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, frames:int):
-    self.stems = [Stem(cin, cstage[0]) for _ in range(frames)]
+  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int):
+    self.stem = Stem(cin, cstage[0])
 
     self.stage0 = ConvStage(cstage[0], cstage[0], stages[0])
     self.stage1 = ConvStage(cstage[0], cstage[1], stages[1])
     self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband=sideband)
     self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband=sideband, sideband_proj=True, output_sideband_only=True)
 
-  def __call__(self, x:tuple[Tensor, ...], sb:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    x = tuple(stem(xx) for stem, xx in zip(self.stems, x))
-    xx = Tensor(0)
-    for xx_ in x:
-      xx = xx + xx_
+  def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    x = self.stem(x)
 
-    x0 = self.stage0(xx)
+    x0 = self.stage0(x)
     x1 = self.stage1(x0)
     x2, sb = self.stage2(x1, sb)
     x3, sb = self.stage3(x2, sb)
@@ -218,16 +218,15 @@ class Heads:
     return color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number
 
 class Model:
-  def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=2, frames:int=2):
+  def __init__(self, dim:int=256, cstage:list[int]=[24, 48, 96, 192], stages:list[int]=[2, 2, 6, 2], sideband:int=2):
     self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
-    self.frames = frames
-    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband, frames=frames)
+    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband)
     self.decoder = Decoder(cstage[-1] * sideband, dim, blocks=1)
     self.heads = Heads(dim)
 
-  def __call__(self, imgs:tuple[Tensor, ...]):
-    imgs = tuple(img.cast(dtypes.default_float).permute(0, 3, 1, 2).div(255) for img in imgs)
-    xs = self.backbone(imgs, self.sideband.expand(imgs[0].shape[0], -1))
+  def __call__(self, img:Tensor):
+    img = img.cast(dtypes.default_float).permute(0, 3, 1, 2).div(255)
+    xs = self.backbone(img, self.sideband.expand(img.shape[0], -1))
     f = self.decoder(xs[-1])
     return self.heads(f)
 
@@ -243,22 +242,19 @@ if __name__ == "__main__":
   model = Model()
 
   @partial(TinyJit, prune=True)
-  def run(x:Tensor, x2:Tensor):
-    return model((x, x2))
+  def run(x:Tensor):
+    return model(x)
   x = Tensor.randn(1, 128, 256, 6).realize()
-  x2 = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(x, x2)
+  run(x)
   x = Tensor.randn(1, 128, 256, 6).realize()
-  x2 = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(x, x2)
+  run(x)
 
   # full run
   x = Tensor.randn(1, 128, 256, 6).realize()
-  x2 = Tensor.randn(1, 128, 256, 6).realize()
   GlobalCounters.reset()
-  run(x, x2)
+  run(x)
 
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
   print(f"backbone parameters: {sum(p.numel() for p in get_parameters(model.backbone))}")

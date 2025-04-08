@@ -1,11 +1,17 @@
-import random, signal, os
-from multiprocessing import Queue, Process, shared_memory
+import random, os, pickle, time
+from multiprocessing import shared_memory
 from typing import Callable
 from dataclasses import dataclass
 
-from tinygrad.helpers import Context, getenv, prod
+from tinygrad.helpers import prod, getenv, Context, trange
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import DType
+
+from ..system.core import messaging
+from ..system.core.logging import logger
+from ..system.core.keyvalue import kv_clear, kv_get, kv_put
+
+DATAPROC = getenv("DATAPROC", 1)
 
 @dataclass
 class BatchDesc:
@@ -22,85 +28,126 @@ def shuffled_indices(n:int):
     yield indices[i]
     del indices[i]
 
-def loader_process(q_in:Queue, q_out:Queue, load_single_fn:Callable, tensors:dict[str, Tensor]):
-  signal.signal(signal.SIGINT, lambda *_: exit(0))
-  with Context(DEBUG=0):
-    while (recv := q_in.get()):
-      idx, file = recv
-      data = load_single_fn(file)
+class Dataloader:
+  def __init__(self, descs:dict[str, BatchDesc], bs:int, files_fn:Callable):
+    self.descs = descs
+    self.bs = bs
+    self.files_fn = files_fn
 
-      # write to shared memory
-      for name, t in tensors.items():
-        try:
-          t[idx].contiguous().realize().lazydata.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
-        except Exception as e:
-          print(f"error writing {name} to shared memory: {e}")
-          raise e
+    self.loading = False
 
-      q_out.put(idx)
-    q_out.put(None)
+    kv_clear("dataloader")
 
-def batch_load(descs: dict[str, BatchDesc], load_single_fn, files_fn, bs:int=32, shuffle=True):
-  files = files_fn()
-  if len(files) == 0: raise ValueError("no files found")
-  BATCH_COUNT = min(32, len(files) // bs)
+    self.push_pull = messaging.PushPull("dataloader")
+    sync = messaging.Pub(["dataloader_sync"])
 
-  gen = shuffled_indices(len(files)) if shuffle else iter(range(len(files)))
-  def enqueue_batch(num):
-    for idx in range(num*bs, (num+1)*bs):
-      file = files[next(gen)]
-      q_in.put((idx, file))
+    # wait for dataloader processes to start
+    started = 0
+    while started < DATAPROC:
+      self.push_pull.push(True)
+      time.sleep(0.1)
+      if self.push_pull.pull(False) == True:
+        started += 1
+        logger.info(f"dataloader {started} connected")
+      time.sleep(0.1)
+    logger.info("all dataloaders connected")
 
-  running = True
-  class Cookie:
-    def __init__(self, num): self.num = num
-    def __del__(self):
-      if running:
+    szs = {name: (bs, *desc.shape) for name, desc in descs.items()}
+
+    inflight_shms = []
+    for i in range(8):
+      shms = {}
+      for name, desc in descs.items():
+        if os.path.exists(f"/dev/shm/dataloader_{name}_{i}"): os.unlink(f"/dev/shm/dataloader_{name}_{i}")
+        shms[name] = shared_memory.SharedMemory(name=f"dataloader_{name}_{i}", create=True, size=prod(szs[name]) * desc.dtype.itemsize)
+      inflight_shms.append(shms)
+
+    self.inflight = []
+    for i in range(8):
+      tensors = {}
+      for name, desc in descs.items():
+        tensors[name] = Tensor.empty(*szs[name], dtype=desc.dtype, device=f"disk:/dev/shm/dataloader_{name}_{i}")
+      self.inflight.append(tensors)
+
+    kv_put("dataloader", "inflight", pickle.dumps(self.inflight))
+
+    # start
+    for _ in range(5):
+      time.sleep(0.1)
+      sync.send("dataloader_sync", True)
+
+  def _epoch(self):
+    files = self.files_fn()
+
+    gen = shuffled_indices(len(files))
+    def enqueue_batch(num):
+      for idx in range(self.bs):
+        file = files[next(gen)]
+        self.push_pull.push((num, idx, file))
+
+    class Cookie:
+      def __init__(self, num): self.num = num
+      def __del__(self):
         try: enqueue_batch(self.num)
         except StopIteration: pass
 
-  gotten = [0]*BATCH_COUNT
-  def receive_batch():
-    while True:
-      num = q_out.get()//bs
-      gotten[num] += 1
-      if gotten[num] == bs: break
-    gotten[num] = 0
-    return {name: tensors[name][num*bs:(num+1)*bs] for name in descs}, Cookie(num)
+    gottten = [0]*32
+    def receive_batch():
+      while True:
+        num = self.push_pull.pull()
+        gottten[num] += 1
+        if gottten[num] == self.bs: break
+      gottten[num] = 0
+      return self.inflight[num], Cookie(num)
 
-  q_in, q_out = Queue(), Queue()
+    for bn in range(8):
+      enqueue_batch(bn)
 
-  # get sizes
-  szs = {name: (BATCH_COUNT*bs, *desc.shape) for name, desc in descs.items()}
+    for _ in trange(len(files)//self.bs):
+      yield receive_batch()
 
-  shms = {}
-  for name, desc in descs.items():
-    if os.path.exists(f"/dev/shm/dataloader_{name}"): os.unlink(f"/dev/shm/dataloader_{name}")
-    shms[name] = shared_memory.SharedMemory(name=f"dataloader_{name}", create=True, size=prod(szs[name]) * desc.dtype.itemsize)
+    self.loading = False
 
-  procs = []
-  try:
-    tensors = {name: Tensor.empty(*szs[name], dtype=desc.dtype, device=f"disk:/dev/shm/dataloader_{name}") for name, desc in descs.items()}
+  def load(self):
+    if self.loading: return
+    self.iter = iter(self._epoch())
+    self.loading = True
 
-    for _ in range(getenv("DATAPROC", 1)):
-      p = Process(target=loader_process, args=(q_in, q_out, load_single_fn, tensors))
-      p.daemon = True
-      p.start()
-      procs.append(p)
+  def next(self, device:str):
+    d, c = next(self.iter)
+    ret = []
+    for _, t in d.items():
+      ret.append(t.to(device))
+    return *ret, c
 
-    for bn in range(BATCH_COUNT): enqueue_batch(bn)
+class DataloaderProc:
+  def __init__(self, load_single_fn:Callable):
+    self.load_single_fn = load_single_fn
 
-    for _ in range(0, len(files)//bs): yield receive_batch()
-  finally:
-    running = False
-    for _ in procs: q_in.put(None)
-    q_in.close()
-    for _ in procs:
-      while q_out.get() is not None: pass
-    q_out.close()
-    for p in procs: p.terminate()
-    for p in procs: p.join()
-    for shm in shms.values(): shm.close()
-    for shm in shms.values():
-      try: shm.unlink()
-      except FileNotFoundError: pass
+  def start(self):
+    pull_push = messaging.PullPush("dataloader")
+    sync = messaging.Sub(["dataloader_sync"])
+
+    # wait for something to be pushed then push something back to sync
+    pull_push.pull()
+    pull_push.push(True)
+
+    # global sync for all dataloaders
+    sync.update(None)
+
+    # grab the shared memory
+    inflight = pickle.loads(kv_get("dataloader", "inflight"))
+
+    logger.info("dataloader online")
+
+    with Context(DEBUG=0):
+      while (recv := pull_push.pull()):
+        try: num, idx, file = recv
+        except: continue
+        data = self.load_single_fn(file)
+
+        # write to shared memory
+        for name, t in inflight[num].items():
+          t[idx].contiguous().realize().lazydata.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
+
+        pull_push.push(num)
