@@ -39,9 +39,8 @@ def run():
 
     # run to initialize jit
     fake_input = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
-    fake_input_2 = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
     for _ in range(3):
-      pred(model, fake_input, fake_input_2).tolist()
+      pred(model, fake_input).tolist()
 
     kv_put("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run", pickle.dumps(pred))
 
@@ -49,46 +48,42 @@ def run():
   logger.info(f"loading cached model_{MODEL_VERSION}_{HALF}_{BEAM}_run")
   model_pred = pickle.loads(kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run"))
 
-  last_frame = None
   while True:
     sub.update(0)
     GlobalCounters.reset()
 
-    frame = sub["camera_feed"]
-    if frame is None: continue
+    camera_feed = sub["camera_feed"]
+    if camera_feed is None: continue
 
-    framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
-    if last_frame is None:
-      last_frame = framet
-      continue
+    if sub.updated["camera_feed"]:
+      frame = camera_feed["frame"]
+      framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
 
-    model_out = model_pred(None, framet, last_frame).tolist()[0]
+      model_out = model_pred(None, framet).tolist()[0]
 
-    last_frame = framet
+      colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp = model_out
+      match colorm:
+        case 0: colorm = "none"
+        case 1: colorm = "red"
+        case 2: colorm = "blue"
+        case 3: colorm = "blank"
 
-    colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp = model_out
-    match colorm:
-      case 0: colorm = "none"
-      case 1: colorm = "red"
-      case 2: colorm = "blue"
-      case 3: colorm = "blank"
+      valid = colorm != "none" and colorp > 0.6
 
-    valid = colorm != "none" and colorp > 0.6
-
-    pub.send("autoaim", {
-      "valid": valid,
-      "colorm": colorm,
-      "colorp": colorp,
-      "xc": xc,
-      "yc": yc,
-      "xtl": xtl,
-      "ytl": ytl,
-      "xtr": xtr,
-      "ytr": ytr,
-      "xbl": xbl,
-      "ybl": ybl,
-      "xbr": xbr,
-      "ybr": ybr,
-      "numberm": numberm,
-      "numberp": numberp,
-    })
+      pub.send("autoaim", {
+        "valid": valid,
+        "colorm": colorm,
+        "colorp": colorp,
+        "xc": xc,
+        "yc": yc,
+        "xtl": xtl,
+        "ytl": ytl,
+        "xtr": xtr,
+        "ytr": ytr,
+        "xbl": xbl,
+        "ybl": ybl,
+        "xbr": xbr,
+        "ybr": ybr,
+        "numberm": numberm,
+        "numberp": numberp,
+      })
