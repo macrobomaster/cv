@@ -25,6 +25,7 @@ if __name__ == "__main__":
       if "norm" in key: continue
       if ".n" in key: continue
       param.replace(param.half()).realize()
+  model.fuse()
 
   preprocessed_train_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
   i = 0
@@ -57,7 +58,7 @@ if __name__ == "__main__":
       # cv2.putText(img, f"{dist:.3f}", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
       cv2.putText(img, f"{numberm}: {numberp:.3f}", (xc, yc - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-      plate_width, plate_height = 0.14, 0.125
+      plate_width, plate_height = 0.095, 0.104
       square_points = np.array([
         [-plate_width/2, plate_height/2, 0], # bottom left
         [plate_width/2, plate_height/2, 0], # bottom right

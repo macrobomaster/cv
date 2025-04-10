@@ -3,10 +3,10 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention, FFN
+from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FusedBlock
 
 class ChannelMixer:
-  def __init__(self, cin:int, cout:int=0, exp:int=2):
+  def __init__(self, cin:int, cout:int=0, exp:int=3):
     if cout == 0: cout = cin
 
     self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
@@ -16,15 +16,33 @@ class ChannelMixer:
     x = self.up(x).gelu()
     return self.down(x)
 
-class TokenMixer:
+class TokenMixer(FusedBlock):
   def __init__(self, dim:int):
+    self.dim = dim
     self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
     self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    return self.conv7x7(x) + self.conv3x3(x)
+    if not self.fused:
+      return self.conv7x7(x) + self.conv3x3(x)
+    else:
+      return self.conv(x)
 
-class ConvBlock:
+  def fuse(self):
+    super().fuse()
+
+    conv7x7_w = self.conv7x7.weight
+    conv3x3_w = self.conv3x3.weight
+    conv3x3_w = conv3x3_w.pad((2, 2, 2, 2))
+    w = conv7x7_w + conv3x3_w
+
+    self.conv = nn.Conv2d(self.dim, self.dim, 7, 1, 3, groups=self.conv7x7.groups, bias=False)
+    self.conv.weight.assign(w)
+
+    del self.conv7x7
+    del self.conv3x3
+
+class ConvBlock(FusedBlock):
   def __init__(self, dim:int):
     self.tnorm = BatchNorm(dim)
     self.token_mixer = TokenMixer(dim)
@@ -33,15 +51,33 @@ class ConvBlock:
     self.channel_mixer = ChannelMixer(dim)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.token_mixer(self.tnorm(x))
-    x = x + xx
+    if not self.fused:
+      xx = self.token_mixer(self.tnorm(x))
+      x = x + xx
+    else:
+      xx = self.token_mixer(self.tnorm(x))
+      x = x + xx
 
-    xx = self.channel_mixer(self.cnorm(x))
+    if not self.fused:
+      xx = self.channel_mixer(self.cnorm(x))
+    else:
+      xx = self.channel_mixer(x)
     x = x + xx
 
     return x
 
-class AttnBlock:
+  def fuse(self):
+    super().fuse()
+
+    self.token_mixer.fuse()
+    # self.token_mixer = FusedBlock.fuse_bn_conv2d_dw(self.tnorm, self.token_mixer.conv)
+    # self.token_mixer = FusedBlock.fuse_conv2d_residual(self.token_mixer)
+    # del self.tnorm
+
+    self.channel_mixer.up = FusedBlock.fuse_bn_conv2d_pw(self.cnorm, self.channel_mixer.up)
+    del self.cnorm
+
+class AttnBlock(FusedBlock):
   def __init__(self, dim:int, sideband:int, sideband_only:bool=False):
     self.sideband, self.sideband_only = sideband, sideband_only
 
@@ -62,8 +98,12 @@ class AttnBlock:
     b, c, h, w = x.shape
 
     # conditional positional encoding
-    xx = self.cpe(self.cpe_norm(x))
-    x = x + xx
+    if not self.fused:
+      xx = self.cpe(self.cpe_norm(x))
+      x = x + xx
+    else:
+      xx = self.cpe(self.cpe_norm(x))
+      x = x + xx
 
     # concat sideband to tokens
     xx = x.flatten(2).transpose(1, 2)
@@ -82,7 +122,10 @@ class AttnBlock:
 
     # run channel mixer if not sideband only
     if not self.sideband_only:
-      xx = self.channel_mixer(self.cnorm(x))
+      if not self.fused:
+        xx = self.channel_mixer(self.cnorm(x))
+      else:
+        xx = self.channel_mixer(x)
       x = x + xx
 
     # run sideband channel mixer
@@ -91,7 +134,18 @@ class AttnBlock:
 
     return x, sb
 
-class Downsample:
+  def fuse(self):
+    super().fuse()
+
+    # self.cpe = FusedBlock.fuse_bn_conv2d_dw(self.cpe_norm, self.cpe)
+    # self.cpe = FusedBlock.fuse_conv2d_residual(self.cpe)
+    # del self.cpe_norm
+
+    if not self.sideband_only:
+      self.channel_mixer.up = FusedBlock.fuse_bn_conv2d_pw(self.cnorm, self.channel_mixer.up)
+      del self.cnorm
+
+class Downsample(FusedBlock):
   def __init__(self, cin:int, cout:int):
     self.conv = ConvNorm(cin, cout, 3, 2, 1, bias=False)
 
@@ -106,7 +160,12 @@ class Downsample:
 
     return x + xx
 
-class ConvStage:
+  def fuse(self):
+    super().fuse()
+
+    self.conv.fuse()
+
+class ConvStage(FusedBlock):
   def __init__(self, cin:int, cout:int, num_blocks:int):
     if cin != cout: self.downsample = Downsample(cin, cout)
     self.blocks = [ConvBlock(cout) for _ in range(num_blocks)]
@@ -116,7 +175,16 @@ class ConvStage:
       x = self.downsample(x)
     return x.sequential(self.blocks)
 
-class AttnStage:
+  def fuse(self):
+    super().fuse()
+
+    if hasattr(self, "downsample"):
+      self.downsample.fuse()
+
+    for block in self.blocks:
+      block.fuse()
+
+class AttnStage(FusedBlock):
   def __init__(self, cin:int, cout:int, num_blocks:int, sideband:int, sideband_proj:bool=False, output_sideband_only:bool=False):
     if cin != cout: self.downsample = Downsample(cin, cout)
     if sideband_proj:
@@ -136,18 +204,35 @@ class AttnStage:
 
     return x, sb
 
-class Stem:
+  def fuse(self):
+    super().fuse()
+
+    if hasattr(self, "downsample"):
+      self.downsample.fuse()
+
+    for block in self.blocks:
+      block.fuse()
+
+class Stem(FusedBlock):
   def __init__(self, cin:int, cout:int):
-    self.conv1 = ConvNorm(cin, cout // 2, 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(cout // 2, cout * 2, 5, 2, 2, bias=False)
-    self.proj = ConvNorm(cout * 2, cout, 1, 1, 0, bias=False)
+    cmid = max(cin * 2, cout // 2)
+    self.conv1 = ConvNorm(cin, cmid, 5, 2, 2, bias=False)
+    self.conv2 = ConvNorm(cmid, cout * 4, 5, 2, 2, bias=False)
+    self.proj = ConvNorm(cout * 4, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
     x = self.conv2(x).gelu()
     return self.proj(x)
 
-class Backbone:
+  def fuse(self):
+    super().fuse()
+
+    self.conv1.fuse()
+    self.conv2.fuse()
+    self.proj.fuse()
+
+class Backbone(FusedBlock):
   def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int):
     self.stem = Stem(cin, cstage[0])
 
@@ -165,6 +250,15 @@ class Backbone:
     x3, sb = self.stage3(x2, sb)
 
     return x0, x1, x2, x3, sb
+
+  def fuse(self):
+    super().fuse()
+
+    self.stem.fuse()
+    self.stage0.fuse()
+    self.stage1.fuse()
+    self.stage2.fuse()
+    self.stage3.fuse()
 
 class Decoder:
   def __init__(self, cin:int, cout:int, blocks:int):
@@ -217,7 +311,7 @@ class Heads:
 
     return color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number
 
-class Model:
+class Model(FusedBlock):
   def __init__(self, dim:int=256, cstage:list[int]=[24, 48, 96, 192], stages:list[int]=[2, 2, 6, 2], sideband:int=2):
     self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
     self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband)
@@ -230,16 +324,22 @@ class Model:
     f = self.decoder(xs[-1])
     return self.heads(f)
 
+  def fuse(self):
+    super().fuse()
+
+    self.backbone.fuse()
+
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
   from tinygrad.helpers import GlobalCounters, getenv
   from tinygrad.engine.jit import TinyJit
   from functools import partial
 
-  if getenv("HALF", 0) == 1:
+  if getenv("HALF", 0):
     dtypes.default_float = dtypes.float16
 
   model = Model()
+  if getenv("FUSE", 0): model.fuse()
 
   @partial(TinyJit, prune=True)
   def run(x:Tensor):

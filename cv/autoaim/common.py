@@ -10,7 +10,7 @@ from tinygrad.helpers import tqdm
 from ..common import BASE_PATH
 from ..common.image import rgb_to_yuv420_tensor
 
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 
 @partial(TinyJit, prune=True)
 def pred(model, img):

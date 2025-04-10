@@ -15,33 +15,7 @@ from ..common.optim import CLAMB, CosineWarmupLR
 from ..common.image import rgb_to_yuv420_tensor
 from .common import BASE_PATH
 from .model import Model
-
-def get_train_files():
-  real_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
-  real_files = [f"path:{f}" for f in real_files]
-
-  fake_files = [
-    "fake:3_blank",
-    "fake:4_blank",
-    "fake:5_blank",
-
-    "fake:2_red",
-    "fake:3_red",
-    "fake:4_red",
-    "fake:5_red",
-    "fake:6_red",
-
-    "fake:2_blue",
-    "fake:3_blue",
-    "fake:4_blue",
-    "fake:5_blue",
-    "fake:6_blue",
-  ] * len(real_files)
-
-  if getenv("FINETUNE", 0):
-    return real_files
-  else:
-    return fake_files
+from .data import get_train_files
 
 BS = 256
 WARMUP_STEPS = 400
@@ -205,3 +179,5 @@ def run():
   # copy the last intermediate to the final model
   with open(BASE_PATH / "intermediate" / f"model_{epoch}.safetensors", "rb") as f:
     with open(BASE_PATH / "model.safetensors", "wb") as f2: f2.write(f.read())
+
+  wandb.finish()

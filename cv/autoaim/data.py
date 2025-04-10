@@ -1,10 +1,14 @@
+import glob
+
 from tinygrad.dtype import _to_np_dtype, dtypes
+from tinygrad.helpers import getenv
 import albumentations as A
 import cv2
 import numpy as np
 
 from .syndata import generate_sample
 from ..common.dataloader import DataloaderProc
+from ..common import BASE_PATH
 
 OUTPUT_PIPELINE = A.Compose([
   A.Perspective(p=0.25),
@@ -54,6 +58,33 @@ def load_single_file(file):
     "x": img.tobytes(),
     "y": np.array((color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number), dtype=DEFAULT_NP_DTYPE).tobytes(),
   }
+
+def get_train_files():
+  real_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
+  real_files = [f"path:{f}" for f in real_files]
+
+  fake_files = [
+    "fake:3_blank",
+    "fake:4_blank",
+    "fake:5_blank",
+
+    "fake:2_red",
+    "fake:3_red",
+    "fake:4_red",
+    "fake:5_red",
+    "fake:6_red",
+
+    "fake:2_blue",
+    "fake:3_blue",
+    "fake:4_blue",
+    "fake:5_blue",
+    "fake:6_blue",
+  ] * len(real_files)
+
+  if getenv("FINETUNE", 0):
+    return real_files
+  else:
+    return fake_files
 
 def run():
   cv2.setNumThreads(0)
