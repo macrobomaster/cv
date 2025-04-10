@@ -1,4 +1,5 @@
 from typing import Literal
+from abc import ABC, abstractmethod
 
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
@@ -7,6 +8,113 @@ from tinygrad.helpers import make_tuple, prod, round_up
 from tinygrad import nn
 
 from .tensor import rms_norm
+
+class FusedBlock(ABC):
+  fused = False
+
+  @abstractmethod
+  def fuse(self):
+    self.fused = True
+
+  @staticmethod
+  def fuse_conv2d_bn(conv, bn):
+    w = bn.weight / (bn.running_var + bn.eps).sqrt()
+    b = bn.bias - w * bn.running_mean
+
+    w = conv.weight * w.reshape(-1, 1, 1, 1)
+
+    if conv.bias is not None:
+      b += w * conv.bias
+
+    c = nn.Conv2d(
+      conv.weight.shape[1] * conv.groups,
+      conv.weight.shape[0],
+      conv.kernel_size,
+      conv.stride,
+      conv.padding,
+      conv.dilation,
+      conv.groups,
+      bias=True
+    )
+    c.weight.assign(w)
+    c.bias.assign(b)
+    return c
+
+  @staticmethod
+  def fuse_bn_conv2d_dw(bn, conv):
+    assert conv.groups == conv.weight.shape[0], "conv must be depthwise"
+
+    w = bn.weight / (bn.running_var + bn.eps).sqrt()
+    b = bn.bias - w * bn.running_mean
+
+    w = conv.weight * w.reshape(-1, 1, 1, 1)
+
+    b = b * conv.weight.sum((1, 2, 3))
+    if conv.bias is not None:
+      b += w * conv.bias
+
+    c = nn.Conv2d(
+      conv.weight.shape[1] * conv.groups,
+      conv.weight.shape[0],
+      conv.kernel_size,
+      conv.stride,
+      conv.padding,
+      conv.dilation,
+      conv.groups,
+      bias=True
+    )
+    c.weight.assign(w)
+    c.bias.assign(b)
+    return c
+
+  @staticmethod
+  def fuse_bn_conv2d_pw(bn, conv):
+    assert conv.bias is None, "conv must not have bias"
+
+    w = bn.weight / (bn.running_var + bn.eps).sqrt()
+    b = bn.bias - w * bn.running_mean
+
+    w = conv.weight * w.reshape(1, -1, 1, 1)
+
+    b = b @ conv.weight.squeeze(-1).squeeze(-1).T
+
+    c = nn.Conv2d(
+      conv.weight.shape[1] * conv.groups,
+      conv.weight.shape[0],
+      conv.kernel_size,
+      conv.stride,
+      conv.padding,
+      conv.dilation,
+      conv.groups,
+      bias=True
+    )
+    c.weight.assign(w)
+    c.bias.assign(b)
+    return c
+
+  @staticmethod
+  def fuse_conv2d_residual(conv):
+    identity = Tensor.ones(conv.weight.shape[0], conv.weight.shape[1], 1, 1)
+    padding = conv.kernel_size[0] // 2
+    identity = identity.pad((padding, padding, padding, padding))
+
+    w = conv.weight + identity
+    b = conv.bias
+
+    c = nn.Conv2d(
+      conv.weight.shape[1] * conv.groups,
+      conv.weight.shape[0],
+      conv.kernel_size,
+      conv.stride,
+      conv.padding,
+      conv.dilation,
+      conv.groups,
+      bias=b is not None
+    )
+    c.weight.assign(w)
+    if b is not None:
+      c.bias.assign(b)
+    return c
 
 class BatchNorm:
   def __init__(self, sz:int, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
@@ -78,11 +186,22 @@ class LayerNorm:
     if not self.elementwise_affine: return x
     return x * self.weight + self.bias
 
-class ConvNorm:
-  def __init__(self, in_channels:int, out_channels:int, kernel_size:int|tuple[int, ...], stride:int, padding:int, groups:int=1, dilation:int=1, bias:bool=False):
-    self.c = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, groups=groups, dilation=dilation, bias=bias)
+class ConvNorm(FusedBlock):
+  def __init__(self, in_channels:int, out_channels:int, kernel_size:int|tuple[int, ...], stride:int, padding:int, dilation:int=1, groups:int=1, bias:bool=False):
+    self.config = in_channels, out_channels, kernel_size, stride, padding, groups, dilation
+    self.c = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias=bias)
     self.n = BatchNorm(out_channels)
-  def __call__(self, x:Tensor) -> Tensor: return self.n(self.c(x))
+
+  def __call__(self, x:Tensor) -> Tensor:
+    if not self.fused:
+      return self.n(self.c(x))
+    else:
+      return self.c(x)
+
+  def fuse(self):
+    super().fuse()
+    self.c = FusedBlock.fuse_conv2d_bn(self.c, self.n)
+    del self.n
 
 class ConvTransposeNorm:
   def __init__(self, in_channels:int, out_channels:int, kernel_size:int, stride:int, padding:int, output_padding:int, groups:int=1, bias:bool=False):
