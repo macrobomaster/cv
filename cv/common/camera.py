@@ -19,13 +19,13 @@ def setup_aravis():
   dev = cam.get_device()
   dev.set_string_feature_value("UserSetSelector", "Default")
   dev.execute_command("UserSetLoad")
-  cam.set_pixel_format_from_string("YUV422_YUYV_Packed")
+  cam.set_pixel_format_from_string("RGB8Packed")
   # camera is 1440x1080 or 4:3, crop to be 2:1
   cam.set_region(0, 0, 1440, 720)
-  cam.set_exposure_time(10000)
+  cam.set_exposure_time(8000)
   cam.set_gain(17)
   cam.set_binning(2, 2)
-  cam.set_frame_rate(90)
+  cam.set_frame_rate(120)
   dev.set_string_feature_value("AcquisitionMode", "Continuous")
   cam.set_trigger("Software")
 
@@ -42,7 +42,6 @@ def get_aravis_frame(cam, strm):
   cam.software_trigger()
   buf = strm.pop_buffer()
   img_data = buf.get_data()
-  img_raw = np.frombuffer(img_data, dtype=np.uint8).reshape(cam.get_region()[3], cam.get_region()[2], 2)
-  img = cv2.cvtColor(img_raw, cv2.COLOR_YUV2RGB_YUYV)
+  img_raw = np.frombuffer(img_data, dtype=np.uint8).reshape(cam.get_region()[3], cam.get_region()[2], 3)
   strm.push_buffer(buf)
-  return img
+  return img_raw
