@@ -291,28 +291,6 @@ class CLSHead:
     else:
       return x
 
-class MDNHead:
-  def __init__(self, in_dim:int, outputs:int, components:int, mid_dim:int, dropout:float=0.0):
-    self.outputs, self.components = outputs, components
-    self.ffn = FFN(in_dim, 2 * outputs * components + components, mid_dim, blocks=1, exp=2, norm=True, dropout=dropout)
-
-  def __call__(self, x:Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    x = self.ffn(x)
-
-    mu, log_var, pi = x.split([self.outputs * self.components, self.outputs * self.components, self.components], dim=1)
-    mu = mu.reshape(-1, self.components, self.outputs)
-    log_var = log_var.reshape(-1, self.components, self.outputs).tanh().mul(14)
-    pi = pi.reshape(-1, self.components)
-
-    if not Tensor.training:
-      mu = mu.flatten(1)
-      sigma = log_var.exp().sqrt().flatten(1)
-      pi = pi.flatten(1)
-
-      return mu, sigma, pi
-    else:
-      return mu, log_var, pi
-
 class THRegHead:
   def __init__(self, in_dim:int, outputs:int, mid_dim:int, bins:int, low:float, high:float, dropout:float=0.0):
     self.outputs, self.bins, self.low, self.high = outputs, bins, low, high
@@ -340,13 +318,11 @@ class Heads:
   def __init__(self, in_dim:int, dropout:float=0.0):
     self.color_head = CLSHead(in_dim, 4, 32, dropout=dropout)
     self.number_head = CLSHead(in_dim, 6, 32, dropout=dropout)
-    # self.plate_head = MDNHead(in_dim, 10, 8, 128, dropout=dropout)
     self.plate_head = THRegHead(in_dim, 10, 128, 64, -2, 2, dropout=dropout)
 
   def __call__(self, f:Tensor):
     color = self.color_head(f)
     number = self.number_head(f)
-    # plate_mu, plate_log_var_sigma, plate_pi = self.plate_head(f)
     plate_logits_mu, plate_log_var = self.plate_head(f)
 
     if not Tensor.training:

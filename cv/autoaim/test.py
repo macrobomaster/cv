@@ -58,12 +58,6 @@ if __name__ == "__main__":
     cv2.putText(img, f"{numberm}: {numberp:.3f}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     # if colorm != "none" and colorp > 0.0:
     if True:
-      # for j in range(8):
-      #   cv2.circle(img, (int(((plate_mu[j][0] + 1) / 2) * 512), int(((plate_mu[j][1] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
-      #   cv2.circle(img, (int(((plate_mu[j][2] + 1) / 2) * 512), int(((plate_mu[j][3] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
-      #   cv2.circle(img, (int(((plate_mu[j][4] + 1) / 2) * 512), int(((plate_mu[j][5] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
-      #   cv2.circle(img, (int(((plate_mu[j][6] + 1) / 2) * 512), int(((plate_mu[j][7] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
-      #   cv2.circle(img, (int(((plate_mu[j][8] + 1) / 2) * 512), int(((plate_mu[j][9] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
       for j in range(5):
         kp_img_pos = (int(((plate_mu[j * 2] + 1) / 2) * 512), int(((plate_mu[j * 2 + 1] + 1) / 2) * 256))
         cv2.circle(img, kp_img_pos, 5, (0, 255, 0), -1)
@@ -72,18 +66,6 @@ if __name__ == "__main__":
         kp_img_pos = (int(((plate_mu[j * 2] + 1) / 2) * 512), int(((plate_mu[j * 2 + 1] + 1) / 2) * 256))
         cv2.circle(img, kp_img_pos, int(plate_var[j * 2] * 10), (255, 0, 0), 1)
         cv2.circle(img, kp_img_pos, int(plate_var[j * 2 + 1] * 10), (0, 0, 255), 1)
-
-      # draw hollow circle on each keypoint to represent the std
-      # cv2.circle(img, (int(xc), int(yc)), int(xcstd * 512), (255, 0, 0), 1)
-      # cv2.circle(img, (int(xtl), int(ytl)), int(xtlstd * 512), (255, 0, 0), 1)
-      # cv2.circle(img, (int(xtr), int(ytr)), int(xtrstd * 512), (255, 0, 0), 1)
-      # cv2.circle(img, (int(xbl), int(ybl)), int(xblstd * 512), (255, 0, 0), 1)
-      # cv2.circle(img, (int(xbr), int(ybr)), int(xbrstd * 512), (255, 0, 0), 1)
-      # cv2.circle(img, (int(xc), int(yc)), int(ycstd * 256), (0, 0, 255), 1)
-      # cv2.circle(img, (int(xtl), int(ytl)), int(ytlstd * 256), (0, 0, 255), 1)
-      # cv2.circle(img, (int(xtr), int(ytr)), int(ytrstd * 256), (0, 0, 255), 1)
-      # cv2.circle(img, (int(xbl), int(ybl)), int(yblstd * 256), (0, 0, 255), 1)
-      # cv2.circle(img, (int(xbr), int(ybr)), int(ybrstd * 256), (0, 0, 255), 1)
 
       # plate_width, plate_height = 0.095, 0.104
       # square_points = np.array([

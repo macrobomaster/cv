@@ -25,15 +25,13 @@ END_LR = 1e-4
 EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(pred: tuple[Tensor, ...], y: Tensor, temp_sched:Schedule):
+def loss_fn(pred: tuple[Tensor, ...], y: Tensor):
   y_color = y[:, 0].cast(dtypes.int32)
   y_keypoints = y[:, 2:12]
   y_number = y[:, 1].cast(dtypes.int32)
 
   det_gate = y_color > 0
 
-  # keypoint_loss = masked_mdn_loss(y_keypoints, pred[2], pred[3], pred[4], temp_sched.get(), det_gate)
-  # temp_sched.step()
   keypoint_loss = masked_twohot_uncertainty_loss(pred[2], pred[3], y_keypoints, det_gate, 64, -2, 2)
 
   # quality factor from center keypoint
