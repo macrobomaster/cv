@@ -117,6 +117,7 @@
                     doCheck = false;
                   })
                   rerun-sdk
+                  gymnasium
                 ]
                 ++ common-python-packages p;
               python = pkgs-x86_64-linux.python312;
