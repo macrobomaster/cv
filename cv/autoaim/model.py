@@ -6,7 +6,7 @@ from ..common.tensor import pixel_unshuffle
 from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FusedBlock
 
 class ChannelMixer:
-  def __init__(self, cin:int, cout:int=0, exp:int=3):
+  def __init__(self, cin:int, cout:int=0, exp:int=2):
     if cout == 0: cout = cin
 
     self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
@@ -43,7 +43,9 @@ class TokenMixer(FusedBlock):
     del self.conv3x3
 
 class ConvBlock(FusedBlock):
-  def __init__(self, dim:int):
+  def __init__(self, dim:int, dropout:float=0.0):
+    self.dropout = dropout
+
     self.tnorm = BatchNorm(dim)
     self.token_mixer = TokenMixer(dim)
 
@@ -62,7 +64,7 @@ class ConvBlock(FusedBlock):
       xx = self.channel_mixer(self.cnorm(x))
     else:
       xx = self.channel_mixer(x)
-    x = x + xx
+    x = x + xx.dropout(self.dropout)
 
     return x
 
@@ -78,14 +80,15 @@ class ConvBlock(FusedBlock):
     del self.cnorm
 
 class AttnBlock(FusedBlock):
-  def __init__(self, dim:int, sideband:int, sideband_only:bool=False):
+  def __init__(self, dim:int, sideband:int, sideband_only:bool=False, dropout:float=0.0):
+    self.dropout = dropout
     self.sideband, self.sideband_only = sideband, sideband_only
 
     self.cpe_norm = BatchNorm(dim)
     self.cpe = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
 
     self.tnorm = nn.RMSNorm(dim)
-    self.token_mixer = Attention(dim, dim // 4, heads=1, out="mod")
+    self.token_mixer = Attention(dim, dim // 4, heads=1, out="mod", dropout=dropout)
 
     if not sideband_only:
       self.cnorm = BatchNorm(dim)
@@ -126,11 +129,11 @@ class AttnBlock(FusedBlock):
         xx = self.channel_mixer(self.cnorm(x))
       else:
         xx = self.channel_mixer(x)
-      x = x + xx
+      x = x + xx.dropout(self.dropout)
 
     # run sideband channel mixer
     sbsb = self.sideband_channel_mixer(self.sideband_cnorm(sb))
-    sb = sb + sbsb
+    sb = sb + sbsb.dropout(self.dropout)
 
     return x, sb
 
@@ -147,10 +150,11 @@ class AttnBlock(FusedBlock):
 
 class Downsample(FusedBlock):
   def __init__(self, cin:int, cout:int):
-    self.conv = ConvNorm(cin, cout, 3, 2, 1, bias=False)
+    self.pw = ConvNorm(cin, cout, 1, 1, 0, bias=False)
+    self.dw = ConvNorm(cout, cout, 3, 2, 1, groups=cout, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.conv(x)
+    xx = self.dw(self.pw(x))
 
     # shortcut
     x = pixel_unshuffle(x, 2)
@@ -163,12 +167,13 @@ class Downsample(FusedBlock):
   def fuse(self):
     super().fuse()
 
-    self.conv.fuse()
+    self.pw.fuse()
+    self.dw.fuse()
 
 class ConvStage(FusedBlock):
-  def __init__(self, cin:int, cout:int, num_blocks:int):
+  def __init__(self, cin:int, cout:int, num_blocks:int, dropout:float=0.0):
     if cin != cout: self.downsample = Downsample(cin, cout)
-    self.blocks = [ConvBlock(cout) for _ in range(num_blocks)]
+    self.blocks = [ConvBlock(cout, dropout=dropout) for _ in range(num_blocks)]
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "downsample"):
@@ -185,12 +190,12 @@ class ConvStage(FusedBlock):
       block.fuse()
 
 class AttnStage(FusedBlock):
-  def __init__(self, cin:int, cout:int, num_blocks:int, sideband:int, sideband_proj:bool=False, output_sideband_only:bool=False):
+  def __init__(self, cin:int, cout:int, num_blocks:int, sideband:int, sideband_proj:bool=False, sideband_only:bool=False, dropout:float=0.0):
     if cin != cout: self.downsample = Downsample(cin, cout)
     if sideband_proj:
       self.sideband_norm = nn.RMSNorm(cin * sideband)
       self.sideband_proj = nn.Linear(cin * sideband, cout * sideband, bias=False)
-    self.blocks = [AttnBlock(cout, sideband, output_sideband_only and i == num_blocks - 1) for i in range(num_blocks)]
+    self.blocks = [AttnBlock(cout, sideband, sideband_only and i == num_blocks - 1, dropout=dropout) for i in range(num_blocks)]
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
     if hasattr(self, "downsample"):
@@ -233,13 +238,13 @@ class Stem(FusedBlock):
     self.proj.fuse()
 
 class Backbone(FusedBlock):
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int):
+  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, sideband_only:bool=False, dropout:float=0.0):
     self.stem = Stem(cin, cstage[0])
 
-    self.stage0 = ConvStage(cstage[0], cstage[0], stages[0])
-    self.stage1 = ConvStage(cstage[0], cstage[1], stages[1])
-    self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband=sideband)
-    self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband=sideband, sideband_proj=True, output_sideband_only=True)
+    self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], dropout=dropout)
+    self.stage1 = ConvStage(cstage[0], cstage[1], stages[1], dropout=dropout)
+    self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband=sideband, dropout=dropout)
+    self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband=sideband, sideband_proj=True, sideband_only=sideband_only, dropout=dropout)
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     x = self.stem(x)
@@ -261,67 +266,108 @@ class Backbone(FusedBlock):
     self.stage3.fuse()
 
 class Decoder:
-  def __init__(self, cin:int, cout:int, blocks:int):
-    self.ffn = FFN(cin, cout, cout, exp=3, blocks=blocks, norm=True)
+  def __init__(self, cstage:list[int], sideband:int, cout:int, blocks:int, dropout:float=0.0):
+    self.cstage, self.sideband = cstage, sideband
+    self.x3_proj = nn.Linear(cstage[-1], cstage[-1] * sideband, bias=True)
+    self.ffn = FFN(cstage[-1] * sideband, cout, cout, exp=2, blocks=blocks, norm=True, dropout=dropout)
 
-  def __call__(self, sb:Tensor) -> Tensor:
-    return self.ffn(sb)
+  def __call__(self, x0:Tensor, x1:Tensor, x2:Tensor, x3:Tensor, sb:Tensor) -> Tensor:
+    x3 = self.x3_proj(x3.mean((2, 3)))
+    x = x3 + sb
 
-class Head:
-  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, outputs:int=1):
-    self.ffns = [FFN(in_dim, out_dim, mid_dim, blocks=1, exp=2, norm=False) for _ in range(outputs)]
+    return self.ffn(x)
 
-  def __call__(self, x:Tensor) -> tuple[Tensor, ...]:
-    return tuple(ffn(x) for ffn in self.ffns)
+class CLSHead:
+  def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
+    self.ffn = FFN(in_dim, classes, mid_dim, blocks=1, exp=2, norm=True, dropout=dropout)
 
-class Heads:
-  def __init__(self, in_dim:int):
-    self.x_head = Head(in_dim, 512, 128, outputs=5)
-    self.y_head = Head(in_dim, 256, 128, outputs=5)
-    self.color_head = Head(in_dim, 4, 64)
-    self.number_head = Head(in_dim, 6, 64)
-
-  def __call__(self, f:Tensor):
-    xc, xtl, xtr, xbl, xbr = self.x_head(f)
-    yc, ytl, ytr, ybl, ybr = self.y_head(f)
-    (color,) = self.color_head(f)
-    (number,) = self.number_head(f)
+  def __call__(self, x:Tensor) -> Tensor:
+    x = self.ffn(x)
 
     if not Tensor.training:
-      color = color.softmax(1)
-      colorm, colorp = color.argmax(1, keepdim=True), color.max(1, keepdim=True).float()
+      x = x.softmax(1)
+      xm, xp = x.argmax(1, keepdim=True), x.max(1, keepdim=True).float()
+      return Tensor.cat(xm, xp, dim=1)
+    else:
+      return x
 
-      if not hasattr(self, "x_arange"): self.x_arange = Tensor.arange(512).unsqueeze(1)
-      if not hasattr(self, "y_arange"): self.y_arange = Tensor.arange(256).unsqueeze(1)
-      xc = (xc.softmax() @ self.x_arange).float().mul(2).sub(256)
-      yc = (yc.softmax() @ self.y_arange).float().mul(2).sub(128)
-      xtl = (xtl.softmax() @ self.x_arange).float().mul(2).sub(256)
-      ytl = (ytl.softmax() @ self.y_arange).float().mul(2).sub(128)
-      xtr = (xtr.softmax() @ self.x_arange).float().mul(2).sub(256)
-      ytr = (ytr.softmax() @ self.y_arange).float().mul(2).sub(128)
-      xbl = (xbl.softmax() @ self.x_arange).float().mul(2).sub(256)
-      ybl = (ybl.softmax() @ self.y_arange).float().mul(2).sub(128)
-      xbr = (xbr.softmax() @ self.x_arange).float().mul(2).sub(256)
-      ybr = (ybr.softmax() @ self.y_arange).float().mul(2).sub(128)
+class MDNHead:
+  def __init__(self, in_dim:int, outputs:int, components:int, mid_dim:int, dropout:float=0.0):
+    self.outputs, self.components = outputs, components
+    self.ffn = FFN(in_dim, 2 * outputs * components + components, mid_dim, blocks=1, exp=2, norm=True, dropout=dropout)
 
-      number = number.softmax(1)
-      numberm, numberp = number.argmax(1, keepdim=True) + 1, number.max(1, keepdim=True).float()
+  def __call__(self, x:Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    x = self.ffn(x)
 
-      return Tensor.cat(colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp, dim=1)
+    mu, log_var, pi = x.split([self.outputs * self.components, self.outputs * self.components, self.components], dim=1)
+    mu = mu.reshape(-1, self.components, self.outputs)
+    log_var = log_var.reshape(-1, self.components, self.outputs).tanh().mul(14)
+    pi = pi.reshape(-1, self.components)
 
-    return color, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, number
+    if not Tensor.training:
+      mu = mu.flatten(1)
+      sigma = log_var.exp().sqrt().flatten(1)
+      pi = pi.flatten(1)
+
+      return mu, sigma, pi
+    else:
+      return mu, log_var, pi
+
+class THRegHead:
+  def __init__(self, in_dim:int, outputs:int, mid_dim:int, bins:int, low:float, high:float, dropout:float=0.0):
+    self.outputs, self.bins, self.low, self.high = outputs, bins, low, high
+    self.ffn = FFN(in_dim, outputs * bins + outputs, mid_dim, blocks=1, exp=2, norm=True, dropout=dropout)
+
+  def __call__(self, x:Tensor) -> tuple[Tensor, Tensor]:
+    x = self.ffn(x)
+
+    logits, log_var = x.split([self.outputs * self.bins, self.outputs], dim=1)
+    logits = logits.reshape(-1, self.outputs, self.bins)
+    log_var = log_var.reshape(-1, self.outputs).tanh().mul(14)
+
+    if not Tensor.training:
+      mu = logits.softmax().mul(Tensor.linspace(self.low, self.high, self.bins).reshape(1, 1, -1)).sum(-1)
+      var = log_var.exp()
+
+      mu = mu.flatten(1)
+      var = var.flatten(1)
+
+      return mu, var
+    else:
+      return logits, log_var
+
+class Heads:
+  def __init__(self, in_dim:int, dropout:float=0.0):
+    self.color_head = CLSHead(in_dim, 4, 32, dropout=dropout)
+    self.number_head = CLSHead(in_dim, 6, 32, dropout=dropout)
+    # self.plate_head = MDNHead(in_dim, 10, 8, 128, dropout=dropout)
+    self.plate_head = THRegHead(in_dim, 10, 128, 64, -2, 2, dropout=dropout)
+
+  def __call__(self, f:Tensor):
+    color = self.color_head(f)
+    number = self.number_head(f)
+    # plate_mu, plate_log_var_sigma, plate_pi = self.plate_head(f)
+    plate_logits_mu, plate_log_var = self.plate_head(f)
+
+    if not Tensor.training:
+      return Tensor.cat(color, number, plate_logits_mu, plate_log_var, dim=1)
+    else:
+      return color, number, plate_logits_mu, plate_log_var
 
 class Model(FusedBlock):
-  def __init__(self, dim:int=256, cstage:list[int]=[24, 48, 96, 192], stages:list[int]=[2, 2, 6, 2], sideband:int=2):
+  def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=4, dropout:float=0.1):
     self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
-    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband)
-    self.decoder = Decoder(cstage[-1] * sideband, dim, blocks=1)
-    self.heads = Heads(dim)
+    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband, dropout=dropout)
+    self.decoder = Decoder(cstage, sideband, dim, blocks=2, dropout=dropout)
+    self.heads = Heads(dim, dropout=dropout)
 
   def __call__(self, img:Tensor):
     img = img.cast(dtypes.default_float).permute(0, 3, 1, 2).div(255)
+    img_mean, img_std = img.mean([2, 3], keepdim=True), img.std([2, 3], keepdim=True)
+    img = img.sub(img_mean).div(img_std.add(1e-6))
+
     xs = self.backbone(img, self.sideband.expand(img.shape[0], -1))
-    f = self.decoder(xs[-1])
+    f = self.decoder(*xs)
     return self.heads(f)
 
   def fuse(self):

@@ -1,3 +1,5 @@
+import math
+
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 
@@ -32,26 +34,38 @@ def symexp(x:Tensor) -> Tensor:
   return x.sign() * x.abs().exp().sub(1)
 
 twohot_bins = {}
-def twohot(x:Tensor, bins:int) -> Tensor:
+def twohot(x:Tensor, bins:int, low:float, high:float) -> Tensor:
   global twohot_bins
+  if bins not in twohot_bins:
+    twohot_bins[bins, low, high] = Tensor.linspace(low, high, bins)
+  buckets = twohot_bins[bins, low, high]
 
-  k0 = x.floor().clamp(0, bins-1)
-  k1 = x.ceil().clamp(0, bins-1)
+  below = (buckets <= x[..., None]).cast(dtypes.int32).sum(-1) - 1
+  above = bins - (buckets > x[..., None]).cast(dtypes.int32).sum(-1)
 
-  equal = k0 == k1
-  to_below = equal.where(1, (k0 - x).abs())
-  to_above = equal.where(0, (k1 - x).abs())
+  below = below.clamp(0, bins - 1)
+  above = above.clamp(0, bins - 1)
+
+  equal = below == above
+  to_below = equal.where(1, (buckets[below] - x).abs())
+  to_above = equal.where(1, (buckets[above] - x).abs())
 
   total = to_below + to_above
   w_below = to_above / total
   w_above = to_below / total
 
-  if bins not in twohot_bins:
-    twohot_bins[bins] = Tensor.arange(bins).reshape(1, bins)
-  ar = twohot_bins[bins].expand(x.shape[0], bins)
-  th = (ar == k0.reshape(x.shape[0], 1)).where(w_below.reshape(x.shape[0], 1), 0)
-  th = th + (ar == k1.reshape(x.shape[0], 1)).where(w_above.reshape(x.shape[0], 1), 0)
-  return th
+  return below.one_hot(bins) * w_below[..., None] + above.one_hot(bins) * w_above[..., None]
+
+def masked_twohot_uncertainty_loss(logits:Tensor, log_var:Tensor, y:Tensor, mask:Tensor, bins:int, low:float, high:float) -> Tensor:
+  target = twohot(y, bins, low, high)
+  # cross entropy
+  loss = -logits.log_softmax(-1).mul(target).sum(-1)
+  # aleatoric uncertainty as a gaussian
+  loss = log_var.neg().exp() * loss + log_var
+  # mean across outputs
+  loss = loss.mean(-1)
+  # masking
+  return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
 
 def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2) -> Tensor:
   p, ce = pred.sigmoid(), pred.binary_crossentropy_logits(y, reduction="none")
@@ -79,3 +93,22 @@ def rms_norm(x:Tensor, axis:int|None=-1, eps:float=1e-6) -> Tensor:
 
 def telu(x:Tensor) -> Tensor:
   return x * x.exp().tanh()
+
+def log_gaussian_pdf(y:Tensor, mu:Tensor, log_var:Tensor) -> Tensor:
+  return -0.5 * log_var - 0.5 * math.log(2 * math.pi) - 0.5 * y.unsqueeze(1).sub(mu).square().div(log_var.exp())
+
+def masked_mdn_loss(y:Tensor, mu:Tensor, log_var:Tensor, pi:Tensor, temp:Tensor, mask:Tensor, entropy_reg:float=0.02) -> Tensor:
+  log_prob = log_gaussian_pdf(y, mu, log_var)
+
+  # apply temperature
+  pi = pi / temp
+  log_pi = pi.log_softmax().unsqueeze(-1)
+
+  loss = Tensor.logsumexp(log_prob + log_pi, axis=1).sum(-1).neg()
+
+  # entropy regularization
+  if entropy_reg > 0:
+    entropy = pi.softmax().mul(log_pi.squeeze(-1)).sum(-1).neg()
+    loss = loss - entropy_reg * entropy
+
+  return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)

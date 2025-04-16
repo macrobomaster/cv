@@ -10,8 +10,8 @@ import wandb
 
 from ..system.core.logging import logger
 from ..common.dataloader import BatchDesc, Dataloader
-from ..common.tensor import twohot, masked_cross_entropy, mal_loss
-from ..common.optim import CLAMB, CosineWarmupLR
+from ..common.tensor import twohot, masked_cross_entropy, mal_loss, masked_mdn_loss, masked_twohot_uncertainty_loss
+from ..common.optim import CLAMB, CosineWarmupLR, Schedule, CosineSchedule, ExpSchedule, grad_clip_norm, SwitchEMA
 from ..common.image import rgb_to_yuv420_tensor
 from .common import BASE_PATH
 from .model import Model
@@ -25,83 +25,59 @@ END_LR = 1e-4
 EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(pred: tuple[Tensor, ...], y: Tensor):
-  B = y.shape[0]
-
+def loss_fn(pred: tuple[Tensor, ...], y: Tensor, temp_sched:Schedule):
   y_color = y[:, 0].cast(dtypes.int32)
-  y_xc = y[:, 1]
-  y_yc = y[:, 2]
-  y_xtl = y[:, 3]
-  y_ytl = y[:, 4]
-  y_xtr = y[:, 5]
-  y_ytr = y[:, 6]
-  y_xbl = y[:, 7]
-  y_ybl = y[:, 8]
-  y_xbr = y[:, 9]
-  y_ybr = y[:, 10]
-  y_number = y[:, 11].cast(dtypes.int32)
+  y_keypoints = y[:, 2:12]
+  y_number = y[:, 1].cast(dtypes.int32)
 
-  # center keypoint loss
-  xc_loss = pred[1].cross_entropy(twohot((y_xc + 256) / 2, 512))
-  yc_loss = pred[2].cross_entropy(twohot((y_yc + 128) / 2, 256))
+  det_gate = y_color > 0
 
-  # box keypoint loss
-  xtl_loss = pred[3].cross_entropy(twohot((y_xtl + 256) / 2, 512))
-  ytl_loss = pred[4].cross_entropy(twohot((y_ytl + 128) / 2, 256))
-  xtr_loss = pred[5].cross_entropy(twohot((y_xtr + 256) / 2, 512))
-  ytr_loss = pred[6].cross_entropy(twohot((y_ytr + 128) / 2, 256))
-  xbl_loss = pred[7].cross_entropy(twohot((y_xbl + 256) / 2, 512))
-  ybl_loss = pred[8].cross_entropy(twohot((y_ybl + 128) / 2, 256))
-  xbr_loss = pred[9].cross_entropy(twohot((y_xbr + 256) / 2, 512))
-  ybr_loss = pred[10].cross_entropy(twohot((y_ybr + 128) / 2, 256))
-
-  keypoint_loss = xc_loss + yc_loss + xtl_loss + ytl_loss + xtr_loss + ytr_loss + xbl_loss + ybl_loss + xbr_loss + ybr_loss
-  keypoint_loss = keypoint_loss / 10
+  # keypoint_loss = masked_mdn_loss(y_keypoints, pred[2], pred[3], pred[4], temp_sched.get(), det_gate)
+  # temp_sched.step()
+  keypoint_loss = masked_twohot_uncertainty_loss(pred[2], pred[3], y_keypoints, det_gate, 64, -2, 2)
 
   # quality factor from center keypoint
-  if not hasattr(loss_fn, "x_arange"): setattr(loss_fn, "x_arange", Tensor.arange(512))
-  if not hasattr(loss_fn, "y_arange"): setattr(loss_fn, "y_arange", Tensor.arange(256))
-  point_xc = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float().mul(2).sub(256) / 512
-  point_yc = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float().mul(2).sub(128) / 256
-  point_dist = (point_xc.sub(y_xc / 512).square() + point_yc.sub(y_yc / 256).square()).sqrt()
-  quality = (1 - point_dist.clamp(0, 1))
+  # if not hasattr(loss_fn, "x_arange"): setattr(loss_fn, "x_arange", Tensor.arange(512))
+  # if not hasattr(loss_fn, "y_arange"): setattr(loss_fn, "y_arange", Tensor.arange(256))
+  # point_xc = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float().mul(2).sub(256) / 512
+  # point_yc = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float().mul(2).sub(128) / 256
+  # point_dist = (point_xc.sub(y_xc / 512).square() + point_yc.sub(y_yc / 256).square()).sqrt()
+  # quality = (1 - point_dist.clamp(0, 1))
 
   # color loss
-  target_cls = y_color.one_hot(4)
-  target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(B, 3), dim=1)
-  color_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
+  # target_cls = y_color.one_hot(4)
+  # target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 3), dim=1)
+  # color_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
+  color_loss = pred[0].sparse_categorical_crossentropy(y_color)
+
 
   # number loss
-  target_cls = y_number.one_hot(6)
-  target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(B, 5), dim=1)
-  number_loss = mal_loss(pred[11], target_cls, target_quality, gamma=1.5)
+  # target_cls = y_number.one_hot(6)
+  # target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 5), dim=1)
+  # number_loss = mal_loss(pred[11], target_cls, target_quality, gamma=1.5)
+  number_loss = pred[1].sparse_categorical_crossentropy(y_number)
 
   return color_loss + keypoint_loss + number_loss
 
 @TinyJit
-def train_step(model, optim, lr_sched, x, y):
+def train_step(model, optim, lr_sched, switch_ema, temp_sched, x, y):
   optim.zero_grad()
 
   yuv = rgb_to_yuv420_tensor(x)
 
   pred = model(yuv)
-  loss = loss_fn(pred, y)
+  loss = loss_fn(pred, y, temp_sched)
 
   loss.backward()
+
+  global_norm = grad_clip_norm(optim)
 
   optim.step()
   lr_sched.step()
 
-  return loss.float()
+  switch_ema.update()
 
-warming_up = True
-def get_lr(step:int) -> float:
-  global warming_up
-  if warming_up:
-    lr = START_LR * (step / WARMUP_STEPS) + WARMPUP_LR * (1 - step / WARMUP_STEPS)
-    if step >= WARMUP_STEPS: warming_up = False
-  else: lr = END_LR + 0.5 * (START_LR - END_LR) * (1 + math.cos(((step - WARMUP_STEPS) / ((EPOCHS * STEPS_PER_EPOCH) - WARMUP_STEPS)) * math.pi))
-  return lr
+  return loss.float(), global_norm.float()
 
 def run():
   Tensor.no_grad = False
@@ -125,15 +101,28 @@ def run():
   }, bs=BS, files_fn=get_train_files)
 
   model = Model()
+  model_ema = Model()
 
   if (ckpt := getenv("CKPT", "")) != "":
-    print(f"loading checkpoint {BASE_PATH / 'intermediate' / f'model_{ckpt}.safetensors'}")
+    logger.info(f"loading checkpoint {BASE_PATH / 'intermediate' / f'model_{ckpt}.safetensors'}")
     state_dict = safe_load(BASE_PATH / "intermediate" / f"model_{ckpt}.safetensors")
-    load_state_dict(model, state_dict, strict=False)
+
+    if getenv("PRETRAINED_BACKBONE"):
+      logger.info(f"only loading backbone")
+      # remove all keys that don't start with backbone and strip the backbone. prefix
+      state_dict = {k[9:]: v for k,v in state_dict.items() if k.startswith("backbone.")}
+      load_state_dict(model.backbone, state_dict, strict=False)
+    else:
+      logger.info(f"loading whole model")
+      load_state_dict(model, state_dict, strict=False)
 
   parameters = get_parameters(model)
-  optim = CLAMB(parameters, weight_decay=0.01, b1=0.9, b2=0.994, adam=True)
+  optim = CLAMB(parameters, weight_decay=0.1, b1=0.9, b2=0.994, adam=True)
   lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR, END_LR, EPOCHS, STEPS_PER_EPOCH)
+
+  switch_ema = SwitchEMA(model, model_ema, alpha=0.999)
+
+  temp_sched = ExpSchedule(20, 1, int(STEPS_PER_EPOCH * EPOCHS * (1 / 4)))
 
   steps = 0
   for epoch in range(EPOCHS):
@@ -143,7 +132,7 @@ def run():
       st = time.perf_counter()
       GlobalCounters.reset()
 
-      loss = train_step(model, optim, lr_sched, *d[:-1])
+      loss, global_norm = train_step(model, optim, lr_sched, switch_ema, temp_sched, *d[:-1])
       pt = time.perf_counter()
 
       try: next_d = dataloader.next(Device.DEFAULT)
@@ -151,13 +140,13 @@ def run():
       dt = time.perf_counter()
 
       lr = optim.lr.item()
-      loss = loss.item()
+      loss, global_norm = loss.item(), global_norm.item()
       at = time.perf_counter()
 
       # logging
       logger.info(
         f"{i:5} {((at - st)) * 1000.0:7.2f} ms step, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms data, {(at - dt) * 1000.0:7.2f} ms accel, "
-        f"{loss:11.6f} loss, {lr:.6f} lr, "
+        f"{loss:11.6f} loss, {global_norm:11.6f} global_norm, {lr:.6f} lr, "
         f"{GlobalCounters.mem_used / 1e9:7.2f} GB used, {GlobalCounters.mem_used * 1e-9 / (at - st):9.2f} GB/s, {GlobalCounters.global_ops * 1e-9 / (at - st):9.2f} GFLOPS"
       )
 
@@ -165,7 +154,7 @@ def run():
         wandb.log({
           "epoch": epoch + (i + 1) / STEPS_PER_EPOCH,
           "step_time": at - st, "python_time": pt - st, "data_time": dt - pt, "accel_time": at - dt,
-          "loss": loss, "lr": lr,
+          "loss": loss, "global_norm": global_norm, "lr": lr,
           "gb": GlobalCounters.mem_used / 1e9, "gbps": GlobalCounters.mem_used * 1e-9 / (at - st), "gflops": GlobalCounters.global_ops * 1e-9 / (at - st)
         })
 
@@ -173,6 +162,9 @@ def run():
       i += 1
       steps += 1
 
+    switch_ema.switch()
+
+    # save intermediate model
     safe_save(get_state_dict(model), str(BASE_PATH / f"intermediate/model_{epoch}.safetensors"))
     safe_save(get_state_dict(optim), str(BASE_PATH / f"intermediate/optim_{epoch}.safetensors"))
 

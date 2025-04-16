@@ -259,9 +259,11 @@ class Attention:
   """
   Cross and Self Attention with qk-norm and configurable output modulation
   """
-  def __init__(self, dim:int, qk_dim:int, heads:int, out:Literal["proj", "mod"]|None="proj"):
+  def __init__(self, dim:int, qk_dim:int, heads:int, out:Literal["proj", "mod"]|None="proj", dropout:float=0.0):
     assert qk_dim % heads == 0, "qk_dim must be divisible by heads"
     assert out in ["proj", "mod", None], "out must be one of 'proj', 'mod', or None"
+
+    self.dropout = dropout
 
     self.dim, self.qk_dim, self.heads = dim, qk_dim, heads
     self.q = nn.Linear(dim, qk_dim, bias=False)
@@ -286,7 +288,7 @@ class Attention:
     k = rms_norm(k.reshape(b, kvt, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
     v = v.reshape(b, kvt, self.heads, c // self.heads).transpose(1, 2)
 
-    attn = q.scaled_dot_product_attention(k, v).transpose(1, 2).reshape(b, t, c)
+    attn = q.scaled_dot_product_attention(k, v, dropout_p=self.dropout).transpose(1, 2).reshape(b, t, c)
 
     match self.out:
       case "proj":
@@ -320,8 +322,9 @@ class RecConv:
     return x
 
 class FFNBlock:
-  def __init__(self, dim:int, exp:int, norm:bool=True):
+  def __init__(self, dim:int, exp:int, norm:bool=True, dropout:float=0.0):
     if norm: self.norm = nn.RMSNorm(dim)
+    self.dropout = dropout
     self.up = nn.Linear(dim, dim * exp)
     self.down = nn.Linear(dim * exp, dim)
 
@@ -330,12 +333,12 @@ class FFNBlock:
     else: xx = x
     xx = self.up(xx).gelu()
     xx = self.down(xx)
-    return x + xx
+    return x + xx.dropout(self.dropout)
 
 class FFN:
-  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1, norm:bool=True):
+  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1, norm:bool=True, dropout:float=0.0):
     self.up = nn.Linear(in_dim, mid_dim)
-    self.blocks = [FFNBlock(mid_dim, exp, norm) for _ in range(blocks)]
+    self.blocks = [FFNBlock(mid_dim, exp, norm, dropout) for _ in range(blocks)]
     self.down = nn.Linear(mid_dim, out_dim)
 
   def __call__(self, x:Tensor) -> Tensor:

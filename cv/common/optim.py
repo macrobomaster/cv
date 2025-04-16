@@ -5,6 +5,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.nn.optim import Optimizer
 from tinygrad.helpers import dedup
 from tinygrad.extra.lr_scheduler import LR_Scheduler
+from tinygrad.nn.state import get_parameters, get_state_dict
 
 class CLAMB(Optimizer):
   def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-5, weight_decay=0.0, adam=False):
@@ -44,6 +45,27 @@ class GrokfastEMA:
       t.assign(self.momentum * t + (1 - self.momentum) * p.grad)
       p.grad.assign(p.grad + t * self.factor)
 
+class SwitchEMA:
+  def __init__(self, model, ema_model, alpha=0.999):
+    self.alpha = alpha
+    self.model_params = {k:v for k,v in get_state_dict(model).items() if v.requires_grad}
+    ema_state_dict = get_state_dict(ema_model)
+    self.ema_model_params = {k:ema_state_dict[k] for k in self.model_params.keys()}
+    for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
+      p_ema.requires_grad = False
+      p_ema.assign(p.detach())
+    Tensor.realize(*self.ema_model_params.values())
+
+  def update(self):
+    for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
+      p_ema.assign(p_ema * self.alpha + p.detach() * (1 - self.alpha))
+    Tensor.realize(*self.ema_model_params.values())
+
+  def switch(self):
+    for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
+      p.assign(p_ema)
+    Tensor.realize(*self.model_params.values())
+
 class CosineWarmupLR(LR_Scheduler):
   def __init__(self, optimizer:Optimizer, warmup_steps:int, warmup_lr:float, start_lr:float, end_lr:float, epochs:int, steps_per_epoch:int):
     super().__init__(optimizer)
@@ -56,3 +78,42 @@ class CosineWarmupLR(LR_Scheduler):
       self.start_lr * (self.epoch_counter / self.warmup_steps) + self.warmup_lr * (1 - self.epoch_counter / self.warmup_steps),
       self.end_lr + 0.5 * (self.start_lr - self.end_lr) * (1 + (((self.epoch_counter - self.warmup_steps) / ((self.epochs * self.steps_per_epoch) - self.warmup_steps)) * math.pi).cos())
     ).cast(self.optimizer.lr.dtype)
+
+def grad_clip_norm(optim:Optimizer, max_norm:float=1.0):
+  global_norm = Tensor([0.0], dtype=dtypes.float32, device=optim.device)
+  for p in optim.params:
+    if p.grad is not None:
+      global_norm += p.grad.cast(dtypes.float32).square().sum()
+  global_norm = global_norm.sqrt()
+  for p in optim.params:
+    if p.grad is not None:
+      p.grad.assign(p.grad.div((global_norm > max_norm).where(global_norm, max_norm)).cast(p.grad.dtype))
+  return global_norm
+
+class Schedule:
+  def __init__(self, device=None):
+    self.t = Tensor([0], requires_grad=False, dtype=dtypes.int32, device=device)
+  def step(self):
+    self.t.assign(self.t + 1).realize()
+
+class CosineSchedule(Schedule):
+  def __init__(self, start:float, end:float, steps:int, device=None):
+    super().__init__(device)
+    self.start, self.end, self.steps = start, end, steps
+
+  def get(self):
+    return (self.t <= self.steps).where(
+      self.end + 0.5 * (self.start - self.end) * (1 + ((self.t / self.steps) * math.pi).cos()),
+      self.end
+    )
+
+class ExpSchedule(Schedule):
+  def __init__(self, start:float, end:float, steps:int, device=None):
+    super().__init__(device)
+    self.start, self.end, self.steps = start, end, steps
+
+  def get(self):
+    return (self.t <= self.steps).where(
+      self.start * ((self.end / self.start) ** (self.t / self.steps)),
+      self.end
+    )
