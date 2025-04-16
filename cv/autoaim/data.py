@@ -14,6 +14,7 @@ OUTPUT_PIPELINE = A.Compose([
   A.Perspective(p=0.25),
   A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-45, 45), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
   A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
+  A.HueSaturationValue(hue_shift_limit=0, sat_shift_limit=(-20, 20), val_shift_limit=0, p=0.5),
   A.OneOf([
     A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.3),
     A.RandomSunFlare(flare_roi=(0, 0, 1, 1), p=0.3),
@@ -31,7 +32,7 @@ OUTPUT_PIPELINE = A.Compose([
 ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 DEFAULT_NP_DTYPE = _to_np_dtype(dtypes.default_float)
 
-def load_single_file(file):
+def load_single_file(file) -> dict[str, bytes]:
   if file.startswith("fake:"):
     img = np.zeros((256, 512, 3), dtype=np.uint8)
     detected = 0
@@ -54,7 +55,7 @@ def load_single_file(file):
   xbl, ybl = output["keypoints"][3]
   xbr, ybr = output["keypoints"][4]
 
-  # scale keypoints to -1-1 range
+  # scale keypoints to (-1,1) range
   xc = xc / img.shape[1] * 2 - 1
   yc = yc / img.shape[0] * 2 - 1
   xtl = xtl / img.shape[1] * 2 - 1
@@ -123,3 +124,15 @@ def run():
   cv2.ocl.setUseOpenCL(False)
 
   DataloaderProc(load_single_file).start()
+
+if __name__ == "__main__":
+  files = get_train_files()
+  for file in files:
+    data = load_single_file(file)
+    img = np.frombuffer(data["x"], dtype=np.uint8)
+    img = img.reshape((256, 512, 3))
+    print(np.frombuffer(data["y"], dtype=DEFAULT_NP_DTYPE))
+    cv2.imshow("img", img)
+    key = cv2.waitKey(0)
+    if key == ord("q"):
+      break

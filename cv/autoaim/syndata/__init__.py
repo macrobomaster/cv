@@ -8,7 +8,7 @@ from ...common.image import alpha_overlay
 from ...system.core.logging import logger
 
 PLATE_PIPELINE = A.Compose([
-  A.RandomScale(scale_limit=(0.02-1, 0.5-1), p=1),
+  A.RandomScale(scale_limit=(0.05-1, 0.5-1), p=1),
   A.Perspective(scale=(0.05, 0.2), keep_size=True, fit_output=True, p=1),
   A.SafeRotate(limit=(-90, 90), p=0.5),
 ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
@@ -16,7 +16,6 @@ PLATE_PIPELINE_2 = A.Compose([
   A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.25),
   A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.25),
   A.MotionBlur(blur_limit=(3, 5), p=0.5),
-  A.PlanckianJitter(p=0.5),
   A.Downscale(scale_range=(0.25, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.2),
 ])
 BACKGROUND_PIPELINE = A.Compose([
