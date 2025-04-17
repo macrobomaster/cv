@@ -11,7 +11,7 @@ import wandb
 from ..system.core.logging import logger
 from ..common.dataloader import BatchDesc, Dataloader
 from ..common.tensor import twohot, masked_cross_entropy, mal_loss, masked_mdn_loss, masked_twohot_uncertainty_loss
-from ..common.optim import CLAMB, CosineWarmupLR, Schedule, CosineSchedule, ExpSchedule, grad_clip_norm, SwitchEMA
+from ..common.optim import CLaProp, CosineWarmupLR, Schedule, CosineSchedule, ExpSchedule, grad_clip_norm, SwitchEMA
 from ..common.image import rgb_to_yuv420_tensor
 from .common import BASE_PATH
 from .model import Model
@@ -58,13 +58,13 @@ def loss_fn(pred: tuple[Tensor, ...], y: Tensor):
   return color_loss + keypoint_loss + number_loss
 
 @TinyJit
-def train_step(model, optim, lr_sched, switch_ema, temp_sched, x, y):
+def train_step(model, optim, lr_sched, switch_ema, x, y):
   optim.zero_grad()
 
   yuv = rgb_to_yuv420_tensor(x)
 
   pred = model(yuv)
-  loss = loss_fn(pred, y, temp_sched)
+  loss = loss_fn(pred, y)
 
   loss.backward()
 
@@ -115,12 +115,10 @@ def run():
       load_state_dict(model, state_dict, strict=False)
 
   parameters = get_parameters(model)
-  optim = CLAMB(parameters, weight_decay=0.1, b1=0.9, b2=0.994, adam=True)
+  optim = CLaProp(parameters, weight_decay=0.1)
   lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR, END_LR, EPOCHS, STEPS_PER_EPOCH)
 
-  switch_ema = SwitchEMA(model, model_ema, alpha=0.999)
-
-  temp_sched = ExpSchedule(20, 1, int(STEPS_PER_EPOCH * EPOCHS * (1 / 4)))
+  switch_ema = SwitchEMA(model, model_ema, momentum=0.999)
 
   steps = 0
   for epoch in range(EPOCHS):
@@ -130,7 +128,7 @@ def run():
       st = time.perf_counter()
       GlobalCounters.reset()
 
-      loss, global_norm = train_step(model, optim, lr_sched, switch_ema, temp_sched, *d[:-1])
+      loss, global_norm = train_step(model, optim, lr_sched, switch_ema, *d[:-1])
       pt = time.perf_counter()
 
       try: next_d = dataloader.next(Device.DEFAULT)

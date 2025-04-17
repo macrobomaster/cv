@@ -27,25 +27,20 @@ class Annotation:
   detected: int
   x: float
   y: float
-  dist: float
 
 annotations_csv = {}
-def get_annotation(img_file, with_depth:bool=False) -> Annotation:
+def get_annotation(img_file) -> Annotation:
   global annotations_csv
 
   # default
-  detected, x, y, dist = 0, 0.0, 0.0, 0.0
+  detected, x, y = 0, 0.0, 0.0
 
   # if there is a img_file.txt file, read that
   if Path(img_file).with_suffix(".txt").exists():
     with open(Path(img_file).with_suffix(".txt"), "r") as f:
       line = f.readline().strip()
       line = line.split(" ")
-      if len(line) == 3:
-        detected, x, y = int(line[0]), float(line[1]), float(line[2])
-      elif len(line) == 4:
-        detected, x, y, dist = int(line[0]), float(line[1]), float(line[2]), float(line[3])
-      else: raise ValueError(f"invalid annotation file {img_file}.txt")
+      detected, x, y = int(line[0]), float(line[1]), float(line[2])
   else:
     basename = ".".join(Path(img_file).name.split(".")[:-2])
     if basename not in annotations_csv:
@@ -63,10 +58,5 @@ def get_annotation(img_file, with_depth:bool=False) -> Annotation:
 
     detected, x, y = annotations_csv[basename][frame_index][1:]
 
-  # check if there is a .depth file
-  if with_depth and Path(img_file).with_suffix(".depth").exists():
-    with open(Path(img_file).with_suffix(".depth"), "r") as f:
-      dist = float(f.readline().strip())
-
   # return annotation
-  return Annotation(detected, x, y, dist)
+  return Annotation(detected, x, y)

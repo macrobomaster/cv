@@ -238,7 +238,7 @@ class Stem(FusedBlock):
     self.proj.fuse()
 
 class Backbone(FusedBlock):
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, sideband_only:bool=False, dropout:float=0.0):
+  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, sideband_only:bool, dropout:float=0.0):
     self.stem = Stem(cin, cstage[0])
 
     self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], dropout=dropout)
@@ -267,14 +267,11 @@ class Backbone(FusedBlock):
 
 class Decoder:
   def __init__(self, cstage:list[int], sideband:int, cout:int, blocks:int, dropout:float=0.0):
-    self.cstage, self.sideband = cstage, sideband
-    self.x3_proj = nn.Linear(cstage[-1], cstage[-1] * sideband, bias=True)
+    self.sb_norm = nn.RMSNorm(cstage[-1] * sideband)
     self.ffn = FFN(cstage[-1] * sideband, cout, cout, exp=2, blocks=blocks, norm=True, dropout=dropout)
 
   def __call__(self, x0:Tensor, x1:Tensor, x2:Tensor, x3:Tensor, sb:Tensor) -> Tensor:
-    x3 = self.x3_proj(x3.mean((2, 3)))
-    x = x3 + sb
-
+    x = self.sb_norm(sb)
     return self.ffn(x)
 
 class CLSHead:
@@ -333,7 +330,7 @@ class Heads:
 class Model(FusedBlock):
   def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=4, dropout:float=0.1):
     self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
-    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband, dropout=dropout)
+    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband, sideband_only=True, dropout=dropout)
     self.decoder = Decoder(cstage, sideband, dim, blocks=2, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
 

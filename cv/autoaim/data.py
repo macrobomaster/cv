@@ -27,7 +27,10 @@ OUTPUT_PIPELINE = A.Compose([
     A.GaussNoise(std_range=(0.05, 0.2), p=0.5),
     A.ISONoise(p=0.5),
   ], p=0.25),
-  A.PlanckianJitter(p=0.5),
+  A.OneOf([
+    A.PlanckianJitter(mode="cied"),
+    A.PlanckianJitter(),
+  ], p=0.5),
   A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
 ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 DEFAULT_NP_DTYPE = _to_np_dtype(dtypes.default_float)
@@ -115,7 +118,7 @@ def get_train_files():
 
   if getenv("FAKEFILES", 0):
     return fake_files
-  if getenv("FINETUNE", 0):
+  if getenv("REALFILES", 0):
     return real_files
   return syn_files
 
