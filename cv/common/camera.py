@@ -22,7 +22,7 @@ def setup_aravis():
   cam.set_pixel_format_from_string("RGB8Packed")
   # camera is 1440x1080 or 4:3, crop to be 2:1
   cam.set_region(0, 0, 1440, 720)
-  cam.set_exposure_time(8000)
+  cam.set_exposure_time(6000)
   cam.set_gain(17)
   cam.set_binning(2, 2)
   cam.set_frame_rate(120)
