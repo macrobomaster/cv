@@ -1,5 +1,5 @@
 from pathlib import Path
-import pickle
+import pickle, itertools
 
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
@@ -14,6 +14,7 @@ from ...autoaim.common import pred, MODEL_VERSION
 
 HALF = getenv("HALF", 0)
 BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
+FUSE = getenv("FUSE", 0)
 
 def run():
   pub = messaging.Pub(["autoaim"])
@@ -25,7 +26,8 @@ def run():
     dtypes.default_float = dtypes.float16
 
   # cache model jit
-  if kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run") is None:
+  model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_{FUSE}_run"
+  if kv_get("autoaim", model_key) is None:
     logger.info("building cached model")
 
     model = Model()
@@ -36,17 +38,19 @@ def run():
         if "norm" in key: continue
         if ".n" in key: continue
         param.replace(param.half()).realize()
+    if FUSE:
+      model.fuse()
 
     # run to initialize jit
     fake_input = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
     for _ in range(3):
       pred(model, fake_input).tolist()
 
-    kv_put("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run", pickle.dumps(pred))
+    kv_put("autoaim", model_key, pickle.dumps(pred))
 
   # load model
-  logger.info(f"loading cached model_{MODEL_VERSION}_{HALF}_{BEAM}_run")
-  model_pred = pickle.loads(kv_get("autoaim", f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run"))
+  logger.info(f"loading cached {model_key}")
+  model_pred = pickle.loads(kv_get("autoaim", model_key))
 
   while True:
     sub.update(0)
@@ -61,29 +65,35 @@ def run():
 
       model_out = model_pred(None, framet).tolist()[0]
 
-      colorm, colorp, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, numberm, numberp = model_out
+      model_out_iter = iter(model_out)
+      colorm, colorp = tuple(itertools.islice(model_out_iter, 2))
+      numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
+      plate_mu = list(itertools.islice(model_out_iter, 10))
+      plate_var = list(itertools.islice(model_out_iter, 10))
+
       match colorm:
         case 0: colorm = "none"
         case 1: colorm = "red"
         case 2: colorm = "blue"
         case 3: colorm = "blank"
+      for j in range(5):
+        plate_mu[j * 2] = ((plate_mu[j * 2] + 1) / 2) * 512
+        plate_mu[j * 2 + 1] = ((plate_mu[j * 2 + 1] + 1) / 2) * 256
 
-      valid = colorm != "none" and colorp > 0.6
+      valid = True
+      if colorm == "none": valid = False
+      if colorp < 0.6: valid = False
+
+      plate_var_avg = sum(plate_var) / len(plate_var)
+      if plate_var_avg > 1.5: valid = False
 
       pub.send("autoaim", {
         "valid": valid,
         "colorm": colorm,
         "colorp": colorp,
-        "xc": xc,
-        "yc": yc,
-        "xtl": xtl,
-        "ytl": ytl,
-        "xtr": xtr,
-        "ytr": ytr,
-        "xbl": xbl,
-        "ybl": ybl,
-        "xbr": xbr,
-        "ybr": ybr,
         "numberm": numberm,
         "numberp": numberp,
+        "plate_mu": plate_mu,
+        "plate_var": plate_var,
+        "plate_var_avg": plate_var_avg,
       })

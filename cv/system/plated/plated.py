@@ -80,10 +80,12 @@ def run():
 
     if sub.updated["autoaim"]:
       if autoaim["valid"]:
-        xbl, ybl = autoaim["xbl"], autoaim["ybl"]
-        xbr, ybr = autoaim["xbr"], autoaim["ybr"]
-        xtr, ytr = autoaim["xtr"], autoaim["ytr"]
-        xtl, ytl = autoaim["xtl"], autoaim["ytl"]
+        plate_mu = autoaim["plate_mu"]
+        xc, yc = plate_mu[0], plate_mu[1]
+        xtl, ytl = plate_mu[2], plate_mu[3]
+        xtr, ytr = plate_mu[4], plate_mu[5]
+        xbl, ybl = plate_mu[6], plate_mu[7]
+        xbr, ybr = plate_mu[8], plate_mu[9]
 
         image_points = np.array([
           [xbl, ybl],

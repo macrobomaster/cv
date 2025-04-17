@@ -53,7 +53,7 @@ while True:
   camera_feed = sub["camera_feed"]
   if time.monotonic() - lt >= 0.1:
     if camera_feed is not None:
-      frame = np.frombuffer(camera_feed, dtype=np.uint8).reshape(256, 512, 3)
+      frame = np.frombuffer(camera_feed["frame"], dtype=np.uint8).reshape(256, 512, 3)
       rr.log("raw_camera/feed", rr.Image(frame).compress(70))
     lt = time.monotonic()
 
@@ -65,31 +65,35 @@ while True:
   autoaim = sub["autoaim"]
   if sub.updated["autoaim"] and autoaim is not None:
     if autoaim["valid"]:
-      x = autoaim["xc"]
-      y = autoaim["yc"]
+      plate_mu = autoaim["plate_mu"]
+      plate_var = autoaim["plate_var"]
+      x, y = plate_mu[0], plate_mu[1]
+      var = max(plate_var[0], plate_var[1])
       ht["autoaim_c"] = (x, y)
       rr.log("raw_camera/autoaim_c", rr.LineStrips2D(ht["autoaim_c"]))
-      rr.log("raw_camera/autoaim_c_cursor", rr.Points2D([(x, y)], radii=[2]))
-      x = autoaim["xtl"]
-      y = autoaim["ytl"]
+      rr.log("raw_camera/autoaim_c_cursor", rr.Points2D([(x, y), (x, y)], radii=[var * 10, 2]))
+      x, y = plate_mu[2], plate_mu[3]
+      var = max(plate_var[2], plate_var[3])
       ht["autoaim_tl"] = (x, y)
       rr.log("raw_camera/autoaim_tl", rr.LineStrips2D(ht["autoaim_tl"]))
-      rr.log("raw_camera/autoaim_tl_cursor", rr.Points2D([(x, y)], radii=[2]))
-      x = autoaim["xtr"]
-      y = autoaim["ytr"]
+      rr.log("raw_camera/autoaim_tl_cursor", rr.Points2D([(x, y), (x, y)], radii=[var * 10, 2]))
+      x, y = plate_mu[4], plate_mu[5]
+      var = max(plate_var[4], plate_var[5])
       ht["autoaim_tr"] = (x, y)
       rr.log("raw_camera/autoaim_tr", rr.LineStrips2D(ht["autoaim_tr"]))
-      rr.log("raw_camera/autoaim_tr_cursor", rr.Points2D([(x, y)], radii=[2]))
-      x = autoaim["xbl"]
-      y = autoaim["ybl"]
+      rr.log("raw_camera/autoaim_tr_cursor", rr.Points2D([(x, y), (x, y)], radii=[var * 10, 2]))
+      x, y = plate_mu[6], plate_mu[7]
+      var = max(plate_var[6], plate_var[7])
       ht["autoaim_bl"] = (x, y)
       rr.log("raw_camera/autoaim_bl", rr.LineStrips2D(ht["autoaim_bl"]))
-      rr.log("raw_camera/autoaim_bl_cursor", rr.Points2D([(x, y)], radii=[2]))
-      x = autoaim["xbr"]
-      y = autoaim["ybr"]
+      rr.log("raw_camera/autoaim_bl_cursor", rr.Points2D([(x, y), (x, y)], radii=[var * 10, 2]))
+      x, y = plate_mu[8], plate_mu[9]
+      var = max(plate_var[8], plate_var[9])
       ht["autoaim_br"] = (x, y)
       rr.log("raw_camera/autoaim_br", rr.LineStrips2D(ht["autoaim_br"]))
-      rr.log("raw_camera/autoaim_br_cursor", rr.Points2D([(x, y)], radii=[2]))
+      rr.log("raw_camera/autoaim_br_cursor", rr.Points2D([(x, y), (x, y)], radii=[var * 10, 2]))
+
+    rr.log("plate_var_avg", rr.Scalar(autoaim["plate_var_avg"]))
 
     plate = sub["plate"]
     if sub.updated["plate"] and plate is not None:
