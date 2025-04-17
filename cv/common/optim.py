@@ -8,7 +8,7 @@ from tinygrad.extra.lr_scheduler import LR_Scheduler
 from tinygrad.nn.state import get_parameters, get_state_dict
 
 class CLAMB(Optimizer):
-  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-5, weight_decay=0.0, adam=False):
+  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0, adam=False):
     super().__init__(params, lr)
     self.b1, self.b2, self.eps, self.wd, self.adam = b1, b2, eps, weight_decay, adam
     self.b1_t, self.b2_t = (Tensor.ones((1,), dtype=dtypes.float32, device=self.device, requires_grad=False).contiguous() for _ in [b1, b2])
@@ -35,6 +35,34 @@ class CLAMB(Optimizer):
       t.assign((t.detach() - self.lr * r * up).cast(t.dtype))
     return [self.b1_t, self.b2_t] + self.m + self.v
 
+class CLaProp(Optimizer):
+  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0):
+    super().__init__(params, lr)
+    self.b1, self.b2, self.eps, self.wd = b1, b2, eps, weight_decay
+    self.b1_t, self.b2_t = (Tensor.zeros((1,), dtype=dtypes.float32, device=self.device, requires_grad=False).contiguous() for _ in [b1, b2])
+    self.exp_avg = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous() for t in self.params]
+    self.exp_avg_sq = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous() for t in self.params]
+
+  def schedule_step_with_grads(self, grads:list[Tensor]) -> list[Tensor]:
+    self.b1_t.assign(self.b1 * self.b1_t + (1 - self.b1) * self.lr)
+    self.b2_t.assign(self.b2 * self.b2_t + (1 - self.b2))
+    for i, (t, g) in enumerate(zip(self.params, grads)):
+      self.exp_avg_sq[i].assign(self.b2 * self.exp_avg_sq[i] + (1 - self.b2) * g.square())
+
+      bias_correction1 = self.b1_t / self.lr
+      bias_correction2 = self.b2_t
+      step_size = 1 / bias_correction1
+
+      denom = self.exp_avg_sq[i].div(bias_correction2).sqrt().add(self.eps)
+      step_of_this_grad = g / denom
+      self.exp_avg[i].assign(self.b1 * self.exp_avg[i] + (1 - self.b1) * self.lr * step_of_this_grad)
+
+      cmask = (self.exp_avg[i] * g > 0).cast(t.dtype)
+      cmask = cmask / cmask.mean().clamp(min_=1e-3)
+
+      t.assign((t.detach() - step_size * self.exp_avg[i] * cmask - self.lr * self.wd * t.detach()))
+    return [self.b1_t, self.b2_t] + self.exp_avg + self.exp_avg_sq
+
 class GrokfastEMA:
   def __init__(self, params:list[Tensor], momentum, factor):
     self.params, self.momentum, self.factor = dedup([x for x in params if x.requires_grad]), momentum, factor
@@ -46,8 +74,8 @@ class GrokfastEMA:
       p.grad.assign(p.grad + t * self.factor)
 
 class SwitchEMA:
-  def __init__(self, model, ema_model, alpha=0.999):
-    self.alpha = alpha
+  def __init__(self, model, ema_model, momentum=0.999):
+    self.momentum = momentum
     self.model_params = {k:v for k,v in get_state_dict(model).items() if v.requires_grad}
     ema_state_dict = get_state_dict(ema_model)
     self.ema_model_params = {k:ema_state_dict[k] for k in self.model_params.keys()}
@@ -58,7 +86,7 @@ class SwitchEMA:
 
   def update(self):
     for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
-      p_ema.assign(p_ema * self.alpha + p.detach() * (1 - self.alpha))
+      p_ema.assign(p_ema * self.momentum + p.detach() * (1 - self.momentum))
     Tensor.realize(*self.ema_model_params.values())
 
   def switch(self):
@@ -84,10 +112,10 @@ def grad_clip_norm(optim:Optimizer, max_norm:float=1.0):
   for p in optim.params:
     if p.grad is not None:
       global_norm += p.grad.cast(dtypes.float32).square().sum()
-  global_norm = global_norm.sqrt()
+  global_norm = global_norm.sqrt().contiguous()
   for p in optim.params:
     if p.grad is not None:
-      p.grad.assign(p.grad.div((global_norm > max_norm).where(global_norm, max_norm)).cast(p.grad.dtype))
+      p.grad = (global_norm > max_norm).where(p.grad.div(global_norm), p.grad)
   return global_norm
 
 class Schedule:
