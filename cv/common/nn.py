@@ -36,35 +36,8 @@ class FusedBlock(ABC):
       conv.groups,
       bias=True
     )
-    c.weight.assign(w)
-    c.bias.assign(b)
-    return c
-
-  @staticmethod
-  def fuse_bn_conv2d_dw(bn, conv):
-    assert conv.groups == conv.weight.shape[0], "conv must be depthwise"
-
-    w = bn.weight / (bn.running_var + bn.eps).sqrt()
-    b = bn.bias - w * bn.running_mean
-
-    w = conv.weight * w.reshape(-1, 1, 1, 1)
-
-    b = b * conv.weight.sum((1, 2, 3))
-    if conv.bias is not None:
-      b += w * conv.bias
-
-    c = nn.Conv2d(
-      conv.weight.shape[1] * conv.groups,
-      conv.weight.shape[0],
-      conv.kernel_size,
-      conv.stride,
-      conv.padding,
-      conv.dilation,
-      conv.groups,
-      bias=True
-    )
-    c.weight.assign(w)
-    c.bias.assign(b)
+    c.weight.replace(w.cast(c.weight.dtype))
+    c.bias.replace(b.cast(c.bias.dtype))
     return c
 
   @staticmethod
@@ -88,32 +61,8 @@ class FusedBlock(ABC):
       conv.groups,
       bias=True
     )
-    c.weight.assign(w)
-    c.bias.assign(b)
-    return c
-
-  @staticmethod
-  def fuse_conv2d_residual(conv):
-    identity = Tensor.ones(conv.weight.shape[0], conv.weight.shape[1], 1, 1)
-    padding = conv.kernel_size[0] // 2
-    identity = identity.pad((padding, padding, padding, padding))
-
-    w = conv.weight + identity
-    b = conv.bias
-
-    c = nn.Conv2d(
-      conv.weight.shape[1] * conv.groups,
-      conv.weight.shape[0],
-      conv.kernel_size,
-      conv.stride,
-      conv.padding,
-      conv.dilation,
-      conv.groups,
-      bias=b is not None
-    )
-    c.weight.assign(w)
-    if b is not None:
-      c.bias.assign(b)
+    c.weight.replace(w.cast(c.weight.dtype))
+    c.bias.replace(b.cast(c.bias.dtype))
     return c
 
 class BatchNorm:

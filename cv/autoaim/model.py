@@ -53,12 +53,8 @@ class ConvBlock(FusedBlock):
     self.channel_mixer = ChannelMixer(dim)
 
   def __call__(self, x:Tensor) -> Tensor:
-    if not self.fused:
-      xx = self.token_mixer(self.tnorm(x))
-      x = x + xx
-    else:
-      xx = self.token_mixer(self.tnorm(x))
-      x = x + xx
+    xx = self.token_mixer(self.tnorm(x))
+    x = x + xx
 
     if not self.fused:
       xx = self.channel_mixer(self.cnorm(x))
@@ -72,9 +68,6 @@ class ConvBlock(FusedBlock):
     super().fuse()
 
     self.token_mixer.fuse()
-    # self.token_mixer = FusedBlock.fuse_bn_conv2d_dw(self.tnorm, self.token_mixer.conv)
-    # self.token_mixer = FusedBlock.fuse_conv2d_residual(self.token_mixer)
-    # del self.tnorm
 
     self.channel_mixer.up = FusedBlock.fuse_bn_conv2d_pw(self.cnorm, self.channel_mixer.up)
     del self.cnorm
@@ -101,12 +94,8 @@ class AttnBlock(FusedBlock):
     b, c, h, w = x.shape
 
     # conditional positional encoding
-    if not self.fused:
-      xx = self.cpe(self.cpe_norm(x))
-      x = x + xx
-    else:
-      xx = self.cpe(self.cpe_norm(x))
-      x = x + xx
+    xx = self.cpe(self.cpe_norm(x))
+    x = x + xx
 
     # concat sideband to tokens
     xx = x.flatten(2).transpose(1, 2)
@@ -139,10 +128,6 @@ class AttnBlock(FusedBlock):
 
   def fuse(self):
     super().fuse()
-
-    # self.cpe = FusedBlock.fuse_bn_conv2d_dw(self.cpe_norm, self.cpe)
-    # self.cpe = FusedBlock.fuse_conv2d_residual(self.cpe)
-    # del self.cpe_norm
 
     if not self.sideband_only:
       self.channel_mixer.up = FusedBlock.fuse_bn_conv2d_pw(self.cnorm, self.channel_mixer.up)
