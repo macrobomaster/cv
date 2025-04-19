@@ -137,7 +137,6 @@ class LayerNorm:
 
 class ConvNorm(FusedBlock):
   def __init__(self, in_channels:int, out_channels:int, kernel_size:int|tuple[int, ...], stride:int, padding:int, dilation:int=1, groups:int=1, bias:bool=False):
-    self.config = in_channels, out_channels, kernel_size, stride, padding, groups, dilation
     self.c = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias=bias)
     self.n = BatchNorm(out_channels)
 

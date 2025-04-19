@@ -56,6 +56,11 @@ def twohot(x:Tensor, bins:int, low:float, high:float) -> Tensor:
 
   return below.one_hot(bins) * w_below[..., None] + above.one_hot(bins) * w_above[..., None]
 
+def twohot_loss(logits:Tensor, y:Tensor, bins:int, low:float, high:float) -> Tensor:
+  target = twohot(y, bins, low, high)
+  loss = -logits.log_softmax(-1).mul(target).sum(-1)
+  return loss.mean()
+
 def masked_twohot_uncertainty_loss(logits:Tensor, log_var:Tensor, y:Tensor, mask:Tensor, bins:int, low:float, high:float) -> Tensor:
   target = twohot(y, bins, low, high)
   # cross entropy

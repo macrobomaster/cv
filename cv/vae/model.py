@@ -1,254 +1,230 @@
+import math
+
 from tinygrad import nn
-from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
+from tinygrad.dtype import dtypes
 
-from ..common.tensor import channel_shuffle, pixel_unshuffle, norm, telu
-from ..common.nn import BatchNorm, ConvNorm, ConvTransposeNorm, Attention, SE, UpsampleConvNorm, UpsampleConv
-
-def nonlinear(x:Tensor) -> Tensor: return x.gelu()
-
-class TokenMixer:
-  def __init__(self, dim:int, attn:bool=False):
-    self.has_attn = attn
-
-    if self.has_attn:
-      self.attn = Attention(dim, dim // 4, heads=1, out="mod")
-    else:
-      self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
-
-  def __call__(self, x:Tensor) -> Tensor:
-    if self.has_attn:
-      b, c, h, w = x.shape
-      x = x.flatten(2).transpose(1, 2)
-      x = self.attn(x).transpose(1, 2).reshape(b, c, h, w)
-    else:
-      x = self.conv7x7(x)
-
-    return x
+from ..common.tensor import pixel_shuffle
+from ..common.nn import BatchNorm, UpsampleConvNorm, Attention, FFN
 
 class ChannelMixer:
-  def __init__(self, cin:int, cout:int=0, exp:int=2, mix:bool=False):
+  def __init__(self, cin:int, cout:int=0, exp:int=2):
     if cout == 0: cout = cin
+
     self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
-    if mix: self.mix = nn.Conv2d(cout * exp, cout * exp, 3, 1, 1, groups=cout * exp, bias=False)
-    self.down = nn.Conv2d((cout * exp)//2 if mix else cout * exp, cout, 1, 1, 0, bias=False)
+    self.down = nn.Conv2d(cout * exp, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.up(x)
-    if hasattr(self, "mix"):
-      x, gate = self.mix(x).chunk(2, dim=1)
-      x = x * nonlinear(gate)
-    else:
-      x = nonlinear(x)
+    x = self.up(x).gelu()
     return self.down(x)
 
-class Block:
-  def __init__(self, dim:int, attn:bool=False):
+class TokenMixer:
+  def __init__(self, dim:int):
+    self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
+    self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    return self.conv7x7(x) + self.conv3x3(x)
+
+class ConvBlock:
+  def __init__(self, dim:int, dropout:float=0.0):
+    self.dropout = dropout
+
     self.tnorm = BatchNorm(dim)
-    self.token_mixer = TokenMixer(dim, attn=attn)
+    self.token_mixer = TokenMixer(dim)
+
     self.cnorm = BatchNorm(dim)
-    self.channel_mixer = ChannelMixer(dim, mix=True)
+    self.channel_mixer = ChannelMixer(dim)
 
   def __call__(self, x:Tensor) -> Tensor:
     xx = self.token_mixer(self.tnorm(x))
     x = x + xx
-    xx = self.channel_mixer(self.cnorm(xx))
-    return x + xx
 
-class Downsample:
-  def __init__(self, cin:int, cout:int):
-    self.conv = ConvNorm(cin, cout, 3, 2, 1, bias=False)
+    xx = self.channel_mixer(self.cnorm(x))
+    x = x + xx.dropout(self.dropout)
 
-  def __call__(self, x:Tensor) -> Tensor:
-    xx = self.conv(x)
+    return x
 
-    # shortcut
-    x = pixel_unshuffle(x, 2)
+class AttnBlock:
+  def __init__(self, dim:int, sideband:int, sideband_mode:str="both", dropout:float=0.0):
+    self.dropout = dropout
+    self.sideband, self.sideband_mode = sideband, sideband_mode
+
+    self.cpe_norm = BatchNorm(dim)
+    self.cpe = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
+
+    self.tnorm = nn.RMSNorm(dim)
+    self.token_mixer = Attention(dim, dim // 4, heads=1, out="mod", dropout=dropout)
+
+    if sideband_mode != "only":
+      self.cnorm = BatchNorm(dim)
+      self.channel_mixer = ChannelMixer(dim)
+
+    if sideband_mode != "none":
+      self.sideband_cnorm = nn.RMSNorm(dim * sideband)
+      self.sideband_channel_mixer = FFN(dim * sideband, dim * sideband, dim * sideband * 2, blocks=0, norm=False)
+
+  def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
     b, c, h, w = x.shape
-    x = x.reshape(b, xx.shape[1], c // xx.shape[1], h, w)
-    x = x.mean(2)
 
-    return x + xx
+    # conditional positional encoding
+    xx = self.cpe(self.cpe_norm(x))
+    x = x + xx
+
+    # concat sideband to tokens
+    xx = x.flatten(2).transpose(1, 2)
+    xx = xx.cat(sb.reshape(b, self.sideband, c), dim=1)
+
+    # run token mixer
+    xx = self.token_mixer(self.tnorm(xx))
+
+    # split tokens and sideband
+    xx, sbsb = xx.split([h * w, self.sideband], dim=1)
+    xx = xx.transpose(1, 2).reshape(b, c, h, w)
+
+    # residuals
+    sb = sb + sbsb.reshape(b, -1)
+    x = x + xx
+
+    # channel mixer
+    if self.sideband_mode != "only":
+      xx = self.channel_mixer(self.cnorm(x))
+      x = x + xx.dropout(self.dropout)
+
+    # sideband channel mixer
+    if self.sideband_mode != "none":
+      sbsb = self.sideband_channel_mixer(self.sideband_cnorm(sb))
+      sb = sb + sbsb.dropout(self.dropout)
+
+    return x, sb
 
 class Upsample:
   def __init__(self, cin:int, cout:int):
+    # self.dw = UpsampleConvNorm(cin, cin, 3, 2, 1, groups=cin, bias=False)
+    # self.pw = UpsampleConvNorm(cin, cout, 1, 1, 0, bias=False)
     self.conv = UpsampleConvNorm(cin, cout, 3, 2, 1, bias=False)
-  def __call__(self, x:Tensor) -> Tensor:
-    return self.conv(x)
-
-class EncoderStem:
-  def __init__(self, cin:int, cout:int):
-    self.conv1 = ConvNorm(cin, cout // 2, 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(cout // 2, cout * 2, 5, 2, 2, bias=False)
-    self.proj = ConvNorm(cout * 2, cout, 1, 1, 0, bias=False)
-    self.se = SE(cout, cout // 8)
-
-  def __call__(self, x: Tensor) -> Tensor:
-    x = nonlinear(self.conv1(x))
-    x = nonlinear(self.conv2(x))
-    x = self.proj(x)
-    return self.se(x)
-
-class DecoderStem:
-  def __init__(self, cin:int, cout:int):
-    self.proj = UpsampleConvNorm(cin, cin * 2, 1, 1, 0, bias=False)
-    self.conv1 = UpsampleConvNorm(cin * 2, cin // 2, 3, 2, 1, bias=False)
-    self.conv2 = UpsampleConv(cin // 2, cout, 3, 2, 1, bias=False)
-  def __call__(self, x:Tensor) -> Tensor:
-    x = nonlinear(self.proj(x))
-    x = nonlinear(self.conv1(x))
-    return self.conv2(x).sigmoid()
-
-class EncoderStage:
-  def __init__(self, cin:int, cout:int, num_blocks:int, attn:bool=False):
-    self.downsample = Downsample(cin, cout) if cin != cout else lambda x: x
-    self.blocks = [Block(cout, attn=attn) for _ in range(num_blocks)]
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.downsample(x)
-    return x.sequential(self.blocks)
+    # return self.pw(self.dw(x))
+    xx = self.conv(x)
 
-class DecoderStage:
-  def __init__(self, cin:int, cout:int, num_blocks:int, attn:bool=False):
-    self.blocks = [Block(cin, attn) for _ in range(num_blocks)]
-    self.upsample = Upsample(cin, cout) if cin != cout else lambda x: x
+    x = x.repeat_interleave(xx.shape[1] * 4 // x.shape[1], dim=1)
+    x = pixel_shuffle(x, 2)
+
+    return x + xx
+
+class ConvStage:
+  def __init__(self, cin:int, cout:int, num_blocks:int, x_proj:bool=True, dropout:float=0.0):
+    self.blocks = [ConvBlock(cin, dropout=dropout) for _ in range(num_blocks)]
+    if x_proj: self.upsample = Upsample(cin, cout)
+
   def __call__(self, x:Tensor) -> Tensor:
     x = x.sequential(self.blocks)
-    return self.upsample(x)
 
-class Encoder:
-  def __init__(self, cin:int, cout:int, cstage:list[int], stages:list[int]):
-    self.stem = EncoderStem(cin, cstage[0])
+    if hasattr(self, "upsample"):
+      x = self.upsample(x)
 
-    self.stage0 = EncoderStage(cstage[0], cstage[0], stages[0])
-    self.stage1 = EncoderStage(cstage[0], cstage[1], stages[1])
-    self.stage2 = EncoderStage(cstage[1], cstage[2], stages[2], attn=True)
-    self.stage3 = EncoderStage(cstage[2], cstage[3], stages[3], attn=True)
+    return x
 
-    self.proj = nn.Conv2d(cstage[3], cout, 1, 1, 0)
+class AttnStage:
+  def __init__(self, cin:int, cout:int, num_blocks:int, sideband:int, sideband_proj:bool=False, sideband_mode:str="both", x_proj:bool=True, dropout:float=0.0):
+    self.blocks = [AttnBlock(cin, sideband, sideband_mode if i == num_blocks - 1 else "both", dropout=dropout) for i in range(num_blocks)]
+    if x_proj: self.upsample = Upsample(cin, cout)
+    if sideband_proj:
+      self.sideband_norm = nn.RMSNorm(cin * sideband)
+      self.sideband_proj = nn.Linear(cin * sideband, cout * sideband, bias=False)
 
-  def __call__(self, x:Tensor) -> Tensor:
-    x = self.stem(x)
+  def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
+    for block in self.blocks:
+      x, sb = block(x, sb)
 
-    x0 = self.stage0(x)
-    x1 = self.stage1(x0)
-    x2 = self.stage2(x1)
-    x3 = self.stage3(x2)
+    if hasattr(self, "upsample"):
+      x = self.upsample(x)
 
-    return self.proj(x3)
+    if hasattr(self, "sideband_proj"):
+      sb = self.sideband_proj(self.sideband_norm(sb))
 
-class Decoder:
-  def __init__(self, cin:int, cout:int, cstage:list[int], stages:list[int]):
-    self.proj = nn.Conv2d(cin, cstage[0], 1, 1, 0)
+    return x, sb
 
-    self.stage0 = DecoderStage(cstage[0], cstage[1], stages[1], attn=True)
-    self.stage1 = DecoderStage(cstage[1], cstage[2], stages[2], attn=True)
-    self.stage2 = DecoderStage(cstage[2], cstage[3], stages[3])
-    self.stage3 = DecoderStage(cstage[3], cstage[3], stages[3])
-
-    self.stem = DecoderStem(cstage[3], cout)
+class Unpatcher:
+  def __init__(self, patch_size:int):
+    self.patch_size = patch_size
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.proj(x)
+    for _ in range(int(math.log2(self.patch_size))):
+      x = self._idwt(x)
+    return x
 
-    x = self.stage0(x)
-    x = self.stage1(x)
+  def _idwt(self, x:Tensor) -> Tensor:
+    if not hasattr(self, "wavelets"):
+      self.wavelets = Tensor([1 / math.sqrt(2), 1 / math.sqrt(2)], dtype=dtypes.float32, device=x.device)
+      self.flips = Tensor([1, -1], dtype=dtypes.float32, device=x.device)
+    h = self.wavelets
+    n = h.shape[0]
+    g = x.shape[1] // 4
+    hl = h.flip(0).reshape(1, 1, -1).repeat(g, 1, 1).cast(x.dtype)
+    hh = (h * self.flips).reshape(1, 1, -1).repeat(g, 1, 1).cast(x.dtype)
+
+    xll, xlh, xhl, xhh = x.chunk(4, dim=1)
+
+    yl = xll.conv_transpose2d(hl.unsqueeze(3), groups=g, stride=(2, 1), padding=(n - 2, 0))
+    yl = yl + xlh.conv_transpose2d(hh.unsqueeze(3), groups=g, stride=(2, 1), padding=(n - 2, 0))
+    yh = xhl.conv_transpose2d(hl.unsqueeze(3), groups=g, stride=(2, 1), padding=(n - 2, 0))
+    yh = yh + xhh.conv_transpose2d(hh.unsqueeze(3), groups=g, stride=(2, 1), padding=(n - 2, 0))
+    y = yl.conv_transpose2d(hl.unsqueeze(2), groups=g, stride=(1, 2), padding=(0, n - 2))
+    y = y + yh.conv_transpose2d(hh.unsqueeze(2), groups=g, stride=(1, 2), padding=(0, n - 2))
+
+    return y * 2
+
+class Model:
+  def __init__(self, in_dim:int=128, cstage:list[int]=[128, 64, 32, 16], stages:list[int]=[2, 2, 2, 2], sideband:int=4, patch_size:int=2, dropout:float=0.0):
+    self.input_proj = nn.Linear(in_dim * sideband, cstage[0] * sideband)
+    self.image_tokens = Tensor.zeros(1, cstage[0], 2, 4)
+
+    self.stage0 = AttnStage(cstage[0], cstage[1], stages[0], sideband=sideband, sideband_proj=True, dropout=dropout)
+    self.stage1 = AttnStage(cstage[1], cstage[2], stages[1], sideband=sideband, sideband_mode="none", dropout=dropout)
+    self.stage2 = ConvStage(cstage[2], cstage[3], stages[2], dropout=dropout)
+    self.stage3 = ConvStage(cstage[3], cstage[3], stages[3], x_proj=False, dropout=dropout)
+
+    self.out_norm = nn.RMSNorm(cstage[3])
+    self.out = nn.Conv2d(cstage[3], 3 * patch_size * patch_size, 3, 1, 1)
+
+    self.unpatcher = Unpatcher(patch_size)
+
+  def __call__(self, sb:Tensor) -> Tensor:
+    sb = self.input_proj(sb)
+    x = self.image_tokens.expand(sb.shape[0], -1, -1, -1)
+
+    x, sb = self.stage0(x, sb)
+    x, sb = self.stage1(x, sb)
     x = self.stage2(x)
     x = self.stage3(x)
 
-    return self.stem(x)
-
-class VQQuantizer:
-  def __init__(self, embed_dim, n_embed):
-    self.embed_dim, self.n_embed = embed_dim, n_embed
-    self.embed = nn.Embedding(n_embed, embed_dim)
-
-  @staticmethod
-  def get_very_efficient_rotation(u:Tensor, q:Tensor, e:Tensor) -> Tensor:
-    w = ((u + q) / norm(u + q, axis=1, keepdim=True)).detach()
-    e = e - 2 * e.matmul(w.unsqueeze(-1)).matmul(w.unsqueeze(1)) + 2 * e.matmul(u.unsqueeze(-1).detach()).matmul(q.unsqueeze(1).detach())
-    return e
-
-  def __call__(self, z: Tensor) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
-    z = z.permute(0, 2, 3, 1)
-    z_flat = z.reshape(-1, self.embed_dim)
-
-    # compute cosine distance
-    z_flat_norm = z_flat / norm(z_flat, 1, keepdim=True).add(1e-5)
-    embed_weight_norm = self.embed.weight / norm(self.embed.weight, 1, keepdim=True).add(1e-5)
-    d = z_flat_norm @ embed_weight_norm.T
-
-    # find nearest embedding
-    indices = d.argmax(axis=1).detach()
-    z_q = self.embed(indices)
-
-    # losses
-    embed_loss = (z_q - z_flat.detach()).square().mean()
-    commit_loss = (z_q.detach() - z_flat).square().mean()
-    ortho_loss = embed_weight_norm @ embed_weight_norm.T - Tensor.eye(self.n_embed, device=embed_weight_norm.device)
-    ortho_loss = ortho_loss.square().sum() / (self.n_embed ** 2)
-
-    # ste
-    z_q = z_flat + (z_q - z_flat).detach()
-
-    # rotation trick
-    pre_norm_q = VQQuantizer.get_very_efficient_rotation(z_flat_norm, z_q / norm(z_q, axis=1, keepdim=True).add(1e-5), z_flat.unsqueeze(1)).squeeze()
-    z_q = pre_norm_q * (norm(z_q, axis=1, keepdim=True) / z_flat_norm).detach()
-
-    # keep embeddings on hypersphere
-    z_q = z_q / norm(z_q, 1, keepdim=True).add(1e-5)
-
-    # reshape back to match z
-    z_q = z_q.reshape(z.shape)
-    z_q = z_q.permute(0, 3, 1, 2)
-
-    return z_q, (embed_loss, commit_loss, ortho_loss)
-
-  def quantize(self, z: Tensor) -> Tensor:
-    B, _, H, W = z.shape
-    z = z.permute(0, 2, 3, 1)
-    z_flat = z.reshape(-1, self.embed_dim)
-    z_flat_norm = z_flat / norm(z_flat, 1, keepdim=True).add(1e-5)
-    embed_weight_norm = self.embed.weight / norm(self.embed.weight, 1, keepdim=True).add(1e-5)
-    return (z_flat_norm @ embed_weight_norm.T).argmax(axis=1).reshape(B, H*W)
-  def dequantize(self, indices: Tensor) -> Tensor: return self.embed(indices)
-
-class Model:
-  def __init__(self, embed_dim:int=16, n_embed:int=4096, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 6, 2]):
-    self.encoder = Encoder(cin=3, cout=embed_dim, cstage=cstage, stages=stages)
-    self.quantizer = VQQuantizer(embed_dim, n_embed)
-    self.decoder = Decoder(cin=embed_dim, cout=3, cstage=list(reversed(cstage)), stages=list(reversed(stages)))
-
-  def __call__(self, img:Tensor):
-    # image normalization
-    img = img.cast(dtypes.default_float)
-    img = img.permute(0, 3, 1, 2) / 255
-
-    z_e = self.encoder(img).cast(dtypes.float32)
-    z = z_e / norm(z_e, 1, keepdim=True).add(1e-5)
-    z_q, losses = self.quantizer(z)
-    img_hat = self.decoder(z_q.cast(dtypes.default_float))
-    return img_hat, img, losses
+    x = self.out(self.out_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2))
+    x = self.unpatcher(x)
+    return x
 
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
-  from tinygrad.helpers import GlobalCounters, getenv
+  from tinygrad.helpers import GlobalCounters
   from tinygrad.engine.jit import TinyJit
   from functools import partial
-
-  if getenv("HALF", 0) == 1:
-    dtypes.default_float = dtypes.float16
 
   model = Model()
 
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
     return model(x)
+  x = Tensor.randn(1, 512).realize()
+  GlobalCounters.reset()
+  run(x)
+  x = Tensor.randn(1, 512).realize()
+  GlobalCounters.reset()
+  run(x)
 
-  run(Tensor.randn(1, 128, 128, 3))
+  # full run
+  x = Tensor.randn(1, 512).realize()
   GlobalCounters.reset()
-  run(Tensor.randn(1, 128, 128, 3))
-  GlobalCounters.reset()
-  print(run(Tensor.randn(1, 128, 128, 3)))
+  run(x)
 
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
