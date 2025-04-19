@@ -1,4 +1,4 @@
-import time, glob, math, os
+import time
 
 from tinygrad.device import Device
 from tinygrad.tensor import Tensor
