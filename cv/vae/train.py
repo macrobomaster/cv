@@ -1,6 +1,7 @@
 import time
 
 from tinygrad.device import Device
+from tinygrad.nn.optim import SGD
 from tinygrad.tensor import Tensor
 from tinygrad.helpers import getenv, GlobalCounters
 from tinygrad.dtype import dtypes
@@ -10,55 +11,78 @@ import wandb
 
 from ..system.core.logging import logger
 from ..common.dataloader import BatchDesc, Dataloader
-from ..common.optim import CLaProp, CosineWarmupLR, grad_clip_norm, SwitchEMA
-from ..common.image import rgb_to_yuv420_tensor
+from ..common.optim import CLaProp, CosineWarmupLR, StepSchedule, grad_clip_norm, SwitchEMA
+from ..common.tensor import hinge_discriminator_loss, norm
 from ..common import BASE_PATH
 from ..autoaim.model import Backbone
 from .model import Model
 from .data import get_train_files
 from .lpips import VGG16Loss
+from .discriminator import Discriminator
 
-BS = 32
-WARMUP_STEPS = 400
+BS = 256
+WARMUP_STEPS = 100
 WARMPUP_LR = 1e-7
-START_LR = 1e-3
-END_LR = 1e-4
-EPOCHS = 20
+START_LR = 4e-3
+END_LR = 1e-5
+EPOCHS = 100
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(x:Tensor, x_hat:Tensor, lpips) -> Tensor:
-  l1_loss = (x - x_hat).abs().mean()
+def loss_fn(model, x:Tensor, x_hat:Tensor, lpips, disc, gram_schedule, disc_schedule) -> Tensor:
+  l1_loss = 0.1 * (x - x_hat).abs().mean()
   l2_loss = (x - x_hat).square().mean()
   wp_loss = 0.01 * (x - x_hat).flatten(1).square().max(axis=-1).mean()
-  lpips_loss = lpips(x_hat, x).mean()
 
-  return l1_loss + l2_loss + wp_loss + lpips_loss
+  lpips_loss, gram_loss = lpips(x, x_hat)
+  lpips_loss = 0.1 * lpips_loss.mean()
+  gram_loss = gram_schedule.get() * gram_loss.mean()
+  gram_schedule.step()
+
+  rec_loss = l1_loss + l2_loss + wp_loss + lpips_loss + gram_loss
+  rec_loss = rec_loss.squeeze()
+
+  with Tensor.train(False):
+    logits_fake = disc(x)
+  d_loss = 2 * logits_fake.mean().neg()
+  r_grads = rec_loss.gradient(model.out.weight)[0]
+  d_grads = d_loss.gradient(model.out.weight)[0]
+  d_weight = norm(r_grads).div(norm(d_grads).add(1e-4)).clamp(0, 1e4).detach()
+  d_loss = disc_schedule.get() * d_weight * d_loss
+
+  return rec_loss + d_loss
 
 @TinyJit
-def train_step(encoder, sideband, model, optim, lr_sched, switch_ema, lpips, x):
-  optim.zero_grad()
-
-  yuv = rgb_to_yuv420_tensor(x)
-  yuv = yuv.cast(dtypes.default_float).permute(0, 3, 1, 2).div(255)
-  yuv_mean, yuv_std = yuv.mean([2, 3], keepdim=True), yuv.std([2, 3], keepdim=True)
-  yuv = yuv.sub(yuv_mean).div(yuv_std.add(1e-6))
-  x_hat = x.cast(dtypes.float32).permute(0, 3, 1, 2).avg_pool2d(8, 8).div(255)
+def train_step(encoder, model, optim, lr_sched, switch_ema, lpips, disc, disc_optim, disc_lr_sched, gram_schedule, disc_schedule, x:Tensor):
+  x_hat = x.cast(dtypes.float32).permute(0, 3, 1, 2).interpolate((32, 64), mode="linear").div(255)
 
   with Tensor.train(False), Tensor.test(True):
-    z = encoder(yuv, sideband.expand(yuv.shape[0], -1))[-1].detach()
+    z = encoder(x)[-1].detach()
   x = model(z)
-  loss = loss_fn(x, x_hat, lpips)
 
-  loss.backward()
+  rec_loss = loss_fn(model, x, x_hat, lpips, disc, gram_schedule, disc_schedule)
 
+  optim.zero_grad()
+  rec_loss.squeeze().backward()
   global_norm = grad_clip_norm(optim)
-
   optim.step()
   lr_sched.step()
-
   switch_ema.update()
 
-  return loss.float(), global_norm.float()
+  logits_real = disc(x_hat.requires_grad_())
+  logits_fake = disc(x.detach())
+  disc_loss = hinge_discriminator_loss(logits_real, logits_fake)
+  r1_reg = 10 * logits_real.sum().gradient(x_hat)[0].square().sum((1, 2, 3)).mean()
+  disc_loss = disc_loss + r1_reg
+  disc_loss = disc_schedule.get() * disc_loss
+  disc_schedule.step()
+
+  disc_optim.zero_grad()
+  disc_loss.squeeze().backward()
+  disc_global_norm = grad_clip_norm(disc_optim)
+  disc_optim.step()
+  disc_lr_sched.step()
+
+  return rec_loss.float(), disc_loss.float(), (global_norm + disc_global_norm).float()
 
 def run():
   Tensor.no_grad = False
@@ -80,11 +104,10 @@ def run():
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
   }, bs=BS, files_fn=get_train_files)
 
-  encoder = Backbone(cin=6, cstage=[16, 32, 64, 128], stages=[2, 2, 6, 2], sideband=4, sideband_only=True, dropout=0)
+  encoder = Backbone(cin=3, cstage=[16, 32, 64, 128], stages=[2, 2, 6, 2], sideband=4, sideband_only=True, dropout=0)
   state_dict = safe_load(BASE_PATH / "model.safetensors")
   state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items() if k.startswith("backbone.")}
   load_state_dict(encoder, state_dict)
-  sideband = safe_load(BASE_PATH / "model.safetensors")["sideband"].to(Device.DEFAULT)
 
   model = Model()
   model_ema = Model()
@@ -94,14 +117,20 @@ def run():
     state_dict = safe_load(BASE_PATH / "intermediate" / f"vae_{ckpt}.safetensors")
     load_state_dict(model, state_dict, strict=False)
 
-  parameters = get_parameters(model)
-  optim = CLaProp(parameters, weight_decay=0.1)
+  optim = CLaProp(get_parameters(model), weight_decay=0.01)
   lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR, END_LR, EPOCHS, STEPS_PER_EPOCH)
 
   switch_ema = SwitchEMA(model, model_ema, momentum=0.999)
 
   lpips = VGG16Loss()
   lpips.load_from_pretrained()
+
+  gram_schedule = StepSchedule(0, 0.05, (EPOCHS // 2) * STEPS_PER_EPOCH)
+  disc_schedule = StepSchedule(0, 0.1, (EPOCHS // 2) * STEPS_PER_EPOCH)
+
+  disc = Discriminator()
+  disc_optim = CLaProp(get_parameters(disc), b1=0.5, b2=0.9, weight_decay=0.01)
+  disc_lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR / 10, END_LR / 10, EPOCHS, STEPS_PER_EPOCH)
 
   steps = 0
   for epoch in range(EPOCHS):
@@ -111,7 +140,7 @@ def run():
       st = time.perf_counter()
       GlobalCounters.reset()
 
-      loss, global_norm = train_step(encoder, sideband, model, optim, lr_sched, switch_ema, lpips, *d[:-1])
+      rec_loss, disc_loss, global_norm = train_step(encoder, model, optim, lr_sched, switch_ema, lpips, disc, disc_optim, disc_lr_sched, gram_schedule, disc_schedule, *d[:-1])
       pt = time.perf_counter()
 
       try: next_d = dataloader.next(Device.DEFAULT)
@@ -119,13 +148,13 @@ def run():
       dt = time.perf_counter()
 
       lr = optim.lr.item()
-      loss, global_norm = loss.item(), global_norm.item()
+      rec_loss, disc_loss, global_norm = rec_loss.item(), disc_loss.item(), global_norm.item()
       at = time.perf_counter()
 
       # logging
       logger.info(
         f"{i:5} {((at - st)) * 1000.0:7.2f} ms step, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms data, {(at - dt) * 1000.0:7.2f} ms accel, "
-        f"{loss:11.6f} loss, {global_norm:11.6f} global_norm, {lr:.6f} lr, "
+        f"{rec_loss:11.6f} rec_loss, {disc_loss:11.6f} disc_loss, {global_norm:11.6f} global_norm, {lr:.6f} lr, "
         f"{GlobalCounters.mem_used / 1e9:7.2f} GB used, {GlobalCounters.mem_used * 1e-9 / (at - st):9.2f} GB/s, {GlobalCounters.global_ops * 1e-9 / (at - st):9.2f} GFLOPS"
       )
 
@@ -133,7 +162,7 @@ def run():
         wandb.log({
           "epoch": epoch + (i + 1) / STEPS_PER_EPOCH,
           "step_time": at - st, "python_time": pt - st, "data_time": dt - pt, "accel_time": at - dt,
-          "loss": loss, "global_norm": global_norm, "lr": lr,
+          "rec_loss": rec_loss, "disc_loss": disc_loss, "global_norm": global_norm, "lr": lr,
           "gb": GlobalCounters.mem_used / 1e9, "gbps": GlobalCounters.mem_used * 1e-9 / (at - st), "gflops": GlobalCounters.global_ops * 1e-9 / (at - st)
         })
 

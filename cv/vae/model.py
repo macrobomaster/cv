@@ -5,7 +5,7 @@ from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 
 from ..common.tensor import pixel_shuffle
-from ..common.nn import BatchNorm, UpsampleConvNorm, Attention, FFN
+from ..common.nn import BatchNorm, UpsampleConv, Attention, FFN
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2):
@@ -100,12 +100,9 @@ class AttnBlock:
 
 class Upsample:
   def __init__(self, cin:int, cout:int):
-    # self.dw = UpsampleConvNorm(cin, cin, 3, 2, 1, groups=cin, bias=False)
-    # self.pw = UpsampleConvNorm(cin, cout, 1, 1, 0, bias=False)
-    self.conv = UpsampleConvNorm(cin, cout, 3, 2, 1, bias=False)
+    self.conv = UpsampleConv(cin, cout, 3, 2, 1, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    # return self.pw(self.dw(x))
     xx = self.conv(x)
 
     x = x.repeat_interleave(xx.shape[1] * 4 // x.shape[1], dim=1)
@@ -177,9 +174,9 @@ class Unpatcher:
     return y * 2
 
 class Model:
-  def __init__(self, in_dim:int=128, cstage:list[int]=[128, 64, 32, 16], stages:list[int]=[2, 2, 2, 2], sideband:int=4, patch_size:int=2, dropout:float=0.0):
+  def __init__(self, in_dim:int=128, cstage:list[int]=[128, 128, 64, 32], stages:list[int]=[2, 2, 2, 2], sideband:int=4, patch_size:int=2, dropout:float=0.0):
     self.input_proj = nn.Linear(in_dim * sideband, cstage[0] * sideband)
-    self.image_tokens = Tensor.zeros(1, cstage[0], 2, 4)
+    self.image_token = Tensor.zeros(1, cstage[0], 1, 1)
 
     self.stage0 = AttnStage(cstage[0], cstage[1], stages[0], sideband=sideband, sideband_proj=True, dropout=dropout)
     self.stage1 = AttnStage(cstage[1], cstage[2], stages[1], sideband=sideband, sideband_mode="none", dropout=dropout)
@@ -192,15 +189,16 @@ class Model:
     self.unpatcher = Unpatcher(patch_size)
 
   def __call__(self, sb:Tensor) -> Tensor:
-    sb = self.input_proj(sb)
-    x = self.image_tokens.expand(sb.shape[0], -1, -1, -1)
+    sb = self.input_proj(sb).gelu()
+    x = self.image_token.expand(sb.shape[0], -1, 2, 4)
 
     x, sb = self.stage0(x, sb)
     x, sb = self.stage1(x, sb)
     x = self.stage2(x)
     x = self.stage3(x)
 
-    x = self.out(self.out_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2))
+    x = self.out_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+    x = self.out(x.gelu())
     x = self.unpatcher(x)
     return x
 

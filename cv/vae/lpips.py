@@ -1,7 +1,7 @@
 from pathlib import Path
 from tinygrad.tensor import Tensor
 from tinygrad import nn
-from tinygrad.nn.state import load_state_dict, get_state_dict, safe_load, safe_save, torch_load
+from tinygrad.nn.state import load_state_dict, get_state_dict, safe_load, safe_save
 
 from ..common.tensor import norm
 
@@ -9,14 +9,9 @@ class VGG16Loss:
   def __init__(self):
     self.scaling_layer = ScalingLayer()
     self.net = VGG16()
-    channels = [64, 128, 256, 512, 512]
-    self.lin0 = NetLinLayer(channels[0], 1)
-    self.lin1 = NetLinLayer(channels[1], 1)
-    self.lin2 = NetLinLayer(channels[2], 1)
-    self.lin3 = NetLinLayer(channels[3], 1)
-    self.lin4 = NetLinLayer(channels[4], 1)
+    self.layer_weights = [1.0 / 2.6, 1.0 / 4.8, 1.0 / 3.7, 1.0 / 5.6, 10.0 / 1.5]
 
-  def __call__(self, x:Tensor, y:Tensor) -> Tensor:
+  def __call__(self, x:Tensor, y:Tensor, with_gram:bool=True) -> Tensor | tuple[Tensor, Tensor]:
     x = x * 2 - 1
     y = y * 2 - 1
 
@@ -25,19 +20,33 @@ class VGG16Loss:
     features_x, features_y = self.net(x), self.net(y)
     diffs = []
     for fx, fy in zip(features_x, features_y):
-      fx, fy = fx.div(norm(fx, axis=1, keepdim=True).add(1e-10)), fy.div(norm(fy, axis=1, keepdim=True).add(1e-10))
-      diffs.append((fx - fy).square())
+      diffs.append((fx - fy).abs())
 
-    lins = [self.lin0, self.lin1, self.lin2, self.lin3, self.lin4]
-    loss = lins[0](diffs[0]).mean((2, 3), keepdim=True)
-    for lin, d in zip(lins[1:], diffs[1:]):
-      loss = loss + lin(d).mean((2, 3), keepdim=True)
+    loss = self.layer_weights[0] * diffs[0].mean((1, 2, 3))
+    for w, d in zip(self.layer_weights[1:], diffs[1:]):
+      loss = loss + w * d.mean((1, 2, 3))
 
-    return loss
+    if with_gram:
+      gram_diffs = []
+      for fx, fy in zip(features_x, features_y):
+        gram_diff = self._gram_matrix(fx) - self._gram_matrix(fy)
+        gram_diffs.append(gram_diff.square())
+
+      gram_loss = self.layer_weights[0] * gram_diffs[0].mean((1, 2))
+      for w, d in zip(self.layer_weights[1:], gram_diffs[1:]):
+        gram_loss = gram_loss + w * d.mean((1, 2))
+
+      return loss, gram_loss
+    else:
+      return loss
+
+  def _gram_matrix(self, x):
+    b, c, h, w = x.shape
+    x = x.reshape(b, c, h * w)
+    x = x @ x.transpose(1, 2)
+    return x / (h * w)
 
   def load_from_pretrained(self):
-    state_dict = torch_load(Tensor.from_url("https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1"))
-    load_state_dict(self, state_dict, strict=False)
     self.net.load_from_pretrained()
 
 class ScalingLayer:
@@ -47,13 +56,6 @@ class ScalingLayer:
 
   def __call__(self, x:Tensor) -> Tensor:
     return (x - self.shift) / self.scale
-
-class NetLinLayer:
-  def __init__(self, cin:int, cout:int):
-    self.model = [lambda x: x, nn.Conv2d(cin, cout, 1, 1, 0, bias=False)]
-
-  def __call__(self, x:Tensor) -> Tensor:
-    return x.sequential(self.model)
 
 class VGG16:
   def __init__(self):

@@ -14,8 +14,8 @@ OUTPUT_PIPELINE = A.Compose([
   A.VerticalFlip(p=0.5),
   A.Perspective(p=0.25),
   A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-45, 45), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
-  A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
-  A.HueSaturationValue(hue_shift_limit=0, sat_shift_limit=(-20, 20), val_shift_limit=0, p=0.5),
+  A.RandomBrightnessContrast(ensure_safe_range=True, p=0.5),
+  A.HueSaturationValue(p=0.5),
   A.OneOf([
     A.PlanckianJitter(mode="cied"),
     A.PlanckianJitter(),
@@ -30,7 +30,7 @@ def load_single_file(file) -> dict[str, bytes]:
   else:
     raise ValueError("unknown file type")
 
-  # img = OUTPUT_PIPELINE(image=img)["image"]
+  img = OUTPUT_PIPELINE(image=img)["image"]
 
   return {
     "x": img.tobytes(),
