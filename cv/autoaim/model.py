@@ -1,3 +1,5 @@
+import math
+
 from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
@@ -204,11 +206,11 @@ class AttnStage(FusedBlock):
       block.fuse()
 
 class Stem(FusedBlock):
-  def __init__(self, cin:int, cout:int):
-    cmid = max(cin * 2, cout // 2)
+  def __init__(self, cin:int, cout:int, exp:float=1):
+    cmid = int(cout * exp)
     self.conv1 = ConvNorm(cin, cmid, 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(cmid, cout * 4, 5, 2, 2, bias=False)
-    self.proj = ConvNorm(cout * 4, cout, 1, 1, 0, bias=False)
+    self.conv2 = ConvNorm(cmid, cmid, 5, 2, 2, groups=cmid, bias=False)
+    self.proj = ConvNorm(cmid, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
@@ -222,18 +224,57 @@ class Stem(FusedBlock):
     self.conv2.fuse()
     self.proj.fuse()
 
-class Backbone(FusedBlock):
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, sideband_only:bool, dropout:float=0.0):
-    self.stem = Stem(cin, cstage[0])
+class Patcher:
+  def __init__(self, patch_size:int):
+    self.patch_size = patch_size
 
+  def __call__(self, x:Tensor) -> Tensor:
+    for _ in range(int(math.log2(self.patch_size))):
+      x = self._dwt(x)
+    return x
+
+  def _dwt(self, x:Tensor) -> Tensor:
+    if not hasattr(self, "wavelets"):
+      self.wavelets = Tensor([1 / math.sqrt(2), 1 / math.sqrt(2)], dtype=dtypes.float32, device=x.device)
+      self.flips = Tensor([1, -1], dtype=dtypes.float32, device=x.device)
+    h = self.wavelets
+    n = h.shape[0]
+    g = x.shape[1]
+    hl = h.flip(0).reshape(1, 1, -1).repeat(g, 1, 1).cast(x.dtype)
+    hh = (h * self.flips).reshape(1, 1, -1).repeat(g, 1, 1).cast(x.dtype)
+
+    x = x.pad((n - 2, n - 1, n - 2, n - 1), mode="reflect")
+    xl = x.conv2d(hl.unsqueeze(2), groups=g, stride=(1, 2))
+    xh = x.conv2d(hh.unsqueeze(2), groups=g, stride=(1, 2))
+    xll = xl.conv2d(hl.unsqueeze(3), groups=g, stride=(2, 1))
+    xlh = xl.conv2d(hh.unsqueeze(3), groups=g, stride=(2, 1))
+    xhl = xh.conv2d(hl.unsqueeze(3), groups=g, stride=(2, 1))
+    xhh = xh.conv2d(hh.unsqueeze(3), groups=g, stride=(2, 1))
+
+    out = xll.cat(xlh, xhl, xhh, dim=1)
+    return out / 2
+
+class Backbone(FusedBlock):
+  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, sideband_only:bool, patch_size:int=2, dropout:float=0.0):
+    self.patcher = Patcher(patch_size)
+    self.stem = Stem(cin * patch_size * patch_size, cstage[0])
+
+    self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
     self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], dropout=dropout)
     self.stage1 = ConvStage(cstage[0], cstage[1], stages[1], dropout=dropout)
     self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband=sideband, dropout=dropout)
     self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband=sideband, sideband_proj=True, sideband_only=sideband_only, dropout=dropout)
 
-  def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+  def __call__(self, img:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    # image normalization
+    img = img.cast(dtypes.default_float).permute(0, 3, 1, 2).div(255)
+    img_mean, img_std = img.mean([2, 3], keepdim=True), img.std([2, 3], keepdim=True)
+    x = img.sub(img_mean).div(img_std.add(1e-6))
+
+    x = self.patcher(x)
     x = self.stem(x)
 
+    sb = self.sideband.expand(x.shape[0], -1)
     x0 = self.stage0(x)
     x1 = self.stage1(x0)
     x2, sb = self.stage2(x1, sb)
@@ -276,7 +317,7 @@ class CLSHead:
 class THRegHead:
   def __init__(self, in_dim:int, outputs:int, mid_dim:int, bins:int, low:float, high:float, dropout:float=0.0):
     self.outputs, self.bins, self.low, self.high = outputs, bins, low, high
-    self.ffn = FFN(in_dim, outputs * bins + outputs, mid_dim, blocks=1, exp=2, norm=True, dropout=dropout)
+    self.ffn = FFN(in_dim, outputs * bins + outputs, mid_dim, blocks=2, exp=2, norm=True, dropout=dropout)
 
   def __call__(self, x:Tensor) -> tuple[Tensor, Tensor]:
     x = self.ffn(x)
@@ -300,31 +341,28 @@ class Heads:
   def __init__(self, in_dim:int, dropout:float=0.0):
     self.color_head = CLSHead(in_dim, 4, 32, dropout=dropout)
     self.number_head = CLSHead(in_dim, 6, 32, dropout=dropout)
-    self.plate_head = THRegHead(in_dim, 10, 128, 64, -2, 2, dropout=dropout)
+    self.center_head = THRegHead(in_dim, 2, 64, 64, -2, 2, dropout=dropout)
+    self.plate_head = THRegHead(in_dim, 8, 128, 64, -2, 2, dropout=dropout)
 
   def __call__(self, f:Tensor):
     color = self.color_head(f)
     number = self.number_head(f)
+    center_logits_mu, center_log_var = self.center_head(f)
     plate_logits_mu, plate_log_var = self.plate_head(f)
 
     if not Tensor.training:
-      return Tensor.cat(color, number, plate_logits_mu, plate_log_var, dim=1)
+      return Tensor.cat(color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var, dim=1)
     else:
-      return color, number, plate_logits_mu, plate_log_var
+      return color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var
 
 class Model(FusedBlock):
-  def __init__(self, dim:int=256, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=4, dropout:float=0.1):
-    self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
-    self.backbone = Backbone(cin=6, cstage=cstage, stages=stages, sideband=sideband, sideband_only=True, dropout=dropout)
+  def __init__(self, dim:int=512, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=4, dropout:float=0.1):
+    self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=True, dropout=dropout)
     self.decoder = Decoder(cstage, sideband, dim, blocks=2, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
 
   def __call__(self, img:Tensor):
-    img = img.cast(dtypes.default_float).permute(0, 3, 1, 2).div(255)
-    img_mean, img_std = img.mean([2, 3], keepdim=True), img.std([2, 3], keepdim=True)
-    img = img.sub(img_mean).div(img_std.add(1e-6))
-
-    xs = self.backbone(img, self.sideband.expand(img.shape[0], -1))
+    xs = self.backbone(img)
     f = self.decoder(*xs)
     return self.heads(f)
 
@@ -348,15 +386,15 @@ if __name__ == "__main__":
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
     return model(x)
-  x = Tensor.randn(1, 128, 256, 6).realize()
+  x = Tensor.randn(1, 256, 512, 3).realize()
   GlobalCounters.reset()
   run(x)
-  x = Tensor.randn(1, 128, 256, 6).realize()
+  x = Tensor.randn(1, 256, 512, 3).realize()
   GlobalCounters.reset()
   run(x)
 
   # full run
-  x = Tensor.randn(1, 128, 256, 6).realize()
+  x = Tensor.randn(1, 256, 512, 3).realize()
   GlobalCounters.reset()
   run(x)
 

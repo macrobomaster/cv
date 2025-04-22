@@ -43,8 +43,10 @@ if __name__ == "__main__":
     model_out_iter = iter(model_out)
     colorm, colorp = tuple(itertools.islice(model_out_iter, 2))
     numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
-    plate_mu = list(itertools.islice(model_out_iter, 10))
-    plate_var = list(itertools.islice(model_out_iter, 10))
+    center_mu = tuple(itertools.islice(model_out_iter, 2))
+    center_var = tuple(itertools.islice(model_out_iter, 2))
+    plate_mu = list(itertools.islice(model_out_iter, 8))
+    plate_var = list(itertools.islice(model_out_iter, 8))
     match colorm:
       case 0: colorm = "none"
       case 1: colorm = "red"
@@ -58,11 +60,16 @@ if __name__ == "__main__":
     cv2.putText(img, f"{numberm}: {numberp:.3f}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     # if colorm != "none" and colorp > 0.0:
     if True:
-      for j in range(5):
+      kp_img_pos = (int(((center_mu[0] + 1) / 2) * 512), int(((center_mu[1] + 1) / 2) * 256))
+      cv2.circle(img, kp_img_pos, 5, (0, 255, 0), -1)
+      for j in range(4):
         kp_img_pos = (int(((plate_mu[j * 2] + 1) / 2) * 512), int(((plate_mu[j * 2 + 1] + 1) / 2) * 256))
         cv2.circle(img, kp_img_pos, 5, (0, 255, 0), -1)
 
-      for j in range(5):
+      kp_img_pos = (int(((center_mu[0] + 1) / 2) * 512), int(((center_mu[1] + 1) / 2) * 256))
+      cv2.circle(img, kp_img_pos, int(center_var[0] * 10), (255, 0, 0), 1)
+      cv2.circle(img, kp_img_pos, int(center_var[1] * 10), (0, 0, 255), 1)
+      for j in range(4):
         kp_img_pos = (int(((plate_mu[j * 2] + 1) / 2) * 512), int(((plate_mu[j * 2 + 1] + 1) / 2) * 256))
         cv2.circle(img, kp_img_pos, int(plate_var[j * 2] * 10), (255, 0, 0), 1)
         cv2.circle(img, kp_img_pos, int(plate_var[j * 2 + 1] * 10), (0, 0, 255), 1)

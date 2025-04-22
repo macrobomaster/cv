@@ -6,6 +6,7 @@ import albumentations as A
 import cv2
 import numpy as np
 
+from .common import get_annotation
 from .syndata import generate_sample
 from ..common.dataloader import DataloaderProc
 from ..common import BASE_PATH
@@ -36,6 +37,7 @@ OUTPUT_PIPELINE = A.Compose([
 DEFAULT_NP_DTYPE = _to_np_dtype(dtypes.default_float)
 
 def load_single_file(file) -> dict[str, bytes]:
+  has_color, has_number, has_center, has_plate = 0, 0, 0, 0
   if file.startswith("fake:"):
     img = np.zeros((256, 512, 3), dtype=np.uint8)
     detected = 0
@@ -44,6 +46,23 @@ def load_single_file(file) -> dict[str, bytes]:
     number = 0
   elif file.startswith("syn:"):
     img, detected, keypoints, color, number = generate_sample(file)
+    has_color, has_number, has_center, has_plate = 1, 1, 1, 1
+  elif file.startswith("path:"):
+    img_file = file[5:]
+    img = cv2.imread(img_file, cv2.IMREAD_UNCHANGED)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    anno = get_annotation(img_file)
+    if anno.detected:
+      detected = 1
+      keypoints = [(anno.x * img.shape[1], (1 - anno.y) * img.shape[0]), (0, 0), (0, 0), (0, 0), (0, 0)]
+      color = 0
+      number = 0
+    else:
+      detected = 0
+      keypoints = [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]
+      color = 0
+      number = 0
+    has_center = 1
   else:
     raise ValueError("unknown file type")
 
@@ -71,7 +90,8 @@ def load_single_file(file) -> dict[str, bytes]:
   ybr = ybr / img.shape[0] * 2 - 1
 
   # numbers start from 2 but model starts from 1
-  number -= 1
+  if number != 0:
+    number -= 1
 
   # gate number based on detection
   if not detected:
@@ -85,9 +105,16 @@ def load_single_file(file) -> dict[str, bytes]:
   if not detected:
     xc = yc = xtl = ytl = xtr = ytr = xbl = ybl = xbr = ybr = 0
 
+  # if not detected we don't have center or plate, but we do have color and number which are 0
+  if not detected:
+    has_center = 0
+    has_plate = 0
+    has_color = 1
+    has_number = 1
+
   return {
     "x": img.tobytes(),
-    "y": np.array((color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr), dtype=DEFAULT_NP_DTYPE).tobytes(),
+    "y": np.array((color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, has_color, has_number, has_center, has_plate), dtype=DEFAULT_NP_DTYPE).tobytes(),
   }
 
 def get_train_files():
@@ -120,7 +147,9 @@ def get_train_files():
     return fake_files
   if getenv("REALFILES", 0):
     return real_files
-  return syn_files
+  if getenv("SYNFILES", 0):
+    return syn_files
+  return syn_files + real_files
 
 def run():
   cv2.setNumThreads(0)
@@ -130,11 +159,13 @@ def run():
 
 if __name__ == "__main__":
   files = get_train_files()
-  for file in files:
+  for file in files[::-1]:
     data = load_single_file(file)
-    img = np.frombuffer(data["x"], dtype=np.uint8)
+    img = np.frombuffer(data["x"], dtype=np.uint8).copy()
     img = img.reshape((256, 512, 3))
-    print(np.frombuffer(data["y"], dtype=DEFAULT_NP_DTYPE))
+    anno = np.frombuffer(data["y"], dtype=DEFAULT_NP_DTYPE)
+    print(anno)
+    cv2.circle(img, (int(((anno[2] + 1) / 2) * 512), int(((anno[3] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
     cv2.imshow("img", img)
     key = cv2.waitKey(0)
     if key == ord("q"):

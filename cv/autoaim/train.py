@@ -27,12 +27,17 @@ STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(pred: tuple[Tensor, ...], y: Tensor):
   y_color = y[:, 0].cast(dtypes.int32)
-  y_keypoints = y[:, 2:12]
   y_number = y[:, 1].cast(dtypes.int32)
+  y_center = y[:, 2:4]
+  y_plate = y[:, 4:12]
 
-  det_gate = y_color > 0
+  has_color = y[:, 12] > 0
+  has_number = y[:, 13] > 0
+  has_center = y[:, 14] > 0
+  has_plate = y[:, 15] > 0
 
-  keypoint_loss = masked_twohot_uncertainty_loss(pred[2], pred[3], y_keypoints, det_gate, 64, -2, 2)
+  center_loss = masked_twohot_uncertainty_loss(pred[2], pred[3], y_center, has_center, 64, -2, 2)
+  plate_loss = masked_twohot_uncertainty_loss(pred[4], pred[5], y_plate, has_plate, 64, -2, 2)
 
   # quality factor from center keypoint
   # if not hasattr(loss_fn, "x_arange"): setattr(loss_fn, "x_arange", Tensor.arange(512))
@@ -43,27 +48,25 @@ def loss_fn(pred: tuple[Tensor, ...], y: Tensor):
   # quality = (1 - point_dist.clamp(0, 1))
 
   # color loss
-  # target_cls = y_color.one_hot(4)
+  target_cls = y_color.one_hot(4)
   # target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 3), dim=1)
   # color_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
-  color_loss = pred[0].sparse_categorical_crossentropy(y_color)
+  color_loss = masked_cross_entropy(pred[0], target_cls, has_color)
 
 
   # number loss
-  # target_cls = y_number.one_hot(6)
+  target_cls = y_number.one_hot(6)
   # target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 5), dim=1)
   # number_loss = mal_loss(pred[11], target_cls, target_quality, gamma=1.5)
-  number_loss = pred[1].sparse_categorical_crossentropy(y_number)
+  number_loss = masked_cross_entropy(pred[1], target_cls, has_number)
 
-  return color_loss + keypoint_loss + number_loss
+  return center_loss + plate_loss + color_loss + number_loss
 
 @TinyJit
 def train_step(model, optim, lr_sched, switch_ema, x, y):
   optim.zero_grad()
 
-  yuv = rgb_to_yuv420_tensor(x)
-
-  pred = model(yuv)
+  pred = model(x)
   loss = loss_fn(pred, y)
 
   loss.backward()
@@ -95,11 +98,15 @@ def run():
 
   dataloader = Dataloader({
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-    "y": BatchDesc(shape=(12,), dtype=dtypes.default_float),
+    "y": BatchDesc(shape=(16,), dtype=dtypes.default_float),
   }, bs=BS, files_fn=get_train_files)
 
   model = Model()
   model_ema = Model()
+
+  parameters = get_parameters(model)
+  optim = CLaProp(parameters, weight_decay=0.1)
+  lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR, END_LR, EPOCHS, STEPS_PER_EPOCH)
 
   if (ckpt := getenv("CKPT", "")) != "":
     logger.info(f"loading checkpoint {BASE_PATH / 'intermediate' / f'model_{ckpt}.safetensors'}")
@@ -114,9 +121,10 @@ def run():
       logger.info(f"loading whole model")
       load_state_dict(model, state_dict, strict=False)
 
-  parameters = get_parameters(model)
-  optim = CLaProp(parameters, weight_decay=0.1)
-  lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR, END_LR, EPOCHS, STEPS_PER_EPOCH)
+    if getenv("CKPT_OPTIM"):
+      logger.info(f"loading optimizer {BASE_PATH / 'intermediate' / f'optim_{ckpt}.safetensors'}")
+      state_dict = safe_load(BASE_PATH / "intermediate" / f"optim_{ckpt}.safetensors")
+      load_state_dict(optim, state_dict, strict=False)
 
   switch_ema = SwitchEMA(model, model_ema, momentum=0.999)
 
