@@ -16,10 +16,6 @@ MODEL_VERSION = 5
 def pred(model, img):
   img = img.to(Device.DEFAULT)
   if img.ndim == 3: img = img.unsqueeze(0)
-  # if img.shape[3] == 3:
-  #   yuv = rgb_to_yuv420_tensor(img)
-  # else:
-  #   yuv = img
   return model(img).to("CPU")
 
 @dataclass
