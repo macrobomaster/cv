@@ -117,3 +117,31 @@ def masked_mdn_loss(y:Tensor, mu:Tensor, log_var:Tensor, pi:Tensor, temp:Tensor,
     loss = loss - entropy_reg * entropy
 
   return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
+
+def hinge_discriminator_loss(logits_real:Tensor, logits_fake:Tensor) -> Tensor:
+  real_loss = (1.0 - logits_real).relu().mean()
+  fake_loss = (1.0 + logits_fake).relu().mean()
+  return 0.5 * (real_loss + fake_loss)
+
+def _dft_matrix(n:int) -> tuple[Tensor, Tensor]:
+  x = Tensor.arange(n, dtype=dtypes.float32).reshape(n, 1)
+  y = Tensor.arange(n, dtype=dtypes.float32).reshape(1, n)
+  angle = (x @ y) * (-2 * math.pi / n)
+  return angle.cos(), angle.sin()
+def _complex_matmul(a_re:Tensor, a_im:Tensor, b_re:Tensor, b_im:Tensor) -> tuple[Tensor, Tensor]:
+  c_re = a_re@b_re - a_im@b_im
+  c_im = a_re@b_im + a_im@b_re
+  return c_re, c_im
+def dft_image(x:Tensor) -> Tensor:
+  b, c, h, w = x.shape
+  w_re, w_im = _dft_matrix(w)
+  x_re, x_im = _complex_matmul(x, Tensor.zeros_like(x), w_re, w_im)
+  w_re, w_im = _dft_matrix(h)
+  x_re, x_im = _complex_matmul(w_re, w_im, x_re, x_im)
+
+  # combine real and imaginary parts
+  x = Tensor.stack(x_re, x_im, dim=1)
+
+  # normalize
+  x = x / math.sqrt(h * w)
+  return x

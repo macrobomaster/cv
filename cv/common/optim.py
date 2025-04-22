@@ -39,9 +39,9 @@ class CLaProp(Optimizer):
   def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0):
     super().__init__(params, lr)
     self.b1, self.b2, self.eps, self.wd = b1, b2, eps, weight_decay
-    self.b1_t, self.b2_t = (Tensor.zeros((1,), dtype=dtypes.float32, device=self.device, requires_grad=False).contiguous() for _ in [b1, b2])
-    self.exp_avg = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous() for t in self.params]
-    self.exp_avg_sq = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous() for t in self.params]
+    self.b1_t, self.b2_t = (Tensor.zeros((1,), dtype=dtypes.float32, device=self.device, requires_grad=False).contiguous().realize() for _ in [b1, b2])
+    self.exp_avg = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous().realize() for t in self.params]
+    self.exp_avg_sq = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous().realize() for t in self.params]
 
   def schedule_step_with_grads(self, grads:list[Tensor]) -> list[Tensor]:
     self.b1_t.assign(self.b1 * self.b1_t + (1 - self.b1) * self.lr)
@@ -123,6 +123,8 @@ class Schedule:
     self.t = Tensor([0], requires_grad=False, dtype=dtypes.int32, device=device)
   def step(self):
     self.t.assign(self.t + 1).realize()
+  def get(self):
+    raise NotImplementedError
 
 class CosineSchedule(Schedule):
   def __init__(self, start:float, end:float, steps:int, device=None):
@@ -145,3 +147,11 @@ class ExpSchedule(Schedule):
       self.start * ((self.end / self.start) ** (self.t / self.steps)),
       self.end
     )
+
+class StepSchedule(Schedule):
+  def __init__(self, before:float, after:float, crossover:int, device=None):
+    super().__init__(device)
+    self.before, self.after, self.crossover = before, after, crossover
+
+  def get(self):
+    return (self.t <= self.crossover).where(self.before, self.after)
