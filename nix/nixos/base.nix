@@ -165,6 +165,7 @@
   services.openssh.enable = lib.mkForce true;
   users.users.root.openssh.authorizedKeys.keys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKPL+OWmcGo4IlL+LUz9uEgOH8hk0JIN3DXEV8sdgxPB wozeparrot"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAL3u79TnXMh24NP+ZI1DY/8WcjJZPasFkesfCQcn+R m"
   ];
   users.users.root.hashedPassword = "$y$j9T$zj/Hf6NsqCBGuD.Wt0ux0.$fvdcKDDnICCnYGhRGC.I/I0GW/BQNOezvQzNQ1RGUQ3";
 
