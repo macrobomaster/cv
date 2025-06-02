@@ -3,22 +3,23 @@ import math
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.nn.optim import Optimizer
-from tinygrad.helpers import dedup
+from tinygrad.helpers import dedup, FUSE_OPTIM
 from tinygrad.extra.lr_scheduler import LR_Scheduler
 from tinygrad.nn.state import get_parameters, get_state_dict
 
 class CLAMB(Optimizer):
-  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0, adam=False):
-    super().__init__(params, lr)
+  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0, adam=False, fused=FUSE_OPTIM):
+    super().__init__(params, lr, fused)
     self.b1, self.b2, self.eps, self.wd, self.adam = b1, b2, eps, weight_decay, adam
     self.b1_t, self.b2_t = (Tensor.ones((1,), dtype=dtypes.float32, device=self.device, requires_grad=False).contiguous() for _ in [b1, b2])
-    self.m = [Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous() for t in self.params]
-    self.v = [Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous() for t in self.params]
+    self.m = self._new_optim_param()
+    self.v = self._new_optim_param()
 
-  def schedule_step_with_grads(self, grads:list[Tensor]) -> list[Tensor]:
+  def _step(self, params:list[Tensor], grads:list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+    ret = []
     self.b1_t *= self.b1
     self.b2_t *= self.b2
-    for i, (t, g) in enumerate(zip(self.params, grads)):
+    for i, (t, g) in enumerate(zip(params, grads)):
       self.m[i].assign((self.b1 * self.m[i] + (1.0 - self.b1) * g).cast(t.dtype))
       self.v[i].assign((self.b2 * self.v[i] + (1.0 - self.b2) * (g * g)).cast(t.dtype))
       m_hat = self.m[i] / (1.0 - self.b1_t)
@@ -32,21 +33,22 @@ class CLAMB(Optimizer):
         r = Tensor.where(r1 > 0, Tensor.where(r2 > 0, r1 / r2, 1.0), 1.0)
       else:
         r = 1.0
-      t.assign((t.detach() - self.lr * r * up).cast(t.dtype))
-    return [self.b1_t, self.b2_t] + self.m + self.v
+      ret.append((t.detach() - self.lr * r * up).cast(t.dtype))
+    return ret, [self.b1_t, self.b2_t] + self.m + self.v
 
 class CLaProp(Optimizer):
-  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0):
-    super().__init__(params, lr)
+  def __init__(self, params:list[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0, fused=FUSE_OPTIM):
+    super().__init__(params, lr, fused)
     self.b1, self.b2, self.eps, self.wd = b1, b2, eps, weight_decay
     self.b1_t, self.b2_t = (Tensor.zeros((1,), dtype=dtypes.float32, device=self.device, requires_grad=False).contiguous().realize() for _ in [b1, b2])
-    self.exp_avg = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous().realize() for t in self.params]
-    self.exp_avg_sq = [Tensor.zeros_like(t, dtype=dtypes.float32, device=t.device, requires_grad=False).contiguous().realize() for t in self.params]
+    self.exp_avg = [t.realize() for t in self._new_optim_param()]
+    self.exp_avg_sq = [t.realize() for t in self._new_optim_param()]
 
-  def schedule_step_with_grads(self, grads:list[Tensor]) -> list[Tensor]:
+  def _step(self, params:list[Tensor], grads:list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+    ret = []
     self.b1_t.assign(self.b1 * self.b1_t + (1 - self.b1) * self.lr)
     self.b2_t.assign(self.b2 * self.b2_t + (1 - self.b2))
-    for i, (t, g) in enumerate(zip(self.params, grads)):
+    for i, (t, g) in enumerate(zip(params, grads)):
       self.exp_avg_sq[i].assign(self.b2 * self.exp_avg_sq[i] + (1 - self.b2) * g.square())
 
       bias_correction1 = self.b1_t / self.lr
@@ -60,8 +62,8 @@ class CLaProp(Optimizer):
       cmask = (self.exp_avg[i] * g > 0).cast(t.dtype)
       cmask = cmask / cmask.mean().clamp(min_=1e-3)
 
-      t.assign((t.detach() - step_size * self.exp_avg[i] * cmask - self.lr * self.wd * t.detach()))
-    return [self.b1_t, self.b2_t] + self.exp_avg + self.exp_avg_sq
+      ret.append((t.detach() - step_size * self.exp_avg[i] * cmask - self.lr * self.wd * t.detach()))
+    return ret, [self.b1_t, self.b2_t] + self.exp_avg + self.exp_avg_sq
 
 class GrokfastEMA:
   def __init__(self, params:list[Tensor], momentum, factor):

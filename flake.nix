@@ -5,7 +5,14 @@
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
 
-    tinygrad.url = "github:wozeparrot/tinygrad-nix";
+    tinygrad-src = {
+      url = "github:wozeparrot/tinygrad/local_remote_compile";
+      flake = false;
+    };
+    tinygrad = {
+      url = "github:wozeparrot/tinygrad-nix";
+      inputs.tinygrad.follows = "tinygrad-src";
+    };
 
     jetpack-nixos.url = "github:tiiuae/jetpack-nixos/final-stretch";
     # jetpack-nixos.url = "github:anduril/jetpack-nixos";

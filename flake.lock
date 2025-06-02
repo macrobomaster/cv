@@ -60,11 +60,11 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1741793088,
-        "narHash": "sha256-rHwJ9EVWg9lf4GSt+EhHhjkRMIsMMsCIAhUFHBdGmc0=",
+        "lastModified": 1747039537,
+        "narHash": "sha256-RC27FVnlwM7so1lMRP7mnZcs+twcMbc7Z/a0P3cX94c=",
         "owner": "tiiuae",
         "repo": "jetpack-nixos",
-        "rev": "0fcd5ab25bc8801e111204d98b6b9b9ab78a9649",
+        "rev": "956a952392cd03243ff380e09d464021f8e6c6b7",
         "type": "github"
       },
       "original": {
@@ -124,11 +124,11 @@
     },
     "nixpkgs_4": {
       "locked": {
-        "lastModified": 1740019556,
-        "narHash": "sha256-vn285HxnnlHLWnv59Og7muqECNMS33mWLM14soFIv2g=",
+        "lastModified": 1746397377,
+        "narHash": "sha256-5oLdRa3vWSRbuqPIFFmQBGGUqaYZBxX+GGtN9f/n4lU=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "dad564433178067be1fbdfcce23b546254b6d641",
+        "rev": "ed30f8aba41605e3ab46421e3dcb4510ec560ff8",
         "type": "github"
       },
       "original": {
@@ -144,7 +144,8 @@
         "flake-utils": "flake-utils",
         "jetpack-nixos": "jetpack-nixos",
         "nixpkgs": "nixpkgs_3",
-        "tinygrad": "tinygrad"
+        "tinygrad": "tinygrad",
+        "tinygrad-src": "tinygrad-src"
       }
     },
     "systems": {
@@ -181,14 +182,16 @@
       "inputs": {
         "flake-utils": "flake-utils_2",
         "nixpkgs": "nixpkgs_4",
-        "tinygrad": "tinygrad_2"
+        "tinygrad": [
+          "tinygrad-src"
+        ]
       },
       "locked": {
-        "lastModified": 1744676809,
-        "narHash": "sha256-IAOBOXro98sFaa5VTFA1qzVuWjjWfPz73ldK2mYgXsE=",
+        "lastModified": 1748586719,
+        "narHash": "sha256-cN6H+odXkBGu26DT6TcfhRtbXWNWsni991HGZ2niRTo=",
         "owner": "wozeparrot",
         "repo": "tinygrad-nix",
-        "rev": "f3fb57accd0c05b9337de935722f67adfe254229",
+        "rev": "ec65cec1e581f5517054a60e4319428735104bbe",
         "type": "github"
       },
       "original": {
@@ -197,18 +200,19 @@
         "type": "github"
       }
     },
-    "tinygrad_2": {
+    "tinygrad-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1744665082,
-        "narHash": "sha256-Zny2FNce2CKAPvgwARxGhIn0IGNXu3CFRNwr/T+5Slw=",
-        "owner": "tinygrad",
+        "lastModified": 1748570513,
+        "narHash": "sha256-TTcgkpoygVRaij4XRAQa1n0Iku2Mt5conNuO9LHzsxs=",
+        "owner": "wozeparrot",
         "repo": "tinygrad",
-        "rev": "23a95dd84d917f388db33f66423231f3e3ae5761",
+        "rev": "6b1057539265d4c28a33038d8ee5a2a4843aac1e",
         "type": "github"
       },
       "original": {
-        "owner": "tinygrad",
+        "owner": "wozeparrot",
+        "ref": "local_remote_compile",
         "repo": "tinygrad",
         "type": "github"
       }
