@@ -147,7 +147,12 @@ class DataloaderProc:
         data = self.load_single_fn(file)
 
         # write to shared memory
-        for name, t in inflight[num].items():
-          t[idx].contiguous().realize().lazydata.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
+        name = ""
+        try:
+          for name, t in inflight[num].items():
+            t[idx].contiguous().realize().lazydata.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
+        except Exception as e:
+          logger.error(f"failed to load {file}, {name}")
+          raise e
 
         pull_push.push(num)
