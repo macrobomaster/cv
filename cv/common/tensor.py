@@ -79,14 +79,14 @@ def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2) -> Tensor
   loss = ce * ((1 - pt) ** gamma) * alpha_
   return loss.mean()
 
-def mal_loss(pred:Tensor, y:Tensor, quality:Tensor, gamma:float=2) -> Tensor:
+def masked_mal_loss(pred:Tensor, y:Tensor, quality:Tensor, mask:Tensor, gamma:float=2) -> Tensor:
   target = y.where(quality.detach() ** gamma, 0)
-  ce = pred.binary_crossentropy_logits(target, reduction="none")
+  ce = pred.binary_crossentropy_logits(target, reduction="none").contiguous().contiguous_backward()
   loss = ce * y.where(1, pred.sigmoid().detach() ** gamma)
-  return loss.mean()
+  loss = loss.sum(-1)
+  return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
 
-def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor, reduction:str="mean") -> Tensor:
-  assert reduction == "mean", "only mean reduction is supported"
+def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor) -> Tensor:
   ce = pred.cross_entropy(y, reduction="none")
   return mask.where(ce, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
 
