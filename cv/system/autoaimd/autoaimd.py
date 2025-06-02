@@ -66,6 +66,7 @@ def run():
       model_out = model_pred(None, framet).tolist()[0]
 
       model_out_iter = iter(model_out)
+      detm, detp = tuple(itertools.islice(model_out_iter, 2))
       colorm, colorp = tuple(itertools.islice(model_out_iter, 2))
       numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
       plate_mu = list(itertools.islice(model_out_iter, 10))
@@ -89,6 +90,8 @@ def run():
 
       pub.send("autoaim", {
         "valid": valid,
+        "detm": detm,
+        "detp": detp,
         "colorm": colorm,
         "colorp": colorp,
         "numberm": numberm,
