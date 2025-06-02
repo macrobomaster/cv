@@ -12,7 +12,7 @@ MODEL = getenv("MODEL", "autoaim")
 PROCS = [
   SupervisedProcess("train", f"cv.{MODEL}.train")
 ]
-PROCS += [SupervisedProcess(f"dl_{i}", f"cv.{MODEL}.data") for i in range(DATAPROC)]
+# PROCS += [SupervisedProcess(f"dl_{i}", f"cv.{MODEL}.data") for i in range(DATAPROC)]
 
 if __name__ == "__main__":
   unblock_stdout()
