@@ -8,7 +8,6 @@ from tinygrad.device import Device
 from tinygrad.helpers import tqdm
 
 from ..common import BASE_PATH
-from ..common.image import rgb_to_yuv420_tensor
 
 MODEL_VERSION = 5
 

@@ -2,7 +2,7 @@ import time
 
 from tinygrad.device import Device
 from tinygrad.tensor import Tensor
-from tinygrad.helpers import getenv, GlobalCounters
+from tinygrad.helpers import getenv, GlobalCounters, trange
 from tinygrad.dtype import dtypes
 from tinygrad.engine.jit import TinyJit
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_save
@@ -10,64 +10,65 @@ import wandb
 
 from ..system.core.logging import logger
 from ..common.dataloader import BatchDesc, Dataloader
-from ..common.tensor import twohot, masked_cross_entropy, mal_loss, masked_mdn_loss, masked_twohot_uncertainty_loss
-from ..common.optim import CLaProp, CosineWarmupLR, Schedule, CosineSchedule, ExpSchedule, grad_clip_norm, SwitchEMA
-from ..common.image import rgb_to_yuv420_tensor
+from ..common.tensor import masked_cross_entropy, masked_mal_loss, masked_twohot_uncertainty_loss
+from ..common.optim import CLaProp, CosineWarmupLR, grad_clip_norm, SwitchEMA
 from .common import BASE_PATH
 from .model import Model
-from .data import get_train_files
+from .data import get_train_files, load_batch
 
-BS = 256
+BS = 512
 WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
-END_LR = 1e-4
+END_LR = 1e-5
 EPOCHS = 20
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(pred: tuple[Tensor, ...], y: Tensor):
-  y_color = y[:, 0].cast(dtypes.int32)
-  y_number = y[:, 1].cast(dtypes.int32)
-  y_center = y[:, 2:4]
-  y_plate = y[:, 4:12]
+def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
+  y_det = y[:, 0].cast(dtypes.int32)
+  y_color = y[:, 1].cast(dtypes.int32)
+  y_number = y[:, 2].cast(dtypes.int32)
+  y_center = y[:, 3:5]
+  y_plate = y[:, 5:13]
 
-  has_color = y[:, 12] > 0
-  has_number = y[:, 13] > 0
-  has_center = y[:, 14] > 0
-  has_plate = y[:, 15] > 0
+  has_det = y[:, 13] > 0
+  has_color = y[:, 14] > 0
+  has_number = y[:, 15] > 0
+  has_center = y[:, 16] > 0
+  has_plate = y[:, 17] > 0
 
-  center_loss = masked_twohot_uncertainty_loss(pred[2], pred[3], y_center, has_center, 64, -2, 2)
-  plate_loss = masked_twohot_uncertainty_loss(pred[4], pred[5], y_plate, has_plate, 64, -2, 2)
+  center_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_center, has_center, model.heads.center_head.bins, model.heads.center_head.low, model.heads.center_head.high)
+  plate_loss = masked_twohot_uncertainty_loss(pred[5], pred[6], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
 
   # quality factor from center keypoint
-  # if not hasattr(loss_fn, "x_arange"): setattr(loss_fn, "x_arange", Tensor.arange(512))
-  # if not hasattr(loss_fn, "y_arange"): setattr(loss_fn, "y_arange", Tensor.arange(256))
-  # point_xc = (pred[1].softmax() @ getattr(loss_fn, "x_arange")).float().mul(2).sub(256) / 512
-  # point_yc = (pred[2].softmax() @ getattr(loss_fn, "y_arange")).float().mul(2).sub(128) / 256
-  # point_dist = (point_xc.sub(y_xc / 512).square() + point_yc.sub(y_yc / 256).square()).sqrt()
-  # quality = (1 - point_dist.clamp(0, 1))
+  if not hasattr(loss_fn, "center_twohot_weights"):
+    setattr(loss_fn, "center_twohot_weights", Tensor.linspace(model.heads.center_head.low, model.heads.center_head.high, model.heads.center_head.bins).reshape(1, 1, -1))
+  point_c = pred[3].softmax().mul(getattr(loss_fn, "center_twohot_weights")).sum(-1)
+  point_dist = point_c.square().sum(-1).sqrt()
+  quality = (1 - point_dist.clamp(0, 1))
+
+  # det loss
+  target_cls = y_det.one_hot(2)
+  target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 1), dim=1)
+  det_loss = masked_mal_loss(pred[0], target_cls, target_quality, has_det, gamma=1.5)
 
   # color loss
   target_cls = y_color.one_hot(4)
-  # target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 3), dim=1)
-  # color_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
-  color_loss = masked_cross_entropy(pred[0], target_cls, has_color)
-
+  color_loss = masked_cross_entropy(pred[1], target_cls, has_color)
 
   # number loss
   target_cls = y_number.one_hot(6)
-  # target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 5), dim=1)
-  # number_loss = mal_loss(pred[11], target_cls, target_quality, gamma=1.5)
-  number_loss = masked_cross_entropy(pred[1], target_cls, has_number)
+  number_loss = masked_cross_entropy(pred[2], target_cls, has_number)
 
-  return center_loss + plate_loss + color_loss + number_loss
+  return det_loss + center_loss + plate_loss + color_loss + number_loss
 
 @TinyJit
-def train_step(model, optim, lr_sched, switch_ema, x, y):
+def train_step(model, optim, lr_sched, switch_ema) -> Tensor:
   optim.zero_grad()
 
+  x, y = load_batch(BS)
   pred = model(x)
-  loss = loss_fn(pred, y)
+  loss = loss_fn(model, pred, y)
 
   loss.backward()
 
@@ -78,7 +79,7 @@ def train_step(model, optim, lr_sched, switch_ema, x, y):
 
   switch_ema.update()
 
-  return loss.float(), global_norm.float()
+  return Tensor.cat(loss.float().reshape(1), global_norm.float().reshape(1), optim.lr.float().reshape(1))
 
 def run():
   Tensor.no_grad = False
@@ -96,16 +97,11 @@ def run():
       "steps_per_epoch": STEPS_PER_EPOCH,
     })
 
-  dataloader = Dataloader({
-    "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-    "y": BatchDesc(shape=(16,), dtype=dtypes.default_float),
-  }, bs=BS, files_fn=get_train_files)
-
   model = Model()
   model_ema = Model()
 
   parameters = get_parameters(model)
-  optim = CLaProp(parameters, weight_decay=0.1)
+  optim = CLaProp(parameters, weight_decay=0.01)
   lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR, END_LR, EPOCHS, STEPS_PER_EPOCH)
 
   if (ckpt := getenv("CKPT", "")) != "":
@@ -130,26 +126,19 @@ def run():
 
   steps = 0
   for epoch in range(EPOCHS):
-    dataloader.load()
-    i, d = 0, dataloader.next(Device.DEFAULT)
-    while d is not None:
+    for i in range(STEPS_PER_EPOCH):
       st = time.perf_counter()
       GlobalCounters.reset()
 
-      loss, global_norm = train_step(model, optim, lr_sched, switch_ema, *d[:-1])
+      out = train_step(model, optim, lr_sched, switch_ema)
       pt = time.perf_counter()
 
-      try: next_d = dataloader.next(Device.DEFAULT)
-      except StopIteration: next_d = None
-      dt = time.perf_counter()
-
-      lr = optim.lr.item()
-      loss, global_norm = loss.item(), global_norm.item()
+      loss, global_norm, lr = out.tolist()
       at = time.perf_counter()
 
       # logging
       logger.info(
-        f"{i:5} {((at - st)) * 1000.0:7.2f} ms step, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms data, {(at - dt) * 1000.0:7.2f} ms accel, "
+          f"{epoch:3} {i:5}/{STEPS_PER_EPOCH} {((at - st)) * 1000.0:7.2f} ms step, {(pt - st) * 1000.0:7.2f} ms python, {(at - pt) * 1000.0:7.2f} ms accel, "
         f"{loss:11.6f} loss, {global_norm:11.6f} global_norm, {lr:.6f} lr, "
         f"{GlobalCounters.mem_used / 1e9:7.2f} GB used, {GlobalCounters.mem_used * 1e-9 / (at - st):9.2f} GB/s, {GlobalCounters.global_ops * 1e-9 / (at - st):9.2f} GFLOPS"
       )
@@ -157,12 +146,11 @@ def run():
       if getenv("WANDB", 0):
         wandb.log({
           "epoch": epoch + (i + 1) / STEPS_PER_EPOCH,
-          "step_time": at - st, "python_time": pt - st, "data_time": dt - pt, "accel_time": at - dt,
+          "step_time": at - st, "python_time": pt - st, "accel_time": at - pt,
           "loss": loss, "global_norm": global_norm, "lr": lr,
           "gb": GlobalCounters.mem_used / 1e9, "gbps": GlobalCounters.mem_used * 1e-9 / (at - st), "gflops": GlobalCounters.global_ops * 1e-9 / (at - st)
         })
 
-      d, next_d = next_d, None
       i += 1
       steps += 1
 

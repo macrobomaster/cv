@@ -293,11 +293,16 @@ class Backbone(FusedBlock):
 
 class Decoder:
   def __init__(self, cstage:list[int], sideband:int, cout:int, blocks:int, dropout:float=0.0):
-    self.sb_norm = nn.RMSNorm(cstage[-1] * sideband)
-    self.ffn = FFN(cstage[-1] * sideband, cout, cout, exp=2, blocks=blocks, norm=True, dropout=dropout)
+    self.sideband_emb = nn.Linear(cstage[-1] * sideband, cout, bias=False)
+    self.sideband_norm = nn.RMSNorm(cout)
 
-  def __call__(self, x0:Tensor, x1:Tensor, x2:Tensor, x3:Tensor, sb:Tensor) -> Tensor:
-    x = self.sb_norm(sb)
+    self.ffn = FFN(cout, cout, cout, exp=2, blocks=blocks, norm=True, dropout=dropout)
+
+  def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
+    sb = self.sideband_norm(self.sideband_emb(features[-1]))
+
+    x = sb
+
     return self.ffn(x)
 
 class CLSHead:
@@ -327,7 +332,9 @@ class THRegHead:
     log_var = log_var.reshape(-1, self.outputs).tanh().mul(14)
 
     if not Tensor.training:
-      mu = logits.softmax().mul(Tensor.linspace(self.low, self.high, self.bins).reshape(1, 1, -1)).sum(-1)
+      if not hasattr(self, "twohot_weights"):
+        self.twohot_weights = Tensor.linspace(self.low, self.high, self.bins).reshape(1, 1, -1)
+      mu = logits.softmax().mul(self.twohot_weights).sum(-1)
       var = log_var.exp()
 
       mu = mu.flatten(1)
@@ -339,21 +346,23 @@ class THRegHead:
 
 class Heads:
   def __init__(self, in_dim:int, dropout:float=0.0):
+    self.det_head = CLSHead(in_dim, 2, 16, dropout=dropout)
     self.color_head = CLSHead(in_dim, 4, 32, dropout=dropout)
     self.number_head = CLSHead(in_dim, 6, 32, dropout=dropout)
     self.center_head = THRegHead(in_dim, 2, 64, 64, -2, 2, dropout=dropout)
     self.plate_head = THRegHead(in_dim, 8, 128, 64, -2, 2, dropout=dropout)
 
   def __call__(self, f:Tensor):
+    det = self.det_head(f)
     color = self.color_head(f)
     number = self.number_head(f)
     center_logits_mu, center_log_var = self.center_head(f)
     plate_logits_mu, plate_log_var = self.plate_head(f)
 
     if not Tensor.training:
-      return Tensor.cat(color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var, dim=1)
+      return Tensor.cat(det, color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var, dim=1)
     else:
-      return color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var
+      return det, color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var
 
 class Model(FusedBlock):
   def __init__(self, dim:int=512, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 6, 2], sideband:int=4, dropout:float=0.1):
@@ -363,7 +372,7 @@ class Model(FusedBlock):
 
   def __call__(self, img:Tensor):
     xs = self.backbone(img)
-    f = self.decoder(*xs)
+    f = self.decoder(xs)
     return self.heads(f)
 
   def fuse(self):

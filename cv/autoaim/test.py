@@ -5,7 +5,6 @@ from tinygrad.dtype import dtypes
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from tinygrad.helpers import GlobalCounters, getenv
 import cv2
-import numpy as np
 
 from .model import Model
 from .common import pred
@@ -41,6 +40,7 @@ if __name__ == "__main__":
     model_out = pred(model, Tensor(img, device="NPY")).tolist()[0]
     print(model_out)
     model_out_iter = iter(model_out)
+    detm, detp = tuple(itertools.islice(model_out_iter, 2))
     colorm, colorp = tuple(itertools.islice(model_out_iter, 2))
     numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
     center_mu = tuple(itertools.islice(model_out_iter, 2))
@@ -56,8 +56,9 @@ if __name__ == "__main__":
       numberm += 1
 
     # draw the annotation
-    cv2.putText(img, f"{colorm}: {colorp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    cv2.putText(img, f"{numberm}: {numberp:.3f}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    cv2.putText(img, f"{detm}: {detp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    cv2.putText(img, f"{colorm}: {colorp:.3f}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    cv2.putText(img, f"{numberm}: {numberp:.3f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     # if colorm != "none" and colorp > 0.0:
     if True:
       kp_img_pos = (int(((center_mu[0] + 1) / 2) * 512), int(((center_mu[1] + 1) / 2) * 256))
