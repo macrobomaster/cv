@@ -37,7 +37,7 @@ twohot_bins = {}
 def twohot(x:Tensor, bins:int, low:float, high:float) -> Tensor:
   global twohot_bins
   if bins not in twohot_bins:
-    twohot_bins[bins, low, high] = Tensor.linspace(low, high, bins)
+    twohot_bins[bins, low, high] = Tensor.linspace(low, high, bins, device=x.device)
   buckets = twohot_bins[bins, low, high]
 
   below = (buckets <= x[..., None]).cast(dtypes.int32).sum(-1) - 1

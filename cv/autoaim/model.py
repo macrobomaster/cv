@@ -333,7 +333,7 @@ class THRegHead:
 
     if not Tensor.training:
       if not hasattr(self, "twohot_weights"):
-        self.twohot_weights = Tensor.linspace(self.low, self.high, self.bins).reshape(1, 1, -1)
+        self.twohot_weights = Tensor.linspace(self.low, self.high, self.bins, device=x.device).reshape(1, 1, -1)
       mu = logits.softmax().mul(self.twohot_weights).sum(-1)
       var = log_var.exp()
 

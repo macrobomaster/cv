@@ -125,6 +125,7 @@
                   })
                   rerun-sdk
                   gymnasium
+                  z3-solver
                 ]
                 ++ common-python-packages p;
               python = pkgs-x86_64-linux.python312;

@@ -1,22 +1,22 @@
 import time
 
-from tinygrad.device import Device
 from tinygrad.tensor import Tensor
-from tinygrad.helpers import getenv, GlobalCounters, trange
+from tinygrad.helpers import getenv, GlobalCounters
 from tinygrad.dtype import dtypes
 from tinygrad.engine.jit import TinyJit
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_save
+from tinygrad.device import Device
 import wandb
 
 from ..system.core.logging import logger
-from ..common.dataloader import BatchDesc, Dataloader
 from ..common.tensor import masked_cross_entropy, masked_mal_loss, masked_twohot_uncertainty_loss
 from ..common.optim import CLaProp, CosineWarmupLR, grad_clip_norm, SwitchEMA
 from .common import BASE_PATH
 from .model import Model
 from .data import get_train_files, load_batch
 
-BS = 512
+GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
+BS = 512 * len(GPUS)
 WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
@@ -42,7 +42,7 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
 
   # quality factor from center keypoint
   if not hasattr(loss_fn, "center_twohot_weights"):
-    setattr(loss_fn, "center_twohot_weights", Tensor.linspace(model.heads.center_head.low, model.heads.center_head.high, model.heads.center_head.bins).reshape(1, 1, -1))
+    setattr(loss_fn, "center_twohot_weights", Tensor.linspace(model.heads.center_head.low, model.heads.center_head.high, model.heads.center_head.bins, device=y.device).reshape(1, 1, -1))
   point_c = pred[3].softmax().mul(getattr(loss_fn, "center_twohot_weights")).sum(-1)
   point_dist = point_c.square().sum(-1).sqrt()
   quality = (1 - point_dist.clamp(0, 1))
@@ -67,6 +67,7 @@ def train_step(model, optim, lr_sched, switch_ema) -> Tensor:
   optim.zero_grad()
 
   x, y = load_batch(BS)
+  x, y = x.shard_(GPUS, axis=0), y.shard_(GPUS, axis=0)
   pred = model(x)
   loss = loss_fn(model, pred, y)
 
@@ -77,7 +78,7 @@ def train_step(model, optim, lr_sched, switch_ema) -> Tensor:
   optim.step()
   lr_sched.step()
 
-  switch_ema.update()
+  # switch_ema.update()
 
   return Tensor.cat(loss.float().reshape(1), global_norm.float().reshape(1), optim.lr.float().reshape(1))
 
@@ -98,7 +99,9 @@ def run():
     })
 
   model = Model()
+  for _, x in get_state_dict(model).items(): x.to_(GPUS)
   model_ema = Model()
+  for _, x in get_state_dict(model_ema).items(): x.to_(GPUS)
 
   parameters = get_parameters(model)
   optim = CLaProp(parameters, weight_decay=0.01)
@@ -122,7 +125,7 @@ def run():
       state_dict = safe_load(BASE_PATH / "intermediate" / f"optim_{ckpt}.safetensors")
       load_state_dict(optim, state_dict, strict=False)
 
-  switch_ema = SwitchEMA(model, model_ema, momentum=0.999)
+  switch_ema = SwitchEMA(model, model_ema, EPOCHS, STEPS_PER_EPOCH, momentum=0.999)
 
   steps = 0
   for epoch in range(EPOCHS):
@@ -153,8 +156,6 @@ def run():
 
       i += 1
       steps += 1
-
-    switch_ema.switch()
 
     # save intermediate model
     safe_save(get_state_dict(model), str(BASE_PATH / f"intermediate/model_{epoch}.safetensors"))

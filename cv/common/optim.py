@@ -76,7 +76,9 @@ class GrokfastEMA:
       p.grad.assign(p.grad + t * self.factor)
 
 class SwitchEMA:
-  def __init__(self, model, ema_model, momentum=0.999):
+  def __init__(self, model, ema_model, epochs:int, steps_per_epoch:int, momentum:float=0.999):
+    self.epoch_counter = Tensor([0], requires_grad=False, device=get_parameters(model)[0].device)
+    self.epochs, self.steps_per_epoch = epochs, steps_per_epoch
     self.momentum = momentum
     self.model_params = {k:v for k,v in get_state_dict(model).items() if v.requires_grad}
     ema_state_dict = get_state_dict(ema_model)
@@ -110,10 +112,12 @@ class CosineWarmupLR(LR_Scheduler):
     ).cast(self.optimizer.lr.dtype)
 
 def grad_clip_norm(optim:Optimizer, max_norm:float=1.0):
-  global_norm = Tensor([0.0], dtype=dtypes.float32, device=optim.device)
+  global_norm = None
   for p in optim.params:
     if p.grad is not None:
-      global_norm += p.grad.cast(dtypes.float32).square().sum()
+      norm = p.grad.cast(dtypes.float32).square().sum()
+      if global_norm is None: global_norm = norm
+      else: global_norm += norm
   global_norm = global_norm.sqrt().contiguous()
   for p in optim.params:
     if p.grad is not None:
