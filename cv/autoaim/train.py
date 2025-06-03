@@ -16,12 +16,12 @@ from .model import Model
 from .data import get_train_files, load_batch
 
 GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
-BS = 512 * len(GPUS)
+BS = 256 * len(GPUS)
 WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 20
+EPOCHS = 100
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
@@ -66,7 +66,7 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
 def train_step(model, optim, lr_sched, switch_ema) -> Tensor:
   optim.zero_grad()
 
-  x, y = load_batch(BS)
+  x, y = load_batch(BS, GPUS)
   x, y = x.shard_(GPUS, axis=0), y.shard_(GPUS, axis=0)
   pred = model(x)
   loss = loss_fn(model, pred, y)
