@@ -8,5 +8,8 @@
 2. enter nix shell
 `nix develop .`
 
-3. run on pc
-`PC=1 WEBCAM=1 python3 -m cv.system`
+3. create system dir
+`mkdir -p sys`
+
+4. run on pc
+`PC=1 WEBCAM=0 python3 -m cv.system`
