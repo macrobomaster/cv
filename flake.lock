@@ -60,11 +60,11 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1741793088,
-        "narHash": "sha256-rHwJ9EVWg9lf4GSt+EhHhjkRMIsMMsCIAhUFHBdGmc0=",
+        "lastModified": 1747039537,
+        "narHash": "sha256-RC27FVnlwM7so1lMRP7mnZcs+twcMbc7Z/a0P3cX94c=",
         "owner": "tiiuae",
         "repo": "jetpack-nixos",
-        "rev": "0fcd5ab25bc8801e111204d98b6b9b9ab78a9649",
+        "rev": "956a952392cd03243ff380e09d464021f8e6c6b7",
         "type": "github"
       },
       "original": {

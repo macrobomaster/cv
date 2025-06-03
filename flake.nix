@@ -188,88 +188,107 @@
       };
 
       nixosConfigurations = {
-        orin-nano-installer = pkgs-x86_64-linux.pkgsCross.aarch64-multiplatform.nixos {
-          imports = [
-            "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
-            inputs.jetpack-nixos.nixosModules.default
-          ];
-          boot.kernelPatches = [
+        orin-nano-installer = lib.nixosSystem {
+          modules = [
             {
-              name = "config";
-              patch = null;
-              extraConfig = ''
-                ARM64_PMEM y
-                PCI_TEGRA y
-                PCIE_TEGRA194 y
-                PCIE_TEGRA194_HOST y
-                BLK_DEV_NVME y
-                NVME_CORE y
-                FB_SIMPLE y
-              '';
+              imports = [
+                "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
+                inputs.jetpack-nixos.nixosModules.default
+              ];
+
+              nixpkgs = {
+                buildPlatform = "x86_64-linux";
+                hostPlatform = "aarch64-linux";
+              };
+
+              boot.kernelPatches = [
+                {
+                  name = "config";
+                  patch = null;
+                  extraConfig = ''
+                    ARM64_PMEM y
+                    PCI_TEGRA y
+                    PCIE_TEGRA194 y
+                    PCIE_TEGRA194_HOST y
+                    BLK_DEV_NVME y
+                    NVME_CORE y
+                    FB_SIMPLE y
+                  '';
+                }
+              ];
+              boot.supportedFilesystems = {
+                zfs = lib.mkForce false;
+              };
+              boot.initrd.supportedFilesystems = {
+                zfs = lib.mkForce false;
+              };
+              hardware.enableAllHardware = lib.mkForce false;
+              hardware.nvidia-jetpack = {
+                enable = true;
+                som = "orin-nano";
+                carrierBoard = "devkit";
+              };
             }
           ];
-          boot.supportedFilesystems = {
-            zfs = lib.mkForce false;
-          };
-          boot.initrd.supportedFilesystems = {
-            zfs = lib.mkForce false;
-          };
-          hardware.enableAllHardware = lib.mkForce false;
-          hardware.nvidia-jetpack = {
-            enable = true;
-            som = "orin-nano";
-            carrierBoard = "devkit";
-          };
         };
-        orin-nano = pkgs-aarch64-linux.nixos {
-          _module.args = { inherit inputs; };
-          nixpkgs.overlays = common_overlays;
-
-          imports = [
-            inputs.jetpack-nixos.nixosModules.default
-            inputs.disko.nixosModules.disko
-            ./nix/nixos/base.nix
-            ./nix/nixos/disk.nix
-          ];
-
-          boot.kernelPatches = [
+        orin-nano = lib.nixosSystem {
+          modules = [
             {
-              name = "config";
-              patch = null;
-              extraConfig = ''
-                ARM64_PMEM y
-                PCI_TEGRA y
-                PCIE_TEGRA194 y
-                PCIE_TEGRA194_HOST y
-                BLK_DEV_NVME y
-                NVME_CORE y
-                FB_SIMPLE y
-                IWLWIFI m
-              '';
+              _module.args = { inherit inputs; };
+
+              nixpkgs = {
+                buildPlatform = "aarch64-linux";
+                hostPlatform = "aarch64-linux";
+                overlays = common_overlays;
+              };
+
+              imports = [
+                inputs.jetpack-nixos.nixosModules.default
+                inputs.disko.nixosModules.disko
+                ./nix/nixos/base.nix
+                ./nix/nixos/disk.nix
+              ];
+
+              boot.kernelPatches = [
+                {
+                  name = "config";
+                  patch = null;
+                  extraConfig = ''
+                    ARM64_PMEM y
+                    PCI_TEGRA y
+                    PCIE_TEGRA194 y
+                    PCIE_TEGRA194_HOST y
+                    BLK_DEV_NVME y
+                    NVME_CORE y
+                    FB_SIMPLE y
+                    IWLWIFI m
+                  '';
+                }
+              ];
+              boot.initrd.availableKernelModules = [
+                "nvme"
+                "f2fs"
+                "pcie-tegra194"
+              ];
+              boot.supportedFilesystems = [
+                "f2fs"
+                "vfat"
+              ];
+              boot.loader.systemd-boot.enable = true;
+              boot.loader.efi.canTouchEfiVariables = true;
+
+              hardware.graphics.enable = true;
+              hardware.nvidia-jetpack = {
+                enable = true;
+                modesetting.enable = true;
+                som = "orin-nano";
+                carrierBoard = "devkit";
+              };
+
+              networking.hostName = "orin-nano";
+              system.stateVersion = "25.05";
             }
           ];
-          boot.initrd.availableKernelModules = [
-            "nvme"
-            "f2fs"
-            "pcie-tegra194"
-          ];
-          boot.supportedFilesystems = [
-            "f2fs"
-            "vfat"
-          ];
-          boot.loader.systemd-boot.enable = true;
-          boot.loader.efi.canTouchEfiVariables = true;
-
-          hardware.graphics.enable = true;
-          hardware.nvidia-jetpack = {
-            enable = true;
-            modesetting.enable = true;
-            som = "orin-nano";
-            carrierBoard = "devkit";
-          };
-
-          networking.hostName = "orin-nano";
-          system.stateVersion = "25.05";
         };
       };
     };
