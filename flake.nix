@@ -124,7 +124,6 @@
             in
             with pkgs-x86_64-linux;
             [
-              (python.withPackages python-packages)
               aravis
               aravis.lib
               gobject-introspection
@@ -136,6 +135,7 @@
                 #!/usr/bin/env bash
                 ${rerun}/bin/rerun --web-viewer
               '')
+              (python.withPackages python-packages)
             ];
 
           shellHook = ''

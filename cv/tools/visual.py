@@ -27,7 +27,7 @@ class HistoryTracker:
     self.histories[key].append(value)
 
 rr.init("cv")
-rr.connect_tcp()
+rr.connect_grpc()
 
 fk = FrequencyKeeper(20)
 
