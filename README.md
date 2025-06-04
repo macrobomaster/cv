@@ -23,13 +23,10 @@ PC=1 WEBCAM=0 python3 -m cv.system
 ```
 
 5. visualize
-
-in another terminal in the nix shell
 ```bash
+# in another terminal in the nix shell
 rerun
-````
 
-in another terminal in the nix shell:
-```bash
+# in another terminal in the nix shell
 python -m cv.tools.visual 127.0.0.1
 ````
