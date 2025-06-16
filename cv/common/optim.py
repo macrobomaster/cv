@@ -77,26 +77,21 @@ class GrokfastEMA:
 
 class SwitchEMA:
   def __init__(self, model, ema_model, epochs:int, steps_per_epoch:int, momentum:float=0.999):
-    self.epoch_counter = Tensor([0], requires_grad=False, device=get_parameters(model)[0].device)
+    self.step_counter = Tensor([0], requires_grad=False, device=get_parameters(model)[0].device)
     self.epochs, self.steps_per_epoch = epochs, steps_per_epoch
     self.momentum = momentum
     self.model_params = {k:v for k,v in get_state_dict(model).items() if v.requires_grad}
     ema_state_dict = get_state_dict(ema_model)
     self.ema_model_params = {k:ema_state_dict[k] for k in self.model_params.keys()}
-    for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
-      p_ema.requires_grad = False
-      p_ema.assign(p.detach())
-    Tensor.realize(*self.ema_model_params.values())
+    for p_ema in self.ema_model_params.values(): p_ema.requires_grad = False
 
   def update(self):
     for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
       p_ema.assign(p_ema * self.momentum + p.detach() * (1 - self.momentum))
-    Tensor.realize(*self.ema_model_params.values())
-
-  def switch(self):
     for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
-      p.assign(p_ema)
-    Tensor.realize(*self.model_params.values())
+      p.assign((self.step_counter == self.steps_per_epoch - 1).where(p_ema, p).detach())
+    self.step_counter.assign((self.step_counter == self.steps_per_epoch - 1).where(0, self.step_counter + 1))
+    Tensor.realize(*self.model_params.values(), *self.ema_model_params.values(), self.step_counter)
 
 class CosineWarmupLR(LR_Scheduler):
   def __init__(self, optimizer:Optimizer, warmup_steps:int, warmup_lr:float, start_lr:float, end_lr:float, epochs:int, steps_per_epoch:int):
