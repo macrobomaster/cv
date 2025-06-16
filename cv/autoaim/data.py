@@ -9,6 +9,9 @@ from .syndata import generate_sample
 from ..common import BASE_PATH
 
 def load_batch(bs: int) -> tuple[Tensor, Tensor]:
+  if getenv("FAKEFILES"):
+    return Tensor.zeros(bs, 256, 512, 3, dtype=dtypes.uint8).contiguous(), Tensor.zeros(bs, 18).contiguous()
+
   img, detected, keypoints, color, number = generate_sample(bs)
   img = img.cast(dtypes.float32)
 
@@ -87,7 +90,7 @@ def get_train_files():
 
   fake_files = [
     "fake:"
-  ] * len(real_files)
+  ] * 1024
 
   if getenv("FAKEFILES", 0):
     return fake_files
