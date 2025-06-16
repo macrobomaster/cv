@@ -13,7 +13,7 @@ def reset_context():
 
 # deterministically generate a port number from the service name
 def get_port(service:str):
-  return 19000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 19000)
+  return 10000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 10000)
 
 class Pub:
   def __init__(self, services:list[str]):
