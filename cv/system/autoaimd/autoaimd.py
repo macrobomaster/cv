@@ -14,19 +14,17 @@ from ...autoaim.common import pred, MODEL_VERSION
 
 HALF = getenv("HALF", 0)
 BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
-FUSE = getenv("FUSE", 0)
 
 def run():
   pub = messaging.Pub(["autoaim"])
   sub = messaging.Sub(["camera_feed"])
 
-  Tensor.no_grad = True
   Tensor.training = False
   if getenv("HALF", 0) == 1:
     dtypes.default_float = dtypes.float16
 
   # cache model jit
-  model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_{FUSE}_run"
+  model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run"
   if kv_get("autoaim", model_key) is None:
     logger.info("building cached model")
 
@@ -38,8 +36,6 @@ def run():
         if "norm" in key: continue
         if ".n" in key: continue
         param.replace(param.half()).realize()
-    if FUSE:
-      model.fuse()
 
     # run to initialize jit
     fake_input = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
@@ -69,8 +65,10 @@ def run():
       detm, detp = tuple(itertools.islice(model_out_iter, 2))
       colorm, colorp = tuple(itertools.islice(model_out_iter, 2))
       numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
-      plate_mu = list(itertools.islice(model_out_iter, 10))
-      plate_var = list(itertools.islice(model_out_iter, 10))
+      plate_mu = list(itertools.islice(model_out_iter, 2))
+      plate_var = list(itertools.islice(model_out_iter, 2))
+      plate_mu += list(itertools.islice(model_out_iter, 8))
+      plate_var += list(itertools.islice(model_out_iter, 8))
 
       match colorm:
         case 0: colorm = "none"
@@ -82,6 +80,8 @@ def run():
         plate_mu[j * 2 + 1] = ((plate_mu[j * 2 + 1] + 1) / 2) * 256
 
       valid = True
+      if detm == 0: valid = False
+      if detp < 0.6: valid = False
       if colorm == "none": valid = False
       if colorp < 0.6: valid = False
 

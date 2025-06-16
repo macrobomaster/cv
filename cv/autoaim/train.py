@@ -21,7 +21,7 @@ WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
 START_LR = 1e-3
 END_LR = 1e-5
-EPOCHS = 80
+EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
@@ -78,7 +78,7 @@ def train_step(model, optim, lr_sched, switch_ema) -> Tensor:
   optim.step()
   lr_sched.step()
 
-  # switch_ema.update()
+  switch_ema.update()
 
   return Tensor.cat(loss.float().reshape(1), global_norm.float().reshape(1), optim.lr.float().reshape(1))
 
