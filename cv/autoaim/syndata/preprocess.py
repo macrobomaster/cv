@@ -39,8 +39,8 @@ if getenv("PLATE"):
 
       plates.append(Tensor(img, device="CPU").permute(2, 0, 1))
       keypoints.append(Tensor(kp, device="CPU", dtype=dtypes.float32))
-    plates_proc.append(Tensor.stack(*plates))
-    keypoints_proc.append(Tensor.stack(*keypoints))
+    plates_proc.append(Tensor.stack(*plates).realize())
+    keypoints_proc.append(Tensor.stack(*keypoints).realize())
 
   safe_save({"plates": Tensor.stack(*plates_proc), "keypoints": Tensor.stack(*keypoints_proc)}, str(BASE_PATH / "intermediate" / "plates.safetensors"))
 
@@ -53,11 +53,13 @@ if getenv("BACKGROUND"):
   background_images = []
   bg_files = glob.glob(str(BASE_PATH / "background" / "*"))
   for f in tqdm(bg_files):
+    backgrounds = []
     # take random crops of the image
     bg_img = cv2.imread(f, cv2.IMREAD_UNCHANGED)
     bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
     for _ in trange(getenv("ITERS", 100)):
       img = BACKGROUND_PIPELINE(image=bg_img)["image"]
-      background_images.append(Tensor(img, device="CPU").permute(2, 0, 1))
+      backgrounds.append(Tensor(img, device="CPU").permute(2, 0, 1))
+    background_images.append(Tensor.stack(*backgrounds).realize())
 
   safe_save({"backgrounds": Tensor.stack(*background_images)}, str(BASE_PATH / "intermediate" / "backgrounds.safetensors"))
