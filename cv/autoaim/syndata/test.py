@@ -5,7 +5,7 @@ from . import generate_sample
 
 if __name__ == "__main__":
   while True:
-    imgs, detecteds, keypointss, colors, numbers = generate_sample(8)
+    imgs, detecteds, keypointss, colors, numbers = generate_sample(1)
     for i in range(imgs.shape[0]):
       img, detected, keypoints, color, number = imgs[i], detecteds[i], keypointss[i], colors[i], numbers[i]
       img = np.ascontiguousarray(img.permute(1, 2, 0).numpy())

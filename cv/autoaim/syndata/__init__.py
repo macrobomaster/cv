@@ -1,8 +1,11 @@
 from tinygrad.nn.state import safe_load
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
+from tinygrad.dtype import dtypes
 
 from ...common import BASE_PATH
+
+W, H = 512, 256
 
 def random_crop(img: Tensor, size:tuple[int, int]) -> tuple[Tensor, Tensor, Tensor]:
   bs, c, h, w = img.shape
@@ -26,7 +29,8 @@ def generate_sample(bs:int=1) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     backgrounds = safe_load(str(BASE_PATH / "intermediate" / "backgrounds.safetensors"))["backgrounds"].to(Device.DEFAULT)
 
   background_index = Tensor.randint(bs, high=backgrounds.shape[0])
-  background_tensor = backgrounds[background_index]
+  background_instance_index = Tensor.randint(bs, high=backgrounds.shape[1])
+  background_tensor = backgrounds[background_index, background_instance_index]
 
   plate_index = Tensor.randint(bs, high=plates.shape[0])
   plate_instance_index = Tensor.randint(bs, high=plates.shape[1])
@@ -38,7 +42,7 @@ def generate_sample(bs:int=1) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
 
   # random transform of the plate
   plate_tensor = plate_tensor.pad((None, None, (bg_h - plate_h//2, bg_h - plate_h//2), (bg_w - plate_w//2, bg_w - plate_w//2)))
-  plate_tensor, x, y = random_crop(plate_tensor, (bg_h, bg_w))
+  plate_tensor, x, y = random_crop(plate_tensor, (H, W))
   x, y = x.unsqueeze(1), y.unsqueeze(1)
   x = (bg_w - plate_w//2) - x
   y = (bg_h - plate_h//2) - y
@@ -55,10 +59,10 @@ def generate_sample(bs:int=1) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
 
   # random crop of background
   background_tensor = background_tensor.pad((None, None, (bg_h//2, bg_h//2), (bg_w//2, bg_w//2)), mode="reflect")
-  background_tensor, _, _ = random_crop(background_tensor, (bg_h, bg_w))
+  background_tensor, _, _ = random_crop(background_tensor, (H, W))
 
   # alpha blend plate onto background
-  img = (plate_img * plate_alpha + background_tensor * (1 - plate_alpha)).cast(background_tensor.dtype)
+  img = (plate_img * plate_alpha + background_tensor.float() * (1 - plate_alpha)).cast(background_tensor.dtype)
 
   # detected
   detected = Tensor.rand(bs) > 0.2
