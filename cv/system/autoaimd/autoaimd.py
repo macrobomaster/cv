@@ -38,8 +38,8 @@ def run():
         param.replace(param.half()).realize()
 
     # run to initialize jit
-    fake_input = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
     for _ in range(3):
+      fake_input = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
       pred(model, fake_input).tolist()
 
     kv_put("autoaim", model_key, pickle.dumps(pred))
