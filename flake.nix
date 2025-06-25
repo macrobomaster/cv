@@ -66,7 +66,7 @@
                   enableCuda = false;
                 };
                 tinygrad = python-prev.tinygrad.override {
-                  cudaPackages = final.jetpack-nixos.cudaPackages;
+                  cudaPackages = final.nvidia-jetpack.cudaPackages;
                 };
               })
             ];
