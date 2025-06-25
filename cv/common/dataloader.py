@@ -3,7 +3,7 @@ from multiprocessing import shared_memory
 from typing import Callable
 from dataclasses import dataclass
 
-from tinygrad.helpers import prod, getenv, Context, trange
+from tinygrad.helpers import prod, getenv, Context
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import DType
 
@@ -103,7 +103,7 @@ class Dataloader:
     for bn in range(8):
       enqueue_batch(bn)
 
-    for _ in trange(len(files)//self.bs):
+    for _ in range(len(files)//self.bs):
       yield receive_batch()
 
     self.loading = False
