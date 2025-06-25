@@ -3,7 +3,7 @@ import json, glob
 from tinygrad.helpers import getenv, tqdm, trange
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
-from tinygrad.nn.state import safe_save, get_state_dict
+from tinygrad.nn.state import safe_save
 import albumentations as A
 import cv2
 
@@ -13,8 +13,7 @@ from ..data import PLATES
 # preprocess plate images
 if getenv("PLATE"):
   PLATE_PIPELINE = A.Compose([
-    A.SmallestMaxSize(max_size=512, p=1),
-    A.CenterCrop(height=512, width=640, pad_if_needed=True, p=1),
+    A.LongestMaxSize(max_size=512, p=1),
     A.SafeRotate(limit=(-90, 90), p=0.5),
     A.Perspective(scale=(0.05, 0.2), keep_size=True, fit_output=True, p=1),
     A.RandomScale(scale_limit=(0.05-1, 0.5-1), p=1),
