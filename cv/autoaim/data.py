@@ -134,7 +134,7 @@ def get_train_files():
     "syn:4_blue",
     "syn:5_blue",
     "syn:6_blue",
-  ] * len(real_files)
+  ] * 32000
 
   fake_files = [
     "fake:"
