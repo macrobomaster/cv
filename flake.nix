@@ -11,7 +11,7 @@
     };
     tinygrad = {
       url = "github:wozeparrot/tinygrad-nix";
-      inputs.tinygrad.follows = "tinygrad-src";
+      # inputs.tinygrad.follows = "tinygrad-src";
     };
 
     # jetpack-nixos.url = "github:tiiuae/jetpack-nixos/final-stretch";
