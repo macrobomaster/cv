@@ -67,7 +67,6 @@
               })
             ];
           })
-          (final: _: { inherit (final.nvidia-jetpack) cudaPackages; })
         ] ++ common_overlays;
       });
 
@@ -253,7 +252,9 @@
                 hostPlatform = "aarch64-linux";
                 config = pkgs-aarch64-linux.config;
               };
-              nixpkgs.overlays = common_overlays;
+              nixpkgs.overlays = common_overlays ++ [
+                (final: _: { inherit (final.nvidia-jetpack) cudaPackages; })
+              ];
 
               imports = [
                 inputs.jetpack-nixos.nixosModules.default
