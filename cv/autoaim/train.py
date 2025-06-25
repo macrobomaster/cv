@@ -28,22 +28,19 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
   y_det = y[:, 0].cast(dtypes.int32)
   y_color = y[:, 1].cast(dtypes.int32)
   y_number = y[:, 2].cast(dtypes.int32)
-  y_center = y[:, 3:5]
-  y_plate = y[:, 5:13]
+  y_plate = y[:, 3:13]
 
   has_det = y[:, 13] > 0
   has_color = y[:, 14] > 0
   has_number = y[:, 15] > 0
-  has_center = y[:, 16] > 0
-  has_plate = y[:, 17] > 0
+  has_plate = y[:, 16] > 0
 
-  center_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_center, has_center, model.heads.center_head.bins, model.heads.center_head.low, model.heads.center_head.high)
-  plate_loss = masked_twohot_uncertainty_loss(pred[5], pred[6], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
+  plate_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
 
   # quality factor from center keypoint
-  if not hasattr(loss_fn, "center_twohot_weights"):
-    setattr(loss_fn, "center_twohot_weights", Tensor.linspace(model.heads.center_head.low, model.heads.center_head.high, model.heads.center_head.bins, device=y.device).reshape(1, 1, -1))
-  point_c = pred[3].softmax().mul(getattr(loss_fn, "center_twohot_weights")).sum(-1)
+  if not hasattr(loss_fn, "plate_twohot_weights"):
+    setattr(loss_fn, "plate_twohot_weights", Tensor.linspace(model.heads.plate_head.low, model.heads.plate_head.high, model.heads.plate_head.bins, device=y.device).reshape(1, 1, -1))
+  point_c = pred[3][:, 0:2, :].softmax().mul(getattr(loss_fn, "plate_twohot_weights")).sum(-1)
   point_dist = point_c.square().sum(-1).sqrt()
   quality = (1 - point_dist.clamp(0, 1))
 
@@ -57,10 +54,10 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
   color_loss = masked_cross_entropy(pred[1], target_cls, has_color)
 
   # number loss
-  target_cls = y_number.one_hot(6)
+  target_cls = y_number.one_hot(7)
   number_loss = masked_cross_entropy(pred[2], target_cls, has_number)
 
-  return det_loss + center_loss + plate_loss + color_loss + number_loss
+  return det_loss + plate_loss + color_loss + number_loss
 
 @TinyJit
 def train_step(model, optim, lr_sched, switch_ema) -> Tensor:
