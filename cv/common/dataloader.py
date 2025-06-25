@@ -150,7 +150,7 @@ class DataloaderProc:
         name = ""
         try:
           for name, t in inflight[num].items():
-            t[idx].contiguous().realize().lazydata.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
+            t[idx].contiguous().realize().uop.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
         except Exception as e:
           logger.error(f"failed to load {file}, {name}")
           raise e
