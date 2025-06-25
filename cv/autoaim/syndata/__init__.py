@@ -1,74 +1,97 @@
-from tinygrad.nn.state import safe_load
-from tinygrad.tensor import Tensor
-from tinygrad.device import Device
-from tinygrad.dtype import dtypes
+import glob, random, json
+
+import cv2
+import albumentations as A
 
 from ...common import BASE_PATH
+from ...common.image import alpha_overlay
+from ...system.core.logging import logger
 
-W, H = 512, 256
+PLATE_PIPELINE = A.Compose([
+  A.RandomScale(scale_limit=(0.05-1, 0.5-1), p=1),
+  A.Perspective(scale=(0.05, 0.2), keep_size=True, fit_output=True, p=1),
+  A.SafeRotate(limit=(-90, 90), p=0.5),
+], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
+PLATE_PIPELINE_2 = A.Compose([
+  A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.25),
+  A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.25),
+  A.MotionBlur(blur_limit=(3, 5), p=0.5),
+  A.Downscale(scale_range=(0.25, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.2),
+])
+BACKGROUND_PIPELINE = A.Compose([
+  A.RandomResizedCrop(size=(256, 512), scale=(0.1, 1.0), ratio=(1.9, 2.1), p=1),
+])
+RESIZE_PIPELINE = A.Compose([
+  A.LongestMaxSize(max_size=512, p=1),
+], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 
-def random_crop(img: Tensor, size:tuple[int, int]) -> tuple[Tensor, Tensor, Tensor]:
-  bs, c, h, w = img.shape
-  y = Tensor.randint(bs, high=h - size[0])
-  y_arange = Tensor.arange(size[0]).reshape(1, 1, size[0], 1).expand(bs, c, size[0], w) + y.reshape(bs, 1, 1, 1)
-  x = Tensor.randint(bs, high=w - size[1])
-  x_arange = Tensor.arange(size[1]).reshape(1, 1, 1, size[1]).expand(bs, c, size[0], size[1]) + x.reshape(bs, 1, 1, 1)
-  return img.gather(2, y_arange).gather(3, x_arange), x, y
+plate_images = {}
+plate_corners = {}
+background_images = []
+def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int, int]:
+  global plate_images, plate_corners, background_images
 
-plates = None
-keypoints = None
-backgrounds = None
-def generate_sample(bs:int=1) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-  global plates, backgrounds, keypoints
-  if plates is None:
-    safe = safe_load(str(BASE_PATH / "intermediate" / "plates.safetensors"))
-    plates = safe["plates"].to(Device.DEFAULT)
-    keypoints = safe["keypoints"].to(Device.DEFAULT)
-  assert keypoints is not None
-  if backgrounds is None:
-    backgrounds = safe_load(str(BASE_PATH / "intermediate" / "backgrounds.safetensors"))["backgrounds"].to(Device.DEFAULT)
+  # preload plate image
+  plate = file.split(":")[1]
+  number = int(plate.split("_")[0])
+  color = plate.split("_")[1]
+  if plate not in plate_images:
+    logger.debug(f"loading plate {plate}")
+    plate_img = cv2.imread(str(BASE_PATH / "armor_plate" / f"{plate}.png"), cv2.IMREAD_UNCHANGED)
+    plate_img = cv2.cvtColor(plate_img, cv2.COLOR_BGRA2RGBA)
 
-  background_index = Tensor.randint(bs, high=backgrounds.shape[0])
-  background_instance_index = Tensor.randint(bs, high=backgrounds.shape[1])
-  background_tensor = backgrounds[background_index, background_instance_index]
+    # resize so that max side length is 512
+    with open(str(BASE_PATH / "armor_plate" / f"{plate}.json"), "r") as f:
+      keypoints = json.load(f)
+    resized = RESIZE_PIPELINE(image=plate_img, keypoints=keypoints)
+    plate_images[plate] = resized["image"]
+    plate_corners[plate] = resized["keypoints"]
 
-  plate_index = Tensor.randint(bs, high=plates.shape[0])
-  plate_instance_index = Tensor.randint(bs, high=plates.shape[1])
-  plate_tensor = plates[plate_index, plate_instance_index]
-  plate_keypoints_tensor = keypoints[plate_index, plate_instance_index]
+  # load background images
+  if len(background_images) == 0:
+    bg_files = glob.glob(str(BASE_PATH / "background" / "*"))
+    logger.debug(f"loading {len(bg_files)} background images")
+    for f in bg_files:
+      bg_img = cv2.imread(f, cv2.IMREAD_UNCHANGED)
+      bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
+      background_images.append(bg_img)
 
-  bg_h, bg_w = background_tensor.shape[-2:]
-  plate_h, plate_w = plate_tensor.shape[-2:]
+  raw_plate = plate_images[plate]
+  # select a random background image
+  raw_background = random.choice(background_images)
 
-  # random transform of the plate
-  plate_tensor = plate_tensor.pad((None, None, (bg_h - plate_h//2, bg_h - plate_h//2), (bg_w - plate_w//2, bg_w - plate_w//2)))
-  plate_tensor, x, y = random_crop(plate_tensor, (H, W))
-  x, y = x.unsqueeze(1), y.unsqueeze(1)
-  x = (bg_w - plate_w//2) - x
-  y = (bg_h - plate_h//2) - y
-  plate_keypoints_tensor = plate_keypoints_tensor + Tensor.stack(x, y, dim=-1)
+  # keypoints are center, top-left, top-right, bottom-left, bottom-right
+  keypoints = []
+  keypoints.append((raw_plate.shape[1]//2, raw_plate.shape[0]//2))
+  keypoints.extend(plate_corners[plate])
 
-  plate_img, plate_alpha = plate_tensor.split([3, 1], dim=1)
-  plate_alpha = plate_alpha / 255.0
-  plate_img = plate_img.float()
+  plate_out = PLATE_PIPELINE(image=raw_plate, keypoints=keypoints)
+  plate = plate_out["image"]
+  # kick alpha channel out
+  plate = PLATE_PIPELINE_2(image=plate[:, :, :3])["image"]
+  # put alpha channel back
+  plate = cv2.merge([plate, plate_out["image"][:, :, 3]])
+  img = BACKGROUND_PIPELINE(image=raw_background)["image"]
 
-  # random brightness contrast
-  contrast = Tensor.uniform(bs, 1, 1, 1, low=-0.2, high=0.2) + 1
-  brightness = Tensor.uniform(bs, 1, 1, 1, low=-0.2, high=0.2) * 255
-  plate_img = (Tensor.rand(bs, 1, 1, 1) < 0.5).where((plate_img * contrast + brightness).clip(0, 255), plate_img)
+  x = random.randint(0, img.shape[1] - plate.shape[1])
+  y = random.randint(0, img.shape[0] - plate.shape[0])
 
-  # random crop of background
-  background_tensor = background_tensor.pad((None, None, (bg_h//2, bg_h//2), (bg_w//2, bg_w//2)), mode="reflect")
-  background_tensor, _, _ = random_crop(background_tensor, (H, W))
+  # sometimes don't have a plate at all for a negative sample
+  detected = random.random() > 0.2
+  if detected:
+    # put the plate on the background with alpha blending
+    alpha_overlay(plate, img, x, y)
 
-  # alpha blend plate onto background
-  img = (plate_img * plate_alpha + background_tensor.float() * (1 - plate_alpha)).cast(background_tensor.dtype)
+  # turn color into int
+  match color:
+    case "red": color = 1
+    case "blue": color = 2
+    case _: color = 3
 
-  # detected
-  detected = Tensor.rand(bs) > 0.2
-  img = detected.reshape(bs, 1, 1, 1).where(img, background_tensor)
+  center = x + plate_out["keypoints"][0][0], y + plate_out["keypoints"][0][1]
+  top_left = x + plate_out["keypoints"][1][0], y + plate_out["keypoints"][1][1]
+  top_right = x + plate_out["keypoints"][2][0], y + plate_out["keypoints"][2][1]
+  bottom_left = x + plate_out["keypoints"][3][0], y + plate_out["keypoints"][3][1]
+  bottom_right = x + plate_out["keypoints"][4][0], y + plate_out["keypoints"][4][1]
 
-  color = (plate_index < 3).where(3, (plate_index < 8).where(1, 2))
-  number = (plate_index < 3).where(plate_index + 3, (plate_index < 8).where(plate_index - 1, plate_index - 6))
-
-  return img, detected, plate_keypoints_tensor, color, number
+  return img, int(detected), [center, top_left, top_right, bottom_left, bottom_right], color, number

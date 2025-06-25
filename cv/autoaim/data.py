@@ -1,95 +1,144 @@
 import glob
 
-from tinygrad.dtype import dtypes
+from tinygrad.dtype import _to_np_dtype, dtypes
 from tinygrad.helpers import getenv
-from tinygrad.tensor import Tensor
+import albumentations as A
 import cv2
+import numpy as np
 
+from .common import get_annotation
 from .syndata import generate_sample
+from ..common.dataloader import DataloaderProc
 from ..common import BASE_PATH
 
-def load_batch(bs: int) -> tuple[Tensor, Tensor]:
-  if getenv("FAKEFILES"):
-    return Tensor.zeros(bs, 256, 512, 3, dtype=dtypes.uint8).contiguous(), Tensor.zeros(bs, 18).contiguous()
+OUTPUT_PIPELINE = A.Compose([
+  A.Perspective(p=0.25),
+  A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-45, 45), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
+  A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
+  A.HueSaturationValue(hue_shift_limit=0, sat_shift_limit=(-20, 20), val_shift_limit=0, p=0.5),
+  A.OneOf([
+    A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.3),
+    A.RandomSunFlare(flare_roi=(0, 0, 1, 1), p=0.3),
+  ], p=0.2),
+  A.OneOf([
+    A.Defocus(radius=(1, 5), p=0.1),
+    A.MotionBlur(blur_limit=(3, 7), p=0.5),
+  ], p=0.25),
+  A.OneOf([
+    A.GaussNoise(std_range=(0.05, 0.2), p=0.5),
+    A.ISONoise(p=0.5),
+  ], p=0.25),
+  A.OneOf([
+    A.PlanckianJitter(mode="cied"),
+    A.PlanckianJitter(),
+  ], p=0.5),
+  A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
+], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
+DEFAULT_NP_DTYPE = _to_np_dtype(dtypes.default_float)
 
-  img, detected, keypoints, color, number = generate_sample(bs)
-  img = img.cast(dtypes.float32)
+def load_single_file(file) -> dict[str, bytes]:
+  has_color, has_number, has_plate = 0, 0, 0
+  if file.startswith("fake:"):
+    img = np.zeros((256, 512, 3), dtype=np.uint8)
+    detected = 0
+    keypoints = [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]
+    color = 0
+    number = 0
+  elif file.startswith("syn:"):
+    img, detected, keypoints, color, number = generate_sample(file)
+    has_color, has_number, has_plate = 1, 1, 1
+  elif file.startswith("path:"):
+    img_file = file[5:]
+    img = cv2.imread(img_file, cv2.IMREAD_UNCHANGED)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    anno = get_annotation(img_file)
+    if anno.detected:
+      detected = 1
+      keypoints = [(anno.x * img.shape[1], (1 - anno.y) * img.shape[0]), (0, 0), (0, 0), (0, 0), (0, 0)]
+      color = 0
+      number = 0
+    else:
+      detected = 0
+      keypoints = [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]
+      color = 0
+      number = 0
+  else:
+    raise ValueError("unknown file type")
 
-  # random brightness contrast
-  contrast = Tensor.uniform(bs, 1, 1, 1, low=-0.2, high=0.2) + 1
-  brightness = Tensor.uniform(bs, 1, 1, 1, low=-0.2, high=0.2) * 255
-  img = (Tensor.rand(bs, 1, 1, 1) < 0.5).where((img * contrast + brightness).clip(0, 255), img)
+  output = OUTPUT_PIPELINE(image=img, keypoints=keypoints)
+  img = output["image"]
+  xc, yc = output["keypoints"][0]
+  if detected:
+    if xc < 0 or xc > img.shape[1] or yc < 0 or yc > img.shape[0]:
+      detected = 0
+  xtl, ytl = output["keypoints"][1]
+  xtr, ytr = output["keypoints"][2]
+  xbl, ybl = output["keypoints"][3]
+  xbr, ybr = output["keypoints"][4]
 
-  # random saturation
-  saturation = Tensor.uniform(bs, 1, 1, 1, low=-0.2, high=0.2) + 1
-  luminance = (0.2126 * img[:, 0] + 0.7152 * img[:, 1] + 0.0722 * img[:, 2]).unsqueeze(1)
-  img = (Tensor.rand(bs, 1, 1, 1) < 0.5).where(luminance.lerp(img, saturation), img)
-
-  # random gaussian noise
-  noise = Tensor.randn(bs, 3, 256, 512) * Tensor.uniform(bs, 1, 1, 1, low=0.05, high=0.2)
-  img = (Tensor.rand(bs, 1, 1, 1) < 0.5).where(img + noise, img)
-
-  # no plate detected when plate cetner is outside of frame bounds
-  center_outside = (keypoints[:, 0, 0] < 0) | (keypoints[:, 0, 0] > img.shape[3]) | (keypoints[:, 0, 1] < 0) | (keypoints[:, 0, 1] > img.shape[2])
-  detected = detected & ~center_outside
-
-  # scale keypoints to (-1, 1) range
-  keypoints = keypoints / Tensor.cat(Tensor(img.shape[3]).reshape(1, 1, 1), Tensor(img.shape[2]).reshape(1, 1, 1), dim=-1)
-  keypoints = keypoints * 2 - 1
+  # scale keypoints to (-1,1) range
+  xc = xc / img.shape[1] * 2 - 1
+  yc = yc / img.shape[0] * 2 - 1
+  xtl = xtl / img.shape[1] * 2 - 1
+  ytl = ytl / img.shape[0] * 2 - 1
+  xtr = xtr / img.shape[1] * 2 - 1
+  ytr = ytr / img.shape[0] * 2 - 1
+  xbl = xbl / img.shape[1] * 2 - 1
+  ybl = ybl / img.shape[0] * 2 - 1
+  xbr = xbr / img.shape[1] * 2 - 1
+  ybr = ybr / img.shape[0] * 2 - 1
 
   # gate number based on detection
-  number = detected.where(number, 0)
+  if not detected:
+    number = 0
 
   # gate color based on detection
-  color = detected.where(color, 0)
+  if not detected:
+    color = 0
 
-  # gate keypoints based on detection
-  keypoints = detected.reshape(bs, 1, 1).where(keypoints, 0)
+  # set all keypoints to 0 if not detected
+  if not detected:
+    xc = yc = xtl = ytl = xtr = ytr = xbl = ybl = xbr = ybr = 0
 
-  # loss gates
-  has_det = Tensor(True).unsqueeze(0).expand(bs)
-  has_color = Tensor(True).unsqueeze(0).expand(bs)
-  has_number = Tensor(True).unsqueeze(0).expand(bs)
-  has_plate = detected
+  # if not detected we don't have center or plate, but we do have color and number which are 0
+  if not detected:
+    has_plate = 0
+    has_color = 1
+    has_number = 1
 
-  labels = Tensor.stack(detected, color, number, dim=1)
-  keypoints = keypoints.flatten(1)
-  labels = labels.cat(keypoints, dim=1)
-  has_gates = Tensor.stack(has_det, has_color, has_number, has_plate, dim=1)
-  labels = labels.cat(has_gates, dim=1)
-
-  return img.permute(0, 2, 3, 1).cast(dtypes.uint8), labels
-
-PLATES = [
-  "1_blank",
-  "3_blank",
-  "4_blank",
-  "5_blank",
-
-  "1_red",
-  "2_red",
-  "3_red",
-  "4_red",
-  "5_red",
-  "6_red",
-
-  "1_blue",
-  "2_blue",
-  "3_blue",
-  "4_blue",
-  "5_blue",
-  "6_blue",
-]
+  return {
+    "x": img.tobytes(),
+    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate), dtype=DEFAULT_NP_DTYPE).tobytes(),
+  }
 
 def get_train_files():
   real_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
   real_files = [f"path:{f}" for f in real_files]
 
-  syn_files = [f"syn:{plate}" for plate in PLATES] * len(real_files)
+  syn_files = [
+    "syn:1_blank",
+    "syn:3_blank",
+    "syn:4_blank",
+    "syn:5_blank",
+
+    "syn:1_red",
+    "syn:2_red",
+    "syn:3_red",
+    "syn:4_red",
+    "syn:5_red",
+    "syn:6_red",
+
+    "syn:1_blue",
+    "syn:2_blue",
+    "syn:3_blue",
+    "syn:4_blue",
+    "syn:5_blue",
+    "syn:6_blue",
+  ] * len(real_files)
 
   fake_files = [
     "fake:"
-  ] * 1024
+  ] * len(real_files)
 
   if getenv("FAKEFILES", 0):
     return fake_files
@@ -97,18 +146,23 @@ def get_train_files():
     return real_files
   if getenv("SYNFILES", 0):
     return syn_files
-  return syn_files + real_files
+  return syn_files
 
-if __name__ == "__main__":
+def run():
   cv2.setNumThreads(0)
   cv2.ocl.setUseOpenCL(False)
 
-  x, y = load_batch(8)
-  for i in range(x.shape[0]):
-    img = x[i].numpy()
-    anno = y[i].numpy()
+  DataloaderProc(load_single_file).start()
+
+if __name__ == "__main__":
+  files = get_train_files()
+  for file in files[::-1]:
+    data = load_single_file(file)
+    img = np.frombuffer(data["x"], dtype=np.uint8).copy()
+    img = img.reshape((256, 512, 3))
+    anno = np.frombuffer(data["y"], dtype=DEFAULT_NP_DTYPE)
     print(anno)
-    cv2.circle(img, (int(((anno[3] + 1) / 2) * 512), int(((anno[4] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
+    cv2.circle(img, (int(((anno[2] + 1) / 2) * 512), int(((anno[3] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
     cv2.imshow("img", img)
     key = cv2.waitKey(0)
     if key == ord("q"):

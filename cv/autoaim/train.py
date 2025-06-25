@@ -9,11 +9,12 @@ from tinygrad.device import Device
 import wandb
 
 from ..system.core.logging import logger
+from ..common.dataloader import BatchDesc, Dataloader
 from ..common.tensor import masked_cross_entropy, masked_mal_loss, masked_twohot_uncertainty_loss
 from ..common.optim import CLaProp, CosineWarmupLR, grad_clip_norm, SwitchEMA
 from .common import BASE_PATH
 from .model import Model
-from .data import get_train_files, load_batch
+from .data import get_train_files
 
 GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
 BS = 256 * len(GPUS)
@@ -60,10 +61,9 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
   return det_loss + plate_loss + color_loss + number_loss
 
 @TinyJit
-def train_step(model, optim, lr_sched, switch_ema) -> Tensor:
+def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
   optim.zero_grad()
 
-  x, y = load_batch(BS)
   x, y = x.shard_(GPUS, axis=0), y.shard_(GPUS, axis=0)
   pred = model(x)
   loss = loss_fn(model, pred, y)
@@ -94,6 +94,11 @@ def run():
       "bs": BS,
       "steps_per_epoch": STEPS_PER_EPOCH,
     })
+
+  dataloader = Dataloader({
+    "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
+    "y": BatchDesc(shape=(17,), dtype=dtypes.default_float),
+  }, bs=BS, files_fn=get_train_files)
 
   model = Model()
   for _, x in get_state_dict(model).items(): x.to_(GPUS)
@@ -126,19 +131,25 @@ def run():
 
   steps = 0
   for epoch in range(EPOCHS):
-    for i in range(STEPS_PER_EPOCH):
+    dataloader.load()
+    i, d = 0, dataloader.next(Device.DEFAULT)
+    while d is not None:
       st = time.perf_counter()
       GlobalCounters.reset()
 
-      out = train_step(model, optim, lr_sched, switch_ema)
+      out = train_step(model, optim, lr_sched, switch_ema, *d[:-1])
       pt = time.perf_counter()
+
+      try: next_d = dataloader.next(Device.DEFAULT)
+      except StopIteration: next_d = None
+      dt = time.perf_counter()
 
       loss, global_norm, lr = out.tolist()
       at = time.perf_counter()
 
       # logging
       logger.info(
-          f"{epoch:3} {i:5}/{STEPS_PER_EPOCH} {((at - st)) * 1000.0:7.2f} ms step, {(pt - st) * 1000.0:7.2f} ms python, {(at - pt) * 1000.0:7.2f} ms accel, "
+        f"{epoch:3} {i:5}/{STEPS_PER_EPOCH} {((at - st)) * 1000.0:7.2f} ms step, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms data, {(at - dt) * 1000.0:7.2f} ms accel, "
         f"{loss:11.6f} loss, {global_norm:11.6f} global_norm, {lr:.6f} lr, "
         f"{GlobalCounters.mem_used / 1e9:7.2f} GB used, {GlobalCounters.mem_used * 1e-9 / (at - st):9.2f} GB/s, {GlobalCounters.global_ops * 1e-9 / (at - st):9.2f} GFLOPS"
       )
@@ -146,11 +157,12 @@ def run():
       if getenv("WANDB", 0):
         wandb.log({
           "epoch": epoch + (i + 1) / STEPS_PER_EPOCH,
-          "step_time": at - st, "python_time": pt - st, "accel_time": at - pt,
+          "step_time": at - st, "python_time": pt - st, "data_time": dt - pt, "accel_time": at - dt,
           "loss": loss, "global_norm": global_norm, "lr": lr,
           "gb": GlobalCounters.mem_used / 1e9, "gbps": GlobalCounters.mem_used * 1e-9 / (at - st), "gflops": GlobalCounters.global_ops * 1e-9 / (at - st)
         })
 
+      d, next_d = next_d, None
       i += 1
       steps += 1
 
