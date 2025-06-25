@@ -4,7 +4,7 @@ from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
-from ..common.tensor import pixel_unshuffle
+from ..common.tensor import norm, pixel_unshuffle
 from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock
 
 class ChannelMixer:
@@ -145,7 +145,7 @@ class AttnStage:
     return x, sb
 
 class Stem:
-  def __init__(self, cin:int, cout:int, exp:float=1):
+  def __init__(self, cin:int, cout:int, exp:float=2):
     cmid = int(cout * exp)
     self.conv1 = ConvNorm(cin, cmid, 5, 2, 2, bias=False)
     self.conv2 = ConvNorm(cmid, cmid, 5, 2, 2, groups=cmid, bias=False)
@@ -207,26 +207,23 @@ class Backbone:
     x = self.stem(x)
 
     sb = self.sideband.expand(x.shape[0], -1)
+
     x0 = self.stage0(x)
     x1 = self.stage1(x0)
     x2, sb = self.stage2(x1, sb)
     x3, sb = self.stage3(x2, sb)
 
+    # norm sideband
+    sb = norm(sb, axis=1)
+
     return x0, x1, x2, x3, sb
 
 class Decoder:
   def __init__(self, cstage:list[int], sideband:int, cout:int, blocks:int, dropout:float=0.0):
-    self.sideband_emb = nn.Linear(cstage[-1] * sideband, cout, bias=False)
-    self.sideband_norm = nn.RMSNorm(cout)
-
-    self.ffn = FFN(cout, cout, cout, exp=2, blocks=blocks, norm=True, dropout=dropout)
+    self.ffn = FFN(cstage[-1] * sideband, cout, cout, exp=2, blocks=blocks, norm=True, dropout=dropout)
 
   def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
-    sb = self.sideband_norm(self.sideband_emb(features[-1]))
-
-    x = sb
-
-    return self.ffn(x)
+    return self.ffn(features[-1])
 
 class CLSHead:
   def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
@@ -245,7 +242,7 @@ class CLSHead:
 class THRegHead:
   def __init__(self, in_dim:int, outputs:int, mid_dim:int, bins:int, low:float, high:float, dropout:float=0.0):
     self.outputs, self.bins, self.low, self.high = outputs, bins, low, high
-    self.ffn = FFN(in_dim, outputs * bins + outputs, mid_dim, blocks=2, exp=2, norm=True, dropout=dropout)
+    self.ffn = FFN(in_dim, outputs * bins + outputs, mid_dim, blocks=1, exp=2, norm=True, dropout=dropout)
 
   def __call__(self, x:Tensor) -> tuple[Tensor, Tensor]:
     x = self.ffn(x)
@@ -267,28 +264,29 @@ class THRegHead:
     else:
       return logits, log_var
 
+# class OccupancyMaskHead:
+#   def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
+
 class Heads:
   def __init__(self, in_dim:int, mid_dim:int=32, dropout:float=0.0):
     self.det_head = CLSHead(in_dim, 2, mid_dim*1, dropout=dropout)
     self.color_head = CLSHead(in_dim, 4, mid_dim*1, dropout=dropout)
-    self.number_head = CLSHead(in_dim, 6, mid_dim*1, dropout=dropout)
-    self.center_head = THRegHead(in_dim, 2, 128, mid_dim*4, -2, 2, dropout=dropout)
-    self.plate_head = THRegHead(in_dim, 8, 256, mid_dim*4, -2, 2, dropout=dropout)
+    self.number_head = CLSHead(in_dim, 7, mid_dim*1, dropout=dropout)
+    self.plate_head = THRegHead(in_dim, 10, mid_dim*4, 128, -2, 2, dropout=dropout)
 
   def __call__(self, f:Tensor):
     det = self.det_head(f)
     color = self.color_head(f)
     number = self.number_head(f)
-    center_logits_mu, center_log_var = self.center_head(f)
     plate_logits_mu, plate_log_var = self.plate_head(f)
 
     if not Tensor.training:
-      return Tensor.cat(det, color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var, dim=1)
+      return Tensor.cat(det, color, number, plate_logits_mu, plate_log_var, dim=1)
     else:
-      return det, color, number, center_logits_mu, center_log_var, plate_logits_mu, plate_log_var
+      return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 7, 2], sideband:int=4, dropout:float=0.1):
+  def __init__(self, dim:int=512, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 7, 2], sideband:int=4, dropout:float=0.1):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=True, dropout=dropout)
     self.decoder = Decoder(cstage, sideband, dim, blocks=2, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
