@@ -57,17 +57,21 @@
             "8.7"
           ];
         };
-        overlays = [
+        overlays = common_overlays ++ [
+          inputs.jetpack-nixos.overlays.default
           (final: prev: {
             pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
               (python-final: python-prev: {
                 opencv4 = python-prev.opencv4.override {
                   enableCuda = false;
                 };
+                tinygrad = python-prev.tinygrad.override {
+                  cudaPackages = final.jetpack-nixos.cudaPackages;
+                };
               })
             ];
           })
-        ] ++ common_overlays;
+        ];
       });
 
       common-python-packages =
