@@ -30,6 +30,8 @@ RESPONSE_FORMATS = {
 
 class State(Enum):
   GAME_RUNNING = 0x00
+  TEAM_COLOR = 0x01
+  ROBOT_TYPE = 0x02
 
 class Protocol:
   port: serial.Serial

@@ -19,7 +19,7 @@ def run():
   port = serial.Serial(device, 115200, timeout=1)
   protocol = Protocol(port)
 
-  pub = messaging.Pub(["game_running"])
+  pub = messaging.Pub(["game_running", "team_color", "robot_type"])
   sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity"])
 
   while True:
@@ -55,4 +55,12 @@ def run():
 
     game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
     if game_running is not None:
-      pub.send("game_running", True if game_running[0] == 0x00 else False)
+      pub.send("game_running", True if game_running[1] == 0x00 else False)
+
+    team_color = protocol.msg(Command.CHECK_STATE, State.TEAM_COLOR.value)
+    if team_color is not None:
+      pub.send("team_color", "red" if team_color[1] == 0x00 else "blue")
+
+    robot_type = protocol.msg(Command.CHECK_STATE, State.ROBOT_TYPE.value)
+    if robot_type is not None:
+      pub.send("robot_type", "sentry" if robot_type[1] == 0x00 else "standard")
