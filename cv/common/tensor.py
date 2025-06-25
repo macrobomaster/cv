@@ -90,8 +90,8 @@ def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor) -> Tensor:
   ce = pred.cross_entropy(y, reduction="none")
   return mask.where(ce, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
 
-def norm(x:Tensor, axis:int|None=None, keepdim:bool=False) -> Tensor:
-  return x.square().sum(axis, keepdim=keepdim).sqrt()
+def norm(x:Tensor, axis:int|None=None, eps:float=1e-6) -> Tensor:
+  return x * x.square().sum(axis, keepdim=True).add(eps).rsqrt()
 
 def rms_norm(x:Tensor, axis:int|None=-1, eps:float=1e-6) -> Tensor:
   return x * x.square().mean(axis, keepdim=True).add(eps).rsqrt()
