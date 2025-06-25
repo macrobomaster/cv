@@ -155,7 +155,7 @@ class ShootDecision:
 
 def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
-  sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
+  sub = messaging.Sub(["autoaim", "plate", "game_running"], poll="autoaim")
 
   autoaim_valid_debounce = Debounce(1)
   aim_error_kf = AimErrorKF()
@@ -177,57 +177,60 @@ def run():
   while True:
     sub.update()
 
+    game_running = sub["game_running"]
+    if game_running is None: continue
     autoaim = sub["autoaim"]
     if autoaim is None: continue
     plate = sub["plate"]
     if plate is None: continue
 
-    if sub.updated["autoaim"]:
-      if autoaim["valid"]:
-        plate_mu = autoaim["plate_mu"]
-        xc, yc = plate_mu[0], plate_mu[1]
+    if game_running:
+      if sub.updated["autoaim"]:
+        if autoaim["valid"]:
+          plate_mu = autoaim["plate_mu"]
+          xc, yc = plate_mu[0], plate_mu[1]
 
-        x = (xc - 256) / 256
-        y = (yc - 128) / 128
-        # x, y = aim_error_kf.predict_and_correct(x, y)
-        # x = aim_ahead.step(x)
-        # x = aim_error_spin_comp.correct(x)
+          x = (xc - 256) / 256
+          y = (yc - 128) / 128
+          # x, y = aim_error_kf.predict_and_correct(x, y)
+          # x = aim_ahead.step(x)
+          # x = aim_error_spin_comp.correct(x)
 
-        # offset y by some amount relative to the distance to the plate
-        y -= 0.1 * plate["dist"]
-        y += 0.4
+          # offset y by some amount relative to the distance to the plate
+          y -= 0.1 * plate["dist"]
+          y += 0.4
 
-        shoot = shoot_decision.step(x, y)
+          shoot = shoot_decision.step(x, y)
 
-        # scale error based on distance
-        x = x / max(1, plate["dist"])
-        y = y / max(1, plate["dist"])
+          # scale error based on distance
+          x = x / max(1, plate["dist"])
+          y = y / max(1, plate["dist"])
 
-        pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
-        pub.send("shoot", shoot)
+          pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
+          pub.send("shoot", shoot)
 
-        chassis_velocity = {"x": 0.0, "z": 0.0}
-        if plate["dist"] > MAINTAIN_DIST + 0.1:
-          chassis_velocity["x"] = min(CHASE_SPEED, max(0, plate["dist"] - MAINTAIN_DIST))
-        elif plate["dist"] < MAINTAIN_DIST - 0.1:
-          chassis_velocity["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, plate["dist"]))
+          chassis_velocity = {"x": 0.0, "z": 0.0}
+          if plate["dist"] > MAINTAIN_DIST + 0.1:
+            chassis_velocity["x"] = min(CHASE_SPEED, max(0, plate["dist"] - MAINTAIN_DIST))
+          elif plate["dist"] < MAINTAIN_DIST - 0.1:
+            chassis_velocity["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, plate["dist"]))
 
-        pos = plate["pos"]
+          pos = plate["pos"]
 
-        # compute angle on xz plane
-        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
-        # compute angle on yz plane
-        angle_y = math.degrees(math.atan2(pos[1], pos[2]))
-        pub.send("aim_angle", {"x": angle_x, "y": angle_y})
+          # compute angle on xz plane
+          angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
+          # compute angle on yz plane
+          angle_y = math.degrees(math.atan2(pos[1], pos[2]))
+          pub.send("aim_angle", {"x": angle_x, "y": angle_y})
 
-        if angle_x > 0.5:
-          chassis_velocity["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
-        elif angle_x < -0.5:
-          chassis_velocity["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
+          if angle_x > 0.5:
+            chassis_velocity["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
+          elif angle_x < -0.5:
+            chassis_velocity["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
 
-        pub.send("chassis_velocity", chassis_velocity)
-      else:
-        pub.send("shoot", False)
+          pub.send("chassis_velocity", chassis_velocity)
+        else:
+          pub.send("shoot", False)
 
-      if autoaim_valid_debounce.debounce(not autoaim["valid"]):
-        aim_error_kf.reset()
+        if autoaim_valid_debounce.debounce(not autoaim["valid"]):
+          aim_error_kf.reset()
