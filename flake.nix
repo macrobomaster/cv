@@ -289,7 +289,7 @@
               boot.loader.systemd-boot.enable = true;
               boot.loader.efi.canTouchEfiVariables = true;
 
-              # hardware.graphics.enable = true;
+              hardware.graphics.enable = true;
               hardware.nvidia-jetpack = {
                 enable = true;
                 modesetting.enable = true;
