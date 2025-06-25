@@ -49,8 +49,6 @@ if __name__ == "__main__":
       case 1: colorm = "red"
       case 2: colorm = "blue"
       case 3: colorm = "blank"
-    if numberm != 0:
-      numberm += 1
 
     # draw the annotation
     cv2.putText(img, f"{detm}: {detp:.3f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
