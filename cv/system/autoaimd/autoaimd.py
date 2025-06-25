@@ -65,10 +65,8 @@ def run():
       detm, detp = tuple(itertools.islice(model_out_iter, 2))
       colorm, colorp = tuple(itertools.islice(model_out_iter, 2))
       numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
-      plate_mu = list(itertools.islice(model_out_iter, 2))
-      plate_var = list(itertools.islice(model_out_iter, 2))
-      plate_mu += list(itertools.islice(model_out_iter, 8))
-      plate_var += list(itertools.islice(model_out_iter, 8))
+      plate_mu = list(itertools.islice(model_out_iter, 10))
+      plate_var = list(itertools.islice(model_out_iter, 10))
 
       match colorm:
         case 0: colorm = "none"
