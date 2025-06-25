@@ -37,9 +37,6 @@ def load_batch(bs: int) -> tuple[Tensor, Tensor]:
   keypoints = keypoints / Tensor.cat(Tensor(img.shape[3]).reshape(1, 1, 1), Tensor(img.shape[2]).reshape(1, 1, 1), dim=-1)
   keypoints = keypoints * 2 - 1
 
-  # numbers start from 2 but model starts from 1
-  number = (number > 0).where(number - 1, 0)
-
   # gate number based on detection
   number = detected.where(number, 0)
 
@@ -53,28 +50,30 @@ def load_batch(bs: int) -> tuple[Tensor, Tensor]:
   has_det = Tensor(True).unsqueeze(0).expand(bs)
   has_color = Tensor(True).unsqueeze(0).expand(bs)
   has_number = Tensor(True).unsqueeze(0).expand(bs)
-  has_center = detected
   has_plate = detected
 
   labels = Tensor.stack(detected, color, number, dim=1)
   keypoints = keypoints.flatten(1)
   labels = labels.cat(keypoints, dim=1)
-  has_gates = Tensor.stack(has_det, has_color, has_number, has_center, has_plate, dim=1)
+  has_gates = Tensor.stack(has_det, has_color, has_number, has_plate, dim=1)
   labels = labels.cat(has_gates, dim=1)
 
   return img.permute(0, 2, 3, 1).cast(dtypes.uint8), labels
 
 PLATES = [
+  "1_blank",
   "3_blank",
   "4_blank",
   "5_blank",
 
+  "1_red",
   "2_red",
   "3_red",
   "4_red",
   "5_red",
   "6_red",
 
+  "1_blue",
   "2_blue",
   "3_blue",
   "4_blue",
