@@ -189,12 +189,6 @@
               aravis.lib
               gobject-introspection
               llvmPackages_latest.clang-unwrapped
-              cudaPackages.cuda_nvdisasm
-              cudaPackages.cuda_nvcc
-              cudaPackages.cuda_cccl
-              cudaPackages.cuda_cudart
-              cudaPackages.cudatoolkit
-              gcc13
               tmux
             ];
 
