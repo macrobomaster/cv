@@ -204,6 +204,40 @@ class RecConv:
 
     return x
 
+class RefineGate:
+  """
+  Refine Gate Module
+
+  See: https://arxiv.org/pdf/1910.09890
+  """
+  def __init__(self, dim:int):
+    self.refine = nn.Linear(dim, dim, bias=False)
+    self.gate = nn.Linear(dim, dim, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    r = self.refine(x).sigmoid().mul(2).sub(1)
+    g = self.gate(x).sigmoid()
+    phi = r * g * (1 - g)
+    gate = g + phi
+    return x * gate
+
+class RefineGate2d:
+  """
+  Refine Gate Module for 2D Tensors
+
+  See: https://arxiv.org/pdf/1910.09890
+  """
+  def __init__(self, dim:int):
+    self.refine = nn.Conv2d(dim, dim, 1, 1, 0, bias=False)
+    self.gate = nn.Conv2d(dim, dim, 1, 1, 0, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    r = self.refine(x).sigmoid().mul(2).sub(1)
+    g = self.gate(x).sigmoid()
+    phi = r * g * (1 - g)
+    gate = g + phi
+    return x * gate
+
 class FFNBlock:
   def __init__(self, dim:int, exp:int, norm:bool=True, dropout:float=0.0):
     if norm: self.norm = nn.RMSNorm(dim)
@@ -213,11 +247,10 @@ class FFNBlock:
     self.gate = nn.Linear(dim, dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    if hasattr(self, "norm"): xx = self.norm(x)
-    else: xx = x
-    xxx = self.up(xx).gelu()
-    xx = self.down(xxx) * self.gate(xx).sigmoid()
-    return x + xx.dropout(self.dropout)
+    if hasattr(self, "norm"): x = self.norm(x)
+    xx = self.up(x).gelu()
+    x = self.down(xx) * self.gate(x).sigmoid()
+    return x.dropout(self.dropout)
 
 class FFN:
   def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1, norm:bool=True, dropout:float=0.0):
@@ -227,5 +260,6 @@ class FFN:
 
   def __call__(self, x:Tensor) -> Tensor:
     x = self.up(x).gelu()
-    x = x.sequential(self.blocks)
+    for block in self.blocks:
+      x = x + block(x)
     return self.down(x)
