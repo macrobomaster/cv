@@ -67,6 +67,7 @@
               })
             ];
           })
+          (final: _: { inherit (final.nvidia-jetpack) cudaPackages; })
         ] ++ common_overlays;
       });
 
