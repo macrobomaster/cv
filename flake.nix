@@ -248,7 +248,7 @@
             {
               _module.args = { inherit inputs; };
               nixpkgs = {
-                buildPlatform = "x86_64-linux";
+                buildPlatform = "aarch64-linux";
                 hostPlatform = "aarch64-linux";
                 config = pkgs-aarch64-linux.config;
               };
