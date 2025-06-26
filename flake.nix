@@ -307,16 +307,9 @@
                     name = "enable-serial";
                     dtsText = ''
                       /dts-v1/;
-                      /plugin/;
-
                       / {
-                        fragment@0 {
-                          target-path = "/";
-                          __overlay__ {
-                            serial@3110000 {
-                              status = "okay";
-                            };
-                          };
+                        serial@3110000 {
+                          status = "okay";
                         };
                       };
                     '';
