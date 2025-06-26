@@ -301,12 +301,12 @@
 
               hardware.deviceTree = {
                 enable = true;
-                name = "tegra234-overlay.dtb";
                 overlays = [
                   {
                     name = "enable-serial";
                     dtsText = ''
                       /dts-v1/;
+                      /plugin/;
                       / {
                         serial@3110000 {
                           status = "okay";
