@@ -183,8 +183,6 @@ def run():
     if autoaim is None: continue
     plate = sub["plate"]
     if plate is None: continue
-    team_color = sub["team_color"]
-    if team_color is None: continue
 
     if True:
       if sub.updated["autoaim"]:
