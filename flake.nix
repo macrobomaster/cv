@@ -299,28 +299,31 @@
                 carrierBoard = "devkit";
               };
 
-              hardware.deviceTree.overlays = [
-                {
-                  name = "serial";
-                  dtsText = ''
-                    /dts-v1/;
-                    /plugin/;
+              hardware.deviceTree = {
+                enable = true;
+                overlays = [
+                  {
+                    name = "enable-serial";
+                    dtsText = ''
+                      /dts-v1/;
+                      /plugin/;
 
-                    / {
-                      compatible = "nvidia,p3767-0000+p3768-0000", "nvidia,tegra234", "nvidia,tegra-common";
+                      / {
+                        compatible = "nvidia,p3767-0000+p3768-0000", "nvidia,tegra234", "nvidia,tegra-common";
 
-                      fragment@0 {
-                        target-path = "/";
-                        __overlay__ {
-                          serial@3110000 {
-                            status = "okay";
+                        fragment@0 {
+                          target-path = "/";
+                          __overlay__ {
+                            serial@3110000 {
+                              status = "okay";
+                            };
                           };
                         };
                       };
-                    };
-                  '';
-                }
-              ];
+                    '';
+                  }
+                ];
+              };
 
               systemd.services.cv = {
                 description = "cv service";
