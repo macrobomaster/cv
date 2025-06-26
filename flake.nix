@@ -301,7 +301,6 @@
 
               hardware.deviceTree = {
                 enable = true;
-                name = "tegra234-p3767-0000-super-p3768-0000-a0.dtb";
                 overlays = [
                   {
                     name = "enable-serial";
