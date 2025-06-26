@@ -28,30 +28,30 @@ def run():
     sub.update()
 
     aim_error = sub["aim_error"]
-    if aim_error is None: continue
     shoot = sub["shoot"]
-    if shoot is None: continue
     chassis_velocity = sub["chassis_velocity"]
-    if chassis_velocity is None: continue
 
-    if sub.updated["aim_error"]:
-      x = aim_error["x"]
-      y = aim_error["y"]
-      protocol.msg(Command.AIM_ERROR, x, y)
-    if not sub.alive["aim_error"]:
-      protocol.msg(Command.AIM_ERROR, 0.0, 0.0)
+    if aim_error is not None:
+      if sub.updated["aim_error"]:
+        x = aim_error["x"]
+        y = aim_error["y"]
+        protocol.msg(Command.AIM_ERROR, x, y)
+      if not sub.alive["aim_error"]:
+        protocol.msg(Command.AIM_ERROR, 0.0, 0.0)
 
-    if sub.updated["shoot"]:
-      protocol.msg(Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
-    if not sub.alive["shoot"]:
-      protocol.msg(Command.CONTROL_SHOOT, 0x00)
+    if shoot is not None:
+      if sub.updated["shoot"]:
+        protocol.msg(Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
+      if not sub.alive["shoot"]:
+        protocol.msg(Command.CONTROL_SHOOT, 0x00)
 
-    if sub.updated["chassis_velocity"]:
-      x = chassis_velocity["x"]
-      z = chassis_velocity["z"]
-      protocol.msg(Command.MOVE_ROBOT, x, z)
-    if not sub.alive["chassis_velocity"]:
-      protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
+    if chassis_velocity is not None:
+      if sub.updated["chassis_velocity"]:
+        x = chassis_velocity["x"]
+        z = chassis_velocity["z"]
+        protocol.msg(Command.MOVE_ROBOT, x, z)
+      if not sub.alive["chassis_velocity"]:
+        protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
 
     if sub.alive["spinning"]:
       protocol.msg(Command.CONTROL_SPINNING, 0x00)
