@@ -309,7 +309,7 @@
                 };
                 script = ''
                   pushd /root/cv
-                  nix develop . --command "bash -c 'JITBEAM=2 python -m cv.system'"
+                  ${pkgs-aarch64-linux}/bin/nix develop . --command "bash -c 'JITBEAM=2 python -m cv.system'"
                 '';
               };
 
