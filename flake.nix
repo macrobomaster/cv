@@ -309,7 +309,7 @@
                 };
                 script = ''
                   pushd /root/cv
-                  ${pkgs-aarch64-linux.direnv}/bin/direnv exec env JITBEAM=2 python -m cv.system
+                  nix develop . --command "bash -c 'JITBEAM=2 python -m cv.system'"
                 '';
               };
 
