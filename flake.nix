@@ -304,10 +304,13 @@
                 after = [ "network.target" ];
                 serviceConfig = {
                   Type = "simple";
-                  ExecStart = "${pkgs-aarch64-linux.bash}/bin/bash /root/cv/nix/nixos/script.sh";
                   Restart = "always";
                   RestartSec = "5s";
                 };
+                script = ''
+                  pushd /root/cv
+                  ${pkgs-aarch64-linux.direnv}/bin/direnv exec env JITBEAM=2 python -m cv.system
+                '';
               };
 
               networking.hostName = "orin-nano";

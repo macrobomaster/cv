@@ -68,7 +68,6 @@
       btop
       curl
       du-dust
-      direnv
       fd
       file
       git
