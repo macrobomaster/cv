@@ -304,16 +304,13 @@
                 wantedBy = [ "multi-user.target" ];
                 after = [ "network.target" ];
                 serviceConfig = {
-                  Type = "simple";
-                  Restart = "always";
-                  RestartSec = "5s";
-                  User = "root";
+                  Type = "oneshot";
                   WorkingDirectory = "/root/cv";
+                  RemainAfterExit = true;
+                  ExecStart = "${pkgs-aarch64-linux.tmux}/bin/tmux new-session -d -s cloudnode ${./nix/nixos/script.sh}";
+                  ExecStop = "${pkgs-aarch64-linux.tmux}/bin/tmux kill-session -t cloudnode";
+                  TimeoutStopSec = 1;
                 };
-                script = ''
-                  pushd /root/cv
-                  ${pkgs-aarch64-linux.nix}/bin/nix develop . --command bash -c 'JITBEAM=2 python -m cv.system'
-                '';
               };
 
               networking.hostName = "orin-nano";

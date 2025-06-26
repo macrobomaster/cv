@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 
-cd /root/cv
-JITBEAM=2 direnv exec python -m cv.system
+pushd /root/cv || exit
+nix develop . --command env JITBEAM=2 python -m cv.system
