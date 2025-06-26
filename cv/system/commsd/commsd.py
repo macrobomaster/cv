@@ -11,8 +11,8 @@ from .protocol import Protocol, Command, State
 def run():
   kv_put("watchdog", "commsd", time.monotonic())
 
-  if Path("/dev/ttyTHS3").exists():
-    device = "/dev/ttyTHS3"
+  if Path("/dev/ttyTHS1").exists():
+    device = "/dev/ttyTHS1"
   else:
     device = "/dev/ttyUSB0"
   logger.info(f"using device {device}")
