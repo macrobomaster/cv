@@ -307,10 +307,8 @@
                     dtsText = ''
                       /dts-v1/;
                       /plugin/;
-                      / {
-                        serial@3110000 {
-                          status = "okay";
-                        };
+                      serial@3110000 {
+                        status = "okay";
                       };
                     '';
                   }
