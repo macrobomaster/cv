@@ -234,11 +234,11 @@ def run():
 
             pub.send("chassis_velocity", chassis_velocity)
           else:
-            pub.send("shoot", False)
-            pub.send("aim_error", {"x": 0.5, "y": 0.0})
+            # pub.send("shoot", False)
+            # pub.send("aim_error", {"x": 0.5, "y": 0.0})
         else:
-          pub.send("shoot", False)
-          pub.send("aim_error", {"x": 0.5, "y": 0.0})
+          # pub.send("shoot", False)
+          # pub.send("aim_error", {"x": 0.5, "y": 0.0})
 
         if autoaim_valid_debounce.debounce(not autoaim["valid"]):
           aim_error_kf.reset()
