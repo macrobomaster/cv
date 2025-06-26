@@ -299,6 +299,17 @@
                 carrierBoard = "devkit";
               };
 
+              hardware.deviceTree.overlays = [
+                {
+                  name = "serial";
+                  dtsText = ''
+                    serial@3110000 {
+                      status = "okay";
+                    };
+                  '';
+                }
+              ];
+
               systemd.services.cv = {
                 description = "cv service";
                 wantedBy = [ "multi-user.target" ];
