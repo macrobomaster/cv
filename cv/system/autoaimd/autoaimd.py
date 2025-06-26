@@ -84,7 +84,7 @@ def run():
       if colorp < 0.6: valid = False
 
       plate_var_avg = sum(plate_var) / len(plate_var)
-      if plate_var_avg > 2.5: valid = False
+      if plate_var_avg > 4: valid = False
 
       pub.send("autoaim", {
         "valid": valid,
