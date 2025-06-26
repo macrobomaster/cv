@@ -298,6 +298,18 @@
                 carrierBoard = "devkit";
               };
 
+              systemd.services.cv = {
+                description = "cv service";
+                wantedBy = [ "multi-user.target" ];
+                after = [ "network.target" ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "bash /root/cv/nix/nixos/script.sh";
+                  Restart = "always";
+                  RestartSec = "5s";
+                };
+              };
+
               networking.hostName = "orin-nano";
               system.stateVersion = "25.05";
             }
