@@ -190,6 +190,7 @@
               gobject-introspection
               llvmPackages_latest.clang-unwrapped
               tmux
+              bash
             ];
 
           shellHook = ''
@@ -306,10 +307,12 @@
                   Type = "simple";
                   Restart = "always";
                   RestartSec = "5s";
+                  User = "root";
+                  WorkingDirectory = "/root/cv";
                 };
                 script = ''
                   pushd /root/cv
-                  ${pkgs-aarch64-linux.nix}/bin/nix develop . --command "bash -c 'JITBEAM=2 python -m cv.system'"
+                  ${pkgs-aarch64-linux.nix}/bin/nix develop . --command bash -c 'JITBEAM=2 python -m cv.system'
                 '';
               };
 
