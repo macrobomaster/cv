@@ -9,7 +9,7 @@ from tinygrad.helpers import tqdm
 
 from ..common import BASE_PATH
 
-MODEL_VERSION = 10
+MODEL_VERSION = 11
 
 @partial(TinyJit, prune=True)
 def pred(model, img):
