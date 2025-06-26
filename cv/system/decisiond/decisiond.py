@@ -186,7 +186,7 @@ def run():
     team_color = sub["team_color"]
     if team_color is None: continue
 
-    if game_running:
+    if True:
       if sub.updated["autoaim"]:
         if autoaim["valid"]:
           if autoaim["color"] != "blank" and autoaim["color"] != team_color:
