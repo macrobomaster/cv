@@ -303,8 +303,20 @@
                 {
                   name = "serial";
                   dtsText = ''
-                    serial@3110000 {
-                      status = "okay";
+                    /dts-v1/;
+                    /plugin/;
+
+                    / {
+                      compatible = "nvidia,p3767-0000+p3768-0000", "nvidia,tegra234", "nvidia,tegra-common";
+
+                      fragment@0 {
+                        target-path = "/";
+                        __overlay__ {
+                          serial@3110000 {
+                            status = "okay";
+                          };
+                        };
+                      };
                     };
                   '';
                 }
