@@ -304,7 +304,7 @@
                 after = [ "network.target" ];
                 serviceConfig = {
                   Type = "simple";
-                  ExecStart = "bash /root/cv/nix/nixos/script.sh";
+                  ExecStart = "${pkgs-aarch64-linux.bash}/bin/bash /root/cv/nix/nixos/script.sh";
                   Restart = "always";
                   RestartSec = "5s";
                 };
