@@ -189,7 +189,8 @@ def run():
     if True:
       if sub.updated["autoaim"]:
         if autoaim["valid"]:
-          if autoaim["colorm"] != "blank" and autoaim["colorm"] != team_color:
+          # if autoaim["colorm"] != "blank" and autoaim["colorm"] != team_color:
+          if True:
             plate_mu = autoaim["plate_mu"]
             xc, yc = plate_mu[0], plate_mu[1]
 
