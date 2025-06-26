@@ -177,8 +177,6 @@ def run():
   while True:
     sub.update()
 
-    game_running = sub["game_running"]
-    if game_running is None: continue
     autoaim = sub["autoaim"]
     if autoaim is None: continue
     plate = sub["plate"]
