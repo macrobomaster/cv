@@ -19,8 +19,8 @@ def run():
   port = serial.Serial(device, 115200, timeout=1)
   protocol = Protocol(port)
 
-  pub = messaging.Pub(["game_running", "team_color", "robot_type"])
-  sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity"])
+  pub = messaging.Pub(["game_running", "team_color", "robot_type", "raw_accel", "pitch_angle"])
+  sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "spinning"])
 
   while True:
     kv_put("watchdog", "commsd", time.monotonic())
@@ -53,6 +53,11 @@ def run():
     if not sub.alive["chassis_velocity"]:
       protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
 
+    if sub.alive["spinning"]:
+      protocol.msg(Command.CONTROL_SPINNING, 0x00)
+    else:
+      protocol.msg(Command.CONTROL_SPINNING, 0xff)
+
     game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
     if game_running is not None:
       pub.send("game_running", True if game_running[1] == 0x00 else False)
@@ -64,3 +69,11 @@ def run():
     robot_type = protocol.msg(Command.CHECK_STATE, State.ROBOT_TYPE.value)
     if robot_type is not None:
       pub.send("robot_type", "sentry" if robot_type[1] == 0x00 else "standard")
+
+    raw_accel = protocol.msg(Command.RAW_ACCEL, 0x00)
+    if raw_accel is not None:
+      pub.send("raw_accel", raw_accel)
+
+    pitch_angle = protocol.msg(Command.PITCH_ANGLE, 0x00)
+    if pitch_angle is not None:
+      pub.send("pitch_angle", pitch_angle)

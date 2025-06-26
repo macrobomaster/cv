@@ -11,6 +11,8 @@ class Command(Enum):
   CONTROL_SPINNING = 0x02
   AIM_ERROR = 0x03
   CONTROL_SHOOT = 0x04
+  RAW_ACCEL = 0x05
+  PITCH_ANGLE = 0x08
 
 COMMAND_FORMATS = {
   Command.CHECK_STATE: 'B',
@@ -18,6 +20,8 @@ COMMAND_FORMATS = {
   Command.CONTROL_SPINNING: 'B',
   Command.AIM_ERROR: 'ff',
   Command.CONTROL_SHOOT: 'B',
+  Command.RAW_ACCEL: 'B',
+  Command.PITCH_ANGLE: 'B',
 }
 
 RESPONSE_FORMATS = {
@@ -26,6 +30,8 @@ RESPONSE_FORMATS = {
   Command.CONTROL_SPINNING: 'B',
   Command.AIM_ERROR: 'B',
   Command.CONTROL_SHOOT: 'B',
+  Command.RAW_ACCEL: 'ffffff',
+  Command.PITCH_ANGLE: 'f',
 }
 
 class State(Enum):
