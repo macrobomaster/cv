@@ -307,8 +307,8 @@
                   Type = "oneshot";
                   WorkingDirectory = "/root/cv";
                   RemainAfterExit = true;
-                  ExecStart = "${pkgs-aarch64-linux.tmux}/bin/tmux new-session -d -s cloudnode ${./nix/nixos/script.sh}";
-                  ExecStop = "${pkgs-aarch64-linux.tmux}/bin/tmux kill-session -t cloudnode";
+                  ExecStart = "${pkgs-aarch64-linux.tmux}/bin/tmux new-session -d -s cv ${./nix/nixos/script.sh}";
+                  ExecStop = "${pkgs-aarch64-linux.tmux}/bin/tmux kill-session -t cv";
                   TimeoutStopSec = 1;
                 };
               };
