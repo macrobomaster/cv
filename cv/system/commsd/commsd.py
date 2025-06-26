@@ -58,22 +58,22 @@ def run():
     else:
       protocol.msg(Command.CONTROL_SPINNING, 0xff)
 
-    game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
-    if game_running is not None:
-      pub.send("game_running", True if game_running[1] == 0x00 else False)
-
-    team_color = protocol.msg(Command.CHECK_STATE, State.TEAM_COLOR.value)
-    if team_color is not None:
-      pub.send("team_color", "red" if team_color[1] == 0x00 else "blue")
-
-    robot_type = protocol.msg(Command.CHECK_STATE, State.ROBOT_TYPE.value)
-    if robot_type is not None:
-      pub.send("robot_type", "sentry" if robot_type[1] == 0x00 else "standard")
-
-    raw_accel = protocol.msg(Command.RAW_ACCEL, 0x00)
-    if raw_accel is not None:
-      pub.send("raw_accel", raw_accel)
-
-    pitch_angle = protocol.msg(Command.PITCH_ANGLE, 0x00)
-    if pitch_angle is not None:
-      pub.send("pitch_angle", pitch_angle)
+    # game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
+    # if game_running is not None:
+    #   pub.send("game_running", True if game_running[1] == 0x00 else False)
+    #
+    # team_color = protocol.msg(Command.CHECK_STATE, State.TEAM_COLOR.value)
+    # if team_color is not None:
+    #   pub.send("team_color", "red" if team_color[1] == 0x00 else "blue")
+    #
+    # robot_type = protocol.msg(Command.CHECK_STATE, State.ROBOT_TYPE.value)
+    # if robot_type is not None:
+    #   pub.send("robot_type", "sentry" if robot_type[1] == 0x00 else "standard")
+    #
+    # raw_accel = protocol.msg(Command.RAW_ACCEL, 0x00)
+    # if raw_accel is not None:
+    #   pub.send("raw_accel", raw_accel)
+    #
+    # pitch_angle = protocol.msg(Command.PITCH_ANGLE, 0x00)
+    # if pitch_angle is not None:
+    #   pub.send("pitch_angle", pitch_angle)
