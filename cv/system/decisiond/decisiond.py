@@ -229,6 +229,8 @@ def run():
               chassis_velocity["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
 
             pub.send("chassis_velocity", chassis_velocity)
+        else:
+          pub.send("aim_error", {"x": 0.0, "y": 0.0})
 
         if autoaim_valid_debounce.debounce(not autoaim["valid"]):
           aim_error_kf.reset()
