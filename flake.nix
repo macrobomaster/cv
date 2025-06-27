@@ -239,6 +239,31 @@
                 super = true;
                 carrierBoard = "devkit";
               };
+              hardware.deviceTree = {
+                enable = true;
+                overlays = [
+                  {
+                    name = "enable-serial";
+                    dtsText = ''
+                      /dts-v1/;
+                      /plugin/;
+                      / {
+                        serial@3110000 {
+                          status = "okay";
+                        };
+                      };
+                      / {
+                        fragment@0 {
+                          target = <&uartb>;
+                          __overlay__ {
+                            status = "okay";
+                          };
+                        };
+                      };
+                    '';
+                  }
+                ];
+              };
             }
           ];
         };
@@ -293,6 +318,7 @@
               hardware.graphics.enable = true;
               hardware.nvidia-jetpack = {
                 enable = true;
+                firmware.autoUpdate = true;
                 modesetting.enable = true;
                 som = "orin-nano";
                 super = true;
