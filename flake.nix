@@ -238,6 +238,9 @@
                 som = "orin-nano";
                 super = true;
                 carrierBoard = "devkit";
+                flashScriptOverrides.additionalDtbOverlays = [
+                  "${./nix/nixos/enable-serial.dtb}"
+                ];
               };
               hardware.deviceTree = {
                 enable = true;
