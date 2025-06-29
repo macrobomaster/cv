@@ -147,6 +147,7 @@
               waypipe
               sqlite-web
               picocom
+              tmux
               rerun
               (pkgs.writeShellScriptBin "rerun-web" ''
                 #!/usr/bin/env bash
