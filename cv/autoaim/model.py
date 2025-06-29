@@ -147,8 +147,8 @@ class AttnStage:
 class Stem:
   def __init__(self, cin:int, cout:int, exp:float=2):
     cmid = int(cout * exp)
-    self.conv1 = ConvNorm(cin, cmid, 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(cmid, cmid, 5, 2, 2, groups=cmid, bias=False)
+    self.conv1 = ConvNorm(cin, cout, 5, 2, 2, bias=False)
+    self.conv2 = ConvNorm(cout, cmid, 5, 2, 2, bias=False)
     self.proj = ConvNorm(cmid, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x: Tensor) -> Tensor:
@@ -286,7 +286,7 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=512, cstage:list[int]=[16, 32, 64, 128], stages:list[int]=[2, 2, 7, 2], sideband:int=4, dropout:float=0.1):
+  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband:int=4, dropout:float=0.1):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=True, dropout=dropout)
     self.decoder = Decoder(cstage, sideband, dim, blocks=2, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
