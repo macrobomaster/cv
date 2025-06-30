@@ -132,7 +132,7 @@ def run():
   steps = 0
   for epoch in range(EPOCHS):
     dataloader.load()
-    i, d = 0, dataloader.next(Device.DEFAULT)
+    i, d = 0, dataloader.next(GPUS)
     while d is not None:
       st = time.perf_counter()
       GlobalCounters.reset()
@@ -140,7 +140,7 @@ def run():
       out = train_step(model, optim, lr_sched, switch_ema, *d[:-1])
       pt = time.perf_counter()
 
-      try: next_d = dataloader.next(Device.DEFAULT)
+      try: next_d = dataloader.next(GPUS)
       except StopIteration: next_d = None
       dt = time.perf_counter()
 

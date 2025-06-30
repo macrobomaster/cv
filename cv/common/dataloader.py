@@ -113,11 +113,15 @@ class Dataloader:
     self.iter = iter(self._epoch())
     self.loading = True
 
-  def next(self, device:str):
+  def next(self, device:str|tuple[str, ...]):
     d, c = next(self.iter)
     ret = []
     for _, t in d.items():
-      ret.append(t.to(device))
+      assert isinstance(t, Tensor)
+      if isinstance(device, str):
+        ret.append(t.to(device))
+      else:
+        ret.append(t.shard(device, axis=0))
     return *ret, c
 
 class DataloaderProc:
