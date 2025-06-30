@@ -216,13 +216,18 @@ class Backbone:
     return x0, x1, x2, x3, sb
 
 class FeatureAdapter:
-  def __init__(self, cin:int, cout:int, exp:int=2):
-    self.conv = ConvNorm(cin, cin * exp, 3, 1, 1, bias=False)
-    self.proj = nn.Linear(cin * exp, cout)
+  def __init__(self, cin:int, cout:int, cmid:int=0):
+    if cmid == 0: cmid = cin
+    self.conv = ConvNorm(cin, cmid, 1, 1, 0, bias=False)
+    self.proj = nn.Linear(cmid * 4, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.conv(x).gelu().mean((2, 3))
-    return self.proj(x)
+    x0 = self.conv(x).relu()
+    x1 = x0.max_pool2d((5, 5), padding=2)
+    x2 = x1.max_pool2d((5, 5), padding=2)
+    x3 = x2.max_pool2d((5, 5), padding=2)
+    x = x0.cat(x1, x2, x3, dim=1).mean((2, 3))
+    return self.proj(x).relu()
 
 class Summarizer:
   def __init__(self, cstage:list[int], sideband:int, dim:int, dropout:float=0.0):
