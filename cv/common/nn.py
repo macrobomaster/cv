@@ -87,7 +87,7 @@ class ConvNorm:
     return self.n(self.c(x))
 
 class ConvTransposeNorm:
-  def __init__(self, in_channels:int, out_channels:int, kernel_size:int, stride:int, padding:int, output_padding:int, groups:int=1, bias:bool=False):
+  def __init__(self, in_channels:int, out_channels:int, kernel_size:int, stride:int, padding:int, output_padding:int=0, groups:int=1, bias:bool=False):
     self.c = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride, padding, output_padding, groups=groups, bias=bias)
     self.n = BatchNorm(out_channels)
   def __call__(self, x:Tensor) -> Tensor: return self.n(self.c(x))
@@ -241,11 +241,12 @@ class RefineGate2d:
 class FFNBlock:
   def __init__(self, cin:int, cout:int=0, exp:int=2, norm:bool=True, dropout:float=0.0):
     if cout == 0: cout = cin
+    self.cin, self.cout = cin, cout
     self.dropout = dropout
     if norm: self.norm = nn.RMSNorm(cin)
-    self.up = nn.Linear(cin, cout * exp, bias=False)
-    self.down = nn.Linear(cout * exp, cout, bias=False)
-    self.gate = nn.Linear(cin, cout, bias=False)
+    self.up = nn.Linear(cin, cout * exp)
+    self.down = nn.Linear(cout * exp, cout)
+    self.gate = nn.Linear(cin, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "norm"): x = self.norm(x)
@@ -254,13 +255,15 @@ class FFNBlock:
     return x.dropout(self.dropout)
 
 class FFN:
-  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1, norm:bool=True, dropout:float=0.0):
-    self.up = nn.Linear(in_dim, mid_dim)
-    self.blocks = [FFNBlock(mid_dim, mid_dim, exp, norm, dropout) for _ in range(blocks)]
-    self.down = nn.Linear(mid_dim, out_dim)
+  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=2, blocks:int=1, norm:bool=True, dropout:float=0.0):
+    self.blocks = [FFNBlock(in_dim, mid_dim, exp, norm, dropout)]
+    self.blocks += [FFNBlock(mid_dim, mid_dim, exp, norm, dropout) for _ in range(blocks - 1)]
+    self.out = nn.Linear(mid_dim, out_dim)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.up(x).gelu()
     for block in self.blocks:
-      x = x + block(x)
-    return self.down(x)
+      if block.cin == block.cout:
+        x = x + block(x)
+      else:
+        x = block(x)
+    return self.out(x)
