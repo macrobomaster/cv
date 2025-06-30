@@ -34,7 +34,6 @@ OUTPUT_PIPELINE = A.Compose([
   ], p=0.5),
   A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
 ], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
-DEFAULT_NP_DTYPE = _to_np_dtype(dtypes.default_float)
 
 def load_single_file(file) -> dict[str, bytes]:
   has_color, has_number, has_plate = 0, 0, 0
@@ -108,7 +107,7 @@ def load_single_file(file) -> dict[str, bytes]:
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate), dtype=DEFAULT_NP_DTYPE).tobytes(),
+    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate), dtype=np.float32).tobytes(),
   }
 
 def get_train_files():

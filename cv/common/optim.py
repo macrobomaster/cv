@@ -116,7 +116,7 @@ def grad_clip_norm(optim:Optimizer, max_norm:float=1.0):
   global_norm = global_norm.sqrt().contiguous()
   for p in optim.params:
     if p.grad is not None:
-      p.grad = (global_norm > max_norm).where(p.grad.div(global_norm), p.grad)
+      p.grad = (global_norm > max_norm).where(p.grad.div(global_norm), p.grad).cast(p.grad.dtype)
   return global_norm
 
 class Schedule:

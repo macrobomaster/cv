@@ -67,7 +67,8 @@ def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
   pred = model(x)
   loss = loss_fn(model, pred, y)
 
-  loss.backward()
+  (loss * 256).backward()
+  for p in optim.params: p.grad = p.grad.div(256)
 
   global_norm = grad_clip_norm(optim)
 
@@ -95,7 +96,7 @@ def run():
 
   dataloader = Dataloader({
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-    "y": BatchDesc(shape=(17,), dtype=dtypes.default_float),
+    "y": BatchDesc(shape=(17,), dtype=dtypes.float32),
   }, bs=BS, files_fn=get_train_files)
 
   model = Model()
