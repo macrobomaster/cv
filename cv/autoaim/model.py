@@ -223,10 +223,10 @@ class FeatureAdapter:
 
   def __call__(self, x:Tensor) -> Tensor:
     x0 = self.conv(x).relu()
-    x1 = x0.max_pool2d((5, 5), padding=2)
-    x2 = x1.max_pool2d((5, 5), padding=2)
-    x3 = x2.max_pool2d((5, 5), padding=2)
-    x = x0.mean((2, 3)).cat(x1.mean((2, 3)), x2.mean((2, 3)), x3.mean((2, 3)), dim=1)
+    x1 = x0.max_pool2d((5, 5), stride=1, padding=2)
+    x2 = x1.max_pool2d((5, 5), stride=1, padding=2)
+    x3 = x2.max_pool2d((5, 5), stride=1, padding=2)
+    x = x0.cat(x1, x2, x3, dim=1).mean((2, 3))
     return self.proj(x).relu()
 
 class Summarizer:
