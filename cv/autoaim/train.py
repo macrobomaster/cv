@@ -80,8 +80,8 @@ def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
   return Tensor.cat(loss.float().reshape(1), global_norm.float().reshape(1), optim.lr.float().reshape(1))
 
 def run():
-  Tensor.no_grad = False
   Tensor.training = True
+  dtypes.default_float = dtypes.float16
 
   if getenv("WANDB", 0):
     wandb.init(project="mrm_cv_autoaim")
