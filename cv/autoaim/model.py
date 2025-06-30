@@ -215,28 +215,32 @@ class Backbone:
 
     return x0, x1, x2, x3, sb
 
+class FeatureAdapter:
+  def __init__(self, cin:int, cout:int, exp:int=1):
+    self.conv = ConvNorm(cin, cin * exp, 3, 1, 1, bias=False)
+    self.proj = nn.Linear(cin * exp, cout)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    x = self.conv(x).gelu().mean((2, 3))
+    return self.proj(x)
+
 class Summarizer:
   def __init__(self, cstage:list[int], sideband:int, dim:int, dropout:float=0.0):
-    self.x0_adapter_norm = BatchNorm(cstage[0])
-    self.x0_adapter = ChannelMixer(cstage[0], dim, exp=2)
-    self.x1_adapter_norm = BatchNorm(cstage[1])
-    self.x1_adapter = ChannelMixer(cstage[1], dim, exp=2)
-    self.x2_adapter_norm = BatchNorm(cstage[2])
-    self.x2_adapter = ChannelMixer(cstage[2], dim, exp=2)
-    self.x3_adapter_norm = BatchNorm(cstage[3])
-    self.x3_adapter = ChannelMixer(cstage[3], dim, exp=2)
-    self.sb_adapter_norm = nn.RMSNorm(cstage[-1] * sideband)
-    self.sb_adapter = FFNBlock(cstage[-1] * sideband, dim, exp=2, norm=False)
+    self.x0_adapter = FeatureAdapter(cstage[0], dim)
+    self.x1_adapter = FeatureAdapter(cstage[1], dim)
+    self.x2_adapter = FeatureAdapter(cstage[2], dim)
+    self.x3_adapter = FeatureAdapter(cstage[3], dim)
+    self.sb_adapter = nn.Linear(cstage[-1] * sideband, dim)
 
     self.attention_norm = nn.RMSNorm(dim)
     self.attention = Attention(dim, dim, heads=4, dropout=dropout)
 
   def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
-    x0 = self.x0_adapter(self.x0_adapter_norm(features[0])).mean((2, 3))
-    x1 = self.x1_adapter(self.x1_adapter_norm(features[1])).mean((2, 3))
-    x2 = self.x2_adapter(self.x2_adapter_norm(features[2])).mean((2, 3))
-    x3 = self.x3_adapter(self.x3_adapter_norm(features[3])).mean((2, 3))
-    sb = self.sb_adapter(self.sb_adapter_norm(features[-1]))
+    x0 = self.x0_adapter(features[0])
+    x1 = self.x1_adapter(features[1])
+    x2 = self.x2_adapter(features[2])
+    x3 = self.x3_adapter(features[3])
+    sb = self.sb_adapter(features[-1])
 
     f = Tensor.stack(x0, x1, x2, x3, sb, dim=1)
     return self.attention(self.attention_norm(f))[:, -1, :]
