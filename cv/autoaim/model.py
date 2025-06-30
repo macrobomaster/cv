@@ -5,10 +5,10 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import norm, pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock
+from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, ConvTransposeNorm, FFNBlock, UpsampleConvNorm
 
 class ChannelMixer:
-  def __init__(self, cin:int, cout:int=0, exp:int=3):
+  def __init__(self, cin:int, cout:int=0, exp:int=2):
     if cout == 0: cout = cin
 
     self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
@@ -129,7 +129,7 @@ class AttnStage:
     if cin != cout: self.downsample = Downsample(cin, cout)
     if sideband_proj:
       self.sideband_norm = nn.RMSNorm(cin * sideband)
-      self.sideband_proj = nn.Linear(cin * sideband, cout * sideband, bias=False)
+      self.sideband_proj = nn.Linear(cin * sideband, cout * sideband)
     self.blocks = [AttnBlock(cout, sideband, sideband_only and i == num_blocks - 1, dropout=dropout) for i in range(num_blocks)]
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
@@ -216,7 +216,7 @@ class Backbone:
     return x0, x1, x2, x3, sb
 
 class FeatureAdapter:
-  def __init__(self, cin:int, cout:int, exp:int=1):
+  def __init__(self, cin:int, cout:int, exp:int=2):
     self.conv = ConvNorm(cin, cin * exp, 3, 1, 1, bias=False)
     self.proj = nn.Linear(cin * exp, cout)
 
@@ -234,6 +234,7 @@ class Summarizer:
 
     self.attention_norm = nn.RMSNorm(dim)
     self.attention = Attention(dim, dim, heads=4, dropout=dropout)
+    self.ffn = FFN(dim, dim, dim, exp=2, blocks=2, norm=True, dropout=dropout)
 
   def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
     x0 = self.x0_adapter(features[0])
@@ -243,14 +244,8 @@ class Summarizer:
     sb = self.sb_adapter(features[-1])
 
     f = Tensor.stack(x0, x1, x2, x3, sb, dim=1)
-    return self.attention(self.attention_norm(f))[:, -1, :]
-
-class Decoder:
-  def __init__(self, dim:int, blocks:int, dropout:float=0.0):
-    self.ffn = FFN(dim, dim, dim, exp=2, blocks=blocks, norm=True, dropout=dropout)
-
-  def __call__(self, feature:Tensor) -> Tensor:
-    return self.ffn(feature)
+    f = sb + self.attention(self.attention_norm(f))[:, -1, :]
+    return self.ffn(f)
 
 class CLSHead:
   def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
@@ -291,8 +286,29 @@ class THRegHead:
     else:
       return logits, log_var
 
-# class OccupancyMaskHead:
-#   def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
+class Upsample:
+  def __init__(self, cin:int, cout:int):
+    self.trans = ConvTransposeNorm(cin, cout, 4, 2, 1, bias=False)
+    self.conv1 = ConvNorm(cout, cout, 3, 1, 1, bias=False)
+    self.conv2 = ConvNorm(cout, cout, 3, 1, 1, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    x = self.trans(x)
+    x = self.conv1(x).relu()
+    return self.conv2(x).relu()
+
+class PlateMaskHead:
+  def __init__(self, in_dim:int, classes:int):
+    self.up1 = Upsample(in_dim, in_dim // 2)
+    self.up2 = Upsample(in_dim // 2, in_dim // 4)
+    self.up3 = Upsample(in_dim // 4, in_dim // 8)
+    self.conv = nn.Conv2d(in_dim // 8, classes, 1, 1, 0, bias=False)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    x = self.up1(x)
+    x = self.up2(x)
+    x = self.up3(x)
+    return self.conv(x)
 
 class Heads:
   def __init__(self, in_dim:int, mid_dim:int=32, dropout:float=0.0):
@@ -313,17 +329,16 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband:int=4, dropout:float=0.1):
+  def __init__(self, dim:int=384, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband:int=2, dropout:float=0.1):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=False, dropout=dropout)
     self.summarizer = Summarizer(cstage, sideband, dim)
-    self.decoder = Decoder(dim, blocks=2, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
+    # self.plate_mask_head = PlateMaskHead(cstage[1], 2)
 
   def __call__(self, img:Tensor):
     xs = self.backbone(img)
     f = self.summarizer(xs)
-    d = self.decoder(f)
-    return self.heads(d)
+    return self.heads(f)#, self.plate_mask_head(xs[1])
 
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
@@ -349,10 +364,10 @@ if __name__ == "__main__":
   # full run
   x = Tensor.randn(1, 256, 512, 3).realize()
   GlobalCounters.reset()
-  run(x)
+  x = run(x)
+  print(x)
 
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
   print(f"backbone parameters: {sum(p.numel() for p in get_parameters(model.backbone))}")
   print(f"summarizer parameters: {sum(p.numel() for p in get_parameters(model.summarizer))}")
-  print(f"decoder parameters: {sum(p.numel() for p in get_parameters(model.decoder))}")
   print(f"head parameters: {sum(p.numel() for p in get_parameters(model.heads))}")
