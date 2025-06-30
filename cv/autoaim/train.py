@@ -68,8 +68,8 @@ def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
   pred = model(x)
   loss = loss_fn(model, pred, y)
 
-  (loss * 256).backward()
-  for p in optim.params: p.grad = p.grad.div(256)
+  (loss * 1024).backward()
+  for p in optim.params: p.grad = p.grad.div(1024)
 
   global_norm = grad_clip_norm(optim)
 
