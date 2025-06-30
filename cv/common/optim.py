@@ -62,7 +62,7 @@ class CLaProp(Optimizer):
       cmask = (self.exp_avg[i] * g > 0).cast(t.dtype)
       cmask = cmask / cmask.mean().clamp(min_=1e-3)
 
-      ret.append((t.detach() - step_size * self.exp_avg[i] * cmask - self.lr * self.wd * t.detach()))
+      ret.append((t.detach() - step_size * self.exp_avg[i] * cmask - self.lr * self.wd * t.detach()).cast(t.dtype))
     return ret, [self.b1_t, self.b2_t] + self.exp_avg + self.exp_avg_sq
 
 class GrokfastEMA:
