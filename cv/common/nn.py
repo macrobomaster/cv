@@ -239,12 +239,13 @@ class RefineGate2d:
     return x * gate
 
 class FFNBlock:
-  def __init__(self, dim:int, exp:int, norm:bool=True, dropout:float=0.0):
-    if norm: self.norm = nn.RMSNorm(dim)
+  def __init__(self, cin:int, cout:int=0, exp:int=2, norm:bool=True, dropout:float=0.0):
+    if cout == 0: cout = cin
     self.dropout = dropout
-    self.up = nn.Linear(dim,  dim * exp, bias=False)
-    self.down = nn.Linear(dim * exp, dim, bias=False)
-    self.gate = nn.Linear(dim, dim, bias=False)
+    if norm: self.norm = nn.RMSNorm(cin)
+    self.up = nn.Linear(cin, cout * exp, bias=False)
+    self.down = nn.Linear(cout * exp, cout, bias=False)
+    self.gate = nn.Linear(cin, cout, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "norm"): x = self.norm(x)
@@ -255,7 +256,7 @@ class FFNBlock:
 class FFN:
   def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=1, blocks:int=1, norm:bool=True, dropout:float=0.0):
     self.up = nn.Linear(in_dim, mid_dim)
-    self.blocks = [FFNBlock(mid_dim, exp, norm, dropout) for _ in range(blocks)]
+    self.blocks = [FFNBlock(mid_dim, mid_dim, exp, norm, dropout) for _ in range(blocks)]
     self.down = nn.Linear(mid_dim, out_dim)
 
   def __call__(self, x:Tensor) -> Tensor:
