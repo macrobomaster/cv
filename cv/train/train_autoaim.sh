@@ -13,5 +13,6 @@ export IGNORE_OOB=0
 export FUSE_ARANGE=1
 # export WINO=1
 # export SINGLE_KERNEL_SOFTMAX=1
+export DEFAULT_FLOAT=half
 
 python -m cv.train
