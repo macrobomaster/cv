@@ -143,8 +143,7 @@
         "flake-utils": "flake-utils",
         "jetpack-nixos": "jetpack-nixos",
         "nixpkgs": "nixpkgs_3",
-        "tinygrad": "tinygrad",
-        "tinygrad-src": "tinygrad-src"
+        "tinygrad": "tinygrad"
       }
     },
     "systems": {
@@ -194,23 +193,6 @@
       "original": {
         "owner": "wozeparrot",
         "repo": "tinygrad-nix",
-        "type": "github"
-      }
-    },
-    "tinygrad-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1750367114,
-        "narHash": "sha256-mcbMLhT538/UsfiYZRYIWiECRuRJHWNXdWrKnVOq3CQ=",
-        "owner": "wozeparrot",
-        "repo": "tinygrad",
-        "rev": "06173109e5794d81bf20d90627e258270171fdf4",
-        "type": "github"
-      },
-      "original": {
-        "owner": "wozeparrot",
-        "ref": "local_remote_compile",
-        "repo": "tinygrad",
         "type": "github"
       }
     },
