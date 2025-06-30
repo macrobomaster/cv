@@ -40,7 +40,7 @@ class ConvBlock:
 
   def __call__(self, x:Tensor) -> Tensor:
     xx = self.token_mixer(self.tnorm(x))
-    x = x + xx
+    x = x + xx.dropout(self.dropout)
 
     xx = self.channel_mixer(self.cnorm(x))
     x = x + xx.dropout(self.dropout)
@@ -63,7 +63,7 @@ class AttnBlock:
       self.channel_mixer = ChannelMixer(dim)
 
     self.sideband_cnorm = nn.RMSNorm(dim * sideband)
-    self.sideband_channel_mixer = FFNBlock(dim * sideband, 2, norm=False, dropout=dropout)
+    self.sideband_channel_mixer = FFNBlock(dim * sideband, exp=2, norm=False, dropout=dropout)
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
     b, c, h, w = x.shape
@@ -213,17 +213,40 @@ class Backbone:
     x2, sb = self.stage2(x1, sb)
     x3, sb = self.stage3(x2, sb)
 
-    # norm sideband
-    sb = norm(sb, axis=1)
-
     return x0, x1, x2, x3, sb
 
-class Decoder:
-  def __init__(self, cstage:list[int], sideband:int, cout:int, blocks:int, dropout:float=0.0):
-    self.ffn = FFN(cstage[-1] * sideband, cout, cout, exp=2, blocks=blocks, norm=True, dropout=dropout)
+class Summarizer:
+  def __init__(self, cstage:list[int], sideband:int, dim:int, dropout:float=0.0):
+    self.x0_adapter_norm = BatchNorm(cstage[0])
+    self.x0_adapter = ChannelMixer(cstage[0], dim, exp=2)
+    self.x1_adapter_norm = BatchNorm(cstage[1])
+    self.x1_adapter = ChannelMixer(cstage[1], dim, exp=2)
+    self.x2_adapter_norm = BatchNorm(cstage[2])
+    self.x2_adapter = ChannelMixer(cstage[2], dim, exp=2)
+    self.x3_adapter_norm = BatchNorm(cstage[3])
+    self.x3_adapter = ChannelMixer(cstage[3], dim, exp=2)
+    self.sb_adapter_norm = nn.RMSNorm(cstage[-1] * sideband)
+    self.sb_adapter = FFNBlock(cstage[-1] * sideband, dim, exp=2, norm=False)
+
+    self.attention_norm = nn.RMSNorm(dim)
+    self.attention = Attention(dim, dim, heads=4, dropout=dropout)
 
   def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
-    return self.ffn(features[-1])
+    x0 = self.x0_adapter(self.x0_adapter_norm(features[0])).mean((2, 3))
+    x1 = self.x1_adapter(self.x1_adapter_norm(features[1])).mean((2, 3))
+    x2 = self.x2_adapter(self.x2_adapter_norm(features[2])).mean((2, 3))
+    x3 = self.x3_adapter(self.x3_adapter_norm(features[3])).mean((2, 3))
+    sb = self.sb_adapter(self.sb_adapter_norm(features[-1]))
+
+    f = Tensor.stack(x0, x1, x2, x3, sb, dim=1)
+    return self.attention(self.attention_norm(f))[:, -1, :]
+
+class Decoder:
+  def __init__(self, dim:int, blocks:int, dropout:float=0.0):
+    self.ffn = FFN(dim, dim, dim, exp=2, blocks=blocks, norm=True, dropout=dropout)
+
+  def __call__(self, feature:Tensor) -> Tensor:
+    return self.ffn(feature)
 
 class CLSHead:
   def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
@@ -287,14 +310,16 @@ class Heads:
 
 class Model:
   def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband:int=4, dropout:float=0.1):
-    self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=True, dropout=dropout)
-    self.decoder = Decoder(cstage, sideband, dim, blocks=2, dropout=dropout)
+    self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=False, dropout=dropout)
+    self.summarizer = Summarizer(cstage, sideband, dim)
+    self.decoder = Decoder(dim, blocks=2, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
 
   def __call__(self, img:Tensor):
     xs = self.backbone(img)
-    f = self.decoder(xs)
-    return self.heads(f)
+    f = self.summarizer(xs)
+    d = self.decoder(f)
+    return self.heads(d)
 
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
@@ -324,5 +349,6 @@ if __name__ == "__main__":
 
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
   print(f"backbone parameters: {sum(p.numel() for p in get_parameters(model.backbone))}")
+  print(f"summarizer parameters: {sum(p.numel() for p in get_parameters(model.summarizer))}")
   print(f"decoder parameters: {sum(p.numel() for p in get_parameters(model.decoder))}")
   print(f"head parameters: {sum(p.numel() for p in get_parameters(model.heads))}")
