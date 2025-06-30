@@ -64,7 +64,6 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
 def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
   optim.zero_grad()
 
-  x, y = x.shard_(GPUS, axis=0), y.shard_(GPUS, axis=0)
   pred = model(x)
   loss = loss_fn(model, pred, y)
 
@@ -81,7 +80,6 @@ def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
 
 def run():
   Tensor.training = True
-  dtypes.default_float = dtypes.float16
 
   if getenv("WANDB", 0):
     wandb.init(project="mrm_cv_autoaim")
