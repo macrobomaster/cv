@@ -9,6 +9,7 @@ from tinygrad.device import Device
 import wandb
 
 from ..system.core.logging import logger
+from ..system.core.keyvalue import kv_put
 from ..common.dataloader import BatchDesc, Dataloader
 from ..common.tensor import masked_cross_entropy, masked_mal_loss, masked_twohot_uncertainty_loss
 from ..common.optim import CLaProp, CosineWarmupLR, grad_clip_norm, SwitchEMA
@@ -174,3 +175,4 @@ def run():
     with open(BASE_PATH / "model.safetensors", "wb") as f2: f2.write(f.read())
 
   wandb.finish()
+  kv_put("global_rt", "do_shutdown", True)
