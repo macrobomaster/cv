@@ -107,12 +107,18 @@ def load_single_file(file) -> dict[str, bytes]:
     has_number = 1
     has_mask = 1
 
+  # get area of plate as the number of pixels that are active in the mask
+  if mask is not None:
+    mask_area = np.count_nonzero(mask)
+  else:
+    mask_area = 0
+
   # downsample mask
   mask = cv2.resize(mask, (img.shape[1] // 4, img.shape[0] // 4), interpolation=cv2.INTER_NEAREST)
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate, has_mask), dtype=np.float32).tobytes(),
+    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate, has_mask, mask_area), dtype=np.float32).tobytes(),
     "m": mask.tobytes(),
   }
 

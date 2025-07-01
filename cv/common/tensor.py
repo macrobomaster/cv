@@ -61,7 +61,7 @@ def twohot_loss(logits:Tensor, y:Tensor, bins:int, low:float, high:float) -> Ten
   loss = -logits.log_softmax(-1).mul(target).sum(-1)
   return loss.mean()
 
-def masked_twohot_uncertainty_loss(logits:Tensor, log_var:Tensor, y:Tensor, mask:Tensor, bins:int, low:float, high:float) -> Tensor:
+def masked_twohot_uncertainty_loss(logits:Tensor, log_var:Tensor, y:Tensor, mask:Tensor, bins:int, low:float, high:float, _a:Tensor|None=None) -> Tensor:
   target = twohot(y, bins, low, high)
   # cross entropy
   loss = -logits.log_softmax(-1).mul(target).sum(-1)
@@ -69,6 +69,9 @@ def masked_twohot_uncertainty_loss(logits:Tensor, log_var:Tensor, y:Tensor, mask
   loss = log_var.neg().exp() * loss + log_var
   # mean across outputs
   loss = loss.mean(-1)
+  # scale
+  if _a is not None:
+    loss = _a * loss
   # masking
   return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
 

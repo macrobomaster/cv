@@ -31,13 +31,17 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor, m:Tensor):
   y_color = y[:, 1].cast(dtypes.int32)
   y_number = y[:, 2].cast(dtypes.int32)
   y_plate = y[:, 3:13]
+  mask_area = y[:, 17].cast(dtypes.float32)
 
   has_det = y[:, 13] > 0
   has_color = y[:, 14] > 0
   has_number = y[:, 15] > 0
   has_plate = y[:, 16] > 0
 
-  plate_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
+  plate_weight = 1 / mask_area
+  plate_weight = plate_weight / plate_weight.mean()
+  plate_weight = (mask_area > 0).where(plate_weight, 1)
+  plate_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high, _a=plate_weight)
 
   # quality factor from center keypoint
   if not hasattr(loss_fn, "plate_twohot_weights"):
@@ -99,7 +103,7 @@ def run():
 
   dataloader = Dataloader({
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-    "y": BatchDesc(shape=(18,), dtype=dtypes.float32),
+    "y": BatchDesc(shape=(19,), dtype=dtypes.float32),
     "m": BatchDesc(shape=(64, 128), dtype=dtypes.uint8),
   }, bs=BS, files_fn=get_train_files)
 
