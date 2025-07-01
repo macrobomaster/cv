@@ -225,11 +225,11 @@ class FeatureAdapter:
     self.proj = nn.Linear(cmid * 4, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x0 = self.pw(self.dw(x)).gelu()
+    x0 = self.pw(self.dw(x)).relu()
     x1 = x0.max_pool2d((5, 5), stride=1, padding=2)
     x2 = x1.max_pool2d((5, 5), stride=1, padding=2)
     x3 = x2.max_pool2d((5, 5), stride=1, padding=2)
-    x = Tensor.cat(x0, x1, x2, x3, dim=1).gelu().mean((2, 3))
+    x = Tensor.cat(x0, x1, x2, x3, dim=1).mean((2, 3))
     return self.proj(x)
 
 class Summarizer:
@@ -245,15 +245,15 @@ class Summarizer:
     self.ffn = FFN(dim, dim, dim, exp=2, blocks=2, norm=True, dropout=dropout)
 
   def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
-    x0 = self.x0_adapter(features[0]).gelu()
-    x1 = self.x1_adapter(features[1]).gelu()
-    x2 = self.x2_adapter(features[2]).gelu()
-    x3 = self.x3_adapter(features[3]).gelu()
-    sb = self.sb_adapter(features[4]).gelu()
+    x0 = self.x0_adapter(features[0]).relu()
+    x1 = self.x1_adapter(features[1]).relu()
+    x2 = self.x2_adapter(features[2]).relu()
+    x3 = self.x3_adapter(features[3]).relu()
+    sb = self.sb_adapter(features[4]).relu()
 
     f = Tensor.stack(x0, x1, x2, x3, sb, dim=1)
     sb = sb + self.attention(self.attention_norm(f))[:, -1, :]
-    return sb + self.ffn(sb)
+    return self.ffn(sb)
 
 class CLSHead:
   def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
@@ -302,8 +302,8 @@ class Upsample:
 
   def __call__(self, x:Tensor) -> Tensor:
     x = self.trans(x)
-    x = self.conv1(x).gelu()
-    return self.conv2(x).gelu()
+    x = self.conv1(x).relu()
+    return self.conv2(x).relu()
 
 class PlateMaskHead:
   def __init__(self, in_dim:int, classes:int):
