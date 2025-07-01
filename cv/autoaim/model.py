@@ -48,9 +48,9 @@ class ConvBlock:
     return x
 
 class AttnBlock:
-  def __init__(self, dim:int, sideband:int, sideband_only:bool=False, dropout:float=0.0):
+  def __init__(self, dim:int, sideband_dim:int, sideband_only:bool=False, sideband_channel_mixer=None, dropout:float=0.0):
     self.dropout = dropout
-    self.sideband, self.sideband_only = sideband, sideband_only
+    self.sideband, self.sideband_dim, self.sideband_only = sideband_dim // dim, sideband_dim, sideband_only
 
     self.cpe_norm = BatchNorm(dim)
     self.cpe = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
@@ -62,8 +62,10 @@ class AttnBlock:
       self.cnorm = BatchNorm(dim)
       self.channel_mixer = ChannelMixer(dim)
 
-    self.sideband_cnorm = nn.RMSNorm(dim * sideband)
-    self.sideband_channel_mixer = FFNBlock(dim * sideband, exp=2, norm=False, dropout=dropout)
+    if sideband_channel_mixer is not None:
+      self.sideband_channel_mixer = lambda sb: sideband_channel_mixer(sb)
+    else:
+      self.sideband_channel_mixer = FFNBlock(sideband_dim, exp=2, norm=True, bias=False, dropout=dropout)
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
     b, c, h, w = x.shape
@@ -93,7 +95,7 @@ class AttnBlock:
       x = x + xx.dropout(self.dropout)
 
     # run sideband channel mixer
-    sbsb = self.sideband_channel_mixer(self.sideband_cnorm(sb))
+    sbsb = self.sideband_channel_mixer(sb)
     sb = sb + sbsb.dropout(self.dropout)
 
     return x, sb
@@ -122,22 +124,17 @@ class ConvStage:
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "downsample"):
       x = self.downsample(x)
+
     return x.sequential(self.blocks)
 
 class AttnStage:
-  def __init__(self, cin:int, cout:int, num_blocks:int, sideband:int, sideband_proj:bool=False, sideband_only:bool=False, dropout:float=0.0):
+  def __init__(self, cin:int, cout:int, num_blocks:int, sideband_dim:int, sideband_only:bool=False, sideband_channel_mixer=None, dropout:float=0.0):
     if cin != cout: self.downsample = Downsample(cin, cout)
-    if sideband_proj:
-      self.sideband_norm = nn.RMSNorm(cin * sideband)
-      self.sideband_proj = nn.Linear(cin * sideband, cout * sideband)
-    self.blocks = [AttnBlock(cout, sideband, sideband_only and i == num_blocks - 1, dropout=dropout) for i in range(num_blocks)]
+    self.blocks = [AttnBlock(cout, sideband_dim, sideband_only and i == num_blocks - 1, sideband_channel_mixer, dropout=dropout) for i in range(num_blocks)]
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
     if hasattr(self, "downsample"):
       x = self.downsample(x)
-
-    if hasattr(self, "sideband_proj"):
-      sb = self.sideband_proj(self.sideband_norm(sb))
 
     for block in self.blocks:
       x, sb = block(x, sb)
@@ -187,15 +184,20 @@ class Patcher:
     return out / 2
 
 class Backbone:
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband:int, sideband_only:bool, patch_size:int=2, dropout:float=0.0):
+  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband_dim:int, sideband_only:bool, shared_sideband_channel_mixer:bool=True, patch_size:int=2, dropout:float=0.0):
     self.patcher = Patcher(patch_size)
     self.stem = Stem(cin * patch_size * patch_size, cstage[0])
 
-    self.sideband = Tensor.zeros(1, cstage[-2] * sideband)
+    if shared_sideband_channel_mixer:
+      self.sideband_channel_mixer = FFNBlock(sideband_dim, exp=2, norm=True, bias=False, dropout=dropout)
+    else:
+      self.sideband_channel_mixer = None
+
+    self.sideband_token = Tensor.zeros(1, sideband_dim)
     self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], dropout=dropout)
     self.stage1 = ConvStage(cstage[0], cstage[1], stages[1], dropout=dropout)
-    self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband=sideband, dropout=dropout)
-    self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband=sideband, sideband_proj=True, sideband_only=sideband_only, dropout=dropout)
+    self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband_dim=sideband_dim, sideband_only=sideband_only, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
 
   def __call__(self, img:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     # image normalization
@@ -206,7 +208,7 @@ class Backbone:
     x = self.patcher(x)
     x = self.stem(x)
 
-    sb = self.sideband.expand(x.shape[0], -1)
+    sb = self.sideband_token.expand(x.shape[0], -1)
 
     x0 = self.stage0(x)
     x1 = self.stage1(x0)
@@ -217,40 +219,41 @@ class Backbone:
 
 class FeatureAdapter:
   def __init__(self, cin:int, cout:int, cmid:int=0):
-    if cmid == 0: cmid = cin
-    self.conv = ConvNorm(cin, cmid, 1, 1, 0, bias=False)
+    if cmid == 0: cmid = cout // 4
+    self.dw = ConvNorm(cin, cin, 3, 1, 1, groups=cin, bias=False)
+    self.pw = ConvNorm(cin, cmid, 1, 1, 0, bias=False)
     self.proj = nn.Linear(cmid * 4, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x0 = self.conv(x).gelu()
+    x0 = self.pw(self.dw(x)).gelu()
     x1 = x0.max_pool2d((5, 5), stride=1, padding=2)
     x2 = x1.max_pool2d((5, 5), stride=1, padding=2)
     x3 = x2.max_pool2d((5, 5), stride=1, padding=2)
-    x = x0.cat(x1, x2, x3, dim=1).mean((2, 3))
-    return self.proj(x).gelu()
+    x = Tensor.cat(x0, x1, x2, x3, dim=1).gelu().mean((2, 3))
+    return self.proj(x)
 
 class Summarizer:
-  def __init__(self, cstage:list[int], sideband:int, dim:int, dropout:float=0.0):
+  def __init__(self, cstage:list[int], sideband_dim:int, dim:int, dropout:float=0.0):
     self.x0_adapter = FeatureAdapter(cstage[0], dim)
     self.x1_adapter = FeatureAdapter(cstage[1], dim)
     self.x2_adapter = FeatureAdapter(cstage[2], dim)
     self.x3_adapter = FeatureAdapter(cstage[3], dim)
-    self.sb_adapter = nn.Linear(cstage[-1] * sideband, dim)
+    self.sb_adapter = nn.Linear(sideband_dim, dim)
 
     self.attention_norm = nn.RMSNorm(dim)
     self.attention = Attention(dim, dim, heads=4, dropout=dropout)
     self.ffn = FFN(dim, dim, dim, exp=2, blocks=2, norm=True, dropout=dropout)
 
   def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
-    x0 = self.x0_adapter(features[0])
-    x1 = self.x1_adapter(features[1])
-    x2 = self.x2_adapter(features[2])
-    x3 = self.x3_adapter(features[3])
-    sb = self.sb_adapter(features[-1])
+    x0 = self.x0_adapter(features[0]).gelu()
+    x1 = self.x1_adapter(features[1]).gelu()
+    x2 = self.x2_adapter(features[2]).gelu()
+    x3 = self.x3_adapter(features[3]).gelu()
+    sb = self.sb_adapter(features[4]).gelu()
 
     f = Tensor.stack(x0, x1, x2, x3, sb, dim=1)
-    f = sb + self.attention(self.attention_norm(f))[:, -1, :]
-    return self.ffn(f)
+    sb = sb + self.attention(self.attention_norm(f))[:, -1, :]
+    return sb + self.ffn(sb)
 
 class CLSHead:
   def __init__(self, in_dim:int, classes:int, mid_dim:int, dropout:float=0.0):
@@ -315,7 +318,7 @@ class PlateMaskHead:
 
     if not Tensor.training:
       x = x.softmax(3)
-      xm, xp = x.argmax(3, keepdim=True), x.max(3, keepdim=True).float()
+      xm, xp = x.argmax(3), x.max(3).float()
       return Tensor.cat(xm.flatten(1), xp.flatten(1), dim=1)
     else:
       return x
@@ -339,9 +342,9 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband:int=2, dropout:float=0.1):
-    self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=False, dropout=dropout)
-    self.summarizer = Summarizer(cstage, sideband, dim)
+  def __init__(self, dim:int=256, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband_dim:int=512, dropout:float=0.1):
+    self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim, sideband_only=False, shared_sideband_channel_mixer=True, dropout=dropout)
+    self.summarizer = Summarizer(cstage, sideband_dim, dim, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
     self.plate_mask_head = PlateMaskHead(cstage[1], 2)
 
@@ -350,7 +353,8 @@ class Model:
     f = self.summarizer(xs)
     if not Tensor.training:
       pout = self.heads(f)
-      return pout.cat(self.plate_mask_head(xs[1]), dim=1)
+      mout = self.plate_mask_head(xs[1])
+      return pout.cat(mout, dim=1)
     else:
       return self.heads(f) + (self.plate_mask_head(xs[1]),)
 
