@@ -306,13 +306,11 @@ class PlateMaskHead:
   def __init__(self, in_dim:int, classes:int):
     self.up1 = Upsample(in_dim, in_dim // 2)
     self.up2 = Upsample(in_dim // 2, in_dim // 4)
-    self.up3 = Upsample(in_dim // 4, in_dim // 8)
-    self.conv = nn.Conv2d(in_dim // 8, classes, 1, 1, 0, bias=False)
+    self.conv = nn.Conv2d(in_dim // 4, classes, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     x = self.up1(x)
     x = self.up2(x)
-    x = self.up3(x)
     x = self.conv(x).permute(0, 2, 3, 1)
 
     if not Tensor.training:
@@ -362,25 +360,27 @@ if __name__ == "__main__":
   from tinygrad.engine.jit import TinyJit
   from functools import partial
 
+  BS = 1
   if getenv("HALF", 0):
     dtypes.default_float = dtypes.float16
   if getenv("TRAIN", 0):
     Tensor.training = True
+    BS = 256
 
   model = Model()
 
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
     return model(x)
-  x = Tensor.randn(1, 256, 512, 3).realize()
+  x = Tensor.randn(BS, 256, 512, 3).realize()
   GlobalCounters.reset()
   run(x)
-  x = Tensor.randn(1, 256, 512, 3).realize()
+  x = Tensor.randn(BS, 256, 512, 3).realize()
   GlobalCounters.reset()
   run(x)
 
   # full run
-  x = Tensor.randn(1, 256, 512, 3).realize()
+  x = Tensor.randn(BS, 256, 512, 3).realize()
   GlobalCounters.reset()
   x = run(x)
   print(x)

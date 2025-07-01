@@ -108,7 +108,7 @@ def load_single_file(file) -> dict[str, bytes]:
     has_mask = 1
 
   # downsample mask
-  mask = cv2.resize(mask, (img.shape[1] // 2, img.shape[0] // 2), interpolation=cv2.INTER_NEAREST)
+  mask = cv2.resize(mask, (img.shape[1] // 4, img.shape[0] // 4), interpolation=cv2.INTER_NEAREST)
 
   return {
     "x": img.tobytes(),
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     print(anno)
     cv2.circle(img, (int(((anno[2] + 1) / 2) * 512), int(((anno[3] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
     cv2.imshow("img", img)
-    cv2.imshow("mask", np.frombuffer(data["m"], dtype=np.uint8).reshape((128, 256)) * 255)
+    cv2.imshow("mask", np.frombuffer(data["m"], dtype=np.uint8).reshape((64, 128)) * 255)
     key = cv2.waitKey(0)
     if key == ord("q"):
       break
