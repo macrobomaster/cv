@@ -239,14 +239,14 @@ class RefineGate2d:
     return x * gate
 
 class FFNBlock:
-  def __init__(self, cin:int, cout:int=0, exp:int=2, norm:bool=True, dropout:float=0.0):
+  def __init__(self, cin:int, cout:int=0, exp:int=2, norm:bool=True, bias:bool=True, dropout:float=0.0):
     if cout == 0: cout = cin
     self.cin, self.cout = cin, cout
     self.dropout = dropout
     if norm: self.norm = nn.RMSNorm(cin)
-    self.up = nn.Linear(cin, cout * exp)
-    self.down = nn.Linear(cout * exp, cout)
-    self.gate = nn.Linear(cin, cout)
+    self.up = nn.Linear(cin, cout * exp, bias=bias)
+    self.down = nn.Linear(cout * exp, cout, bias=bias)
+    self.gate = nn.Linear(cin, cout, bias=bias)
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "norm"): x = self.norm(x)
@@ -255,9 +255,9 @@ class FFNBlock:
     return x.dropout(self.dropout)
 
 class FFN:
-  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=2, blocks:int=1, norm:bool=True, dropout:float=0.0):
-    self.blocks = [FFNBlock(in_dim, mid_dim, exp, norm, dropout)]
-    self.blocks += [FFNBlock(mid_dim, mid_dim, exp, norm, dropout) for _ in range(blocks - 1)]
+  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=2, blocks:int=1, norm:bool=True, bias:bool=True, dropout:float=0.0):
+    self.blocks = [FFNBlock(in_dim, mid_dim, exp, norm, bias, dropout)]
+    self.blocks += [FFNBlock(mid_dim, mid_dim, exp, norm, bias, dropout) for _ in range(blocks - 1)]
     self.out = nn.Linear(mid_dim, out_dim)
 
   def __call__(self, x:Tensor) -> Tensor:
