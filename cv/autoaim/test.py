@@ -107,7 +107,7 @@ if __name__ == "__main__":
       #   cv2.drawFrameAxes(img, camera_matrix, dist_coeffs, rvec, tvec, 0.1)
 
     # upsample mask
-    mask_mu = cv2.resize(mask_mu, (512, 256), interpolation=cv2.INTER_LINEAR)
+    mask_mu = cv2.resize(mask_mu, (512, 256), interpolation=cv2.INTER_NEAREST)
 
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     cv2.imshow("img", img)
