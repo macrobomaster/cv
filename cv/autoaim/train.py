@@ -26,7 +26,7 @@ END_LR = 1e-5
 EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(model, pred:tuple[tuple[Tensor, ...], Tensor], y:Tensor, m:Tensor):
+def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor, m:Tensor):
   y_det = y[:, 0].cast(dtypes.int32)
   y_color = y[:, 1].cast(dtypes.int32)
   y_number = y[:, 2].cast(dtypes.int32)
@@ -36,8 +36,6 @@ def loss_fn(model, pred:tuple[tuple[Tensor, ...], Tensor], y:Tensor, m:Tensor):
   has_color = y[:, 14] > 0
   has_number = y[:, 15] > 0
   has_plate = y[:, 16] > 0
-
-  pred, mask = pred
 
   plate_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
 
@@ -62,8 +60,8 @@ def loss_fn(model, pred:tuple[tuple[Tensor, ...], Tensor], y:Tensor, m:Tensor):
   number_loss = masked_cross_entropy(pred[2], target_cls, has_number)
 
   # semantic segmentation loss
-  print(mask.shape, m.shape)
-  mask_loss = mask.sparse_categorical_crossentropy(m)
+  print(pred[5].shape, m.shape)
+  mask_loss = pred[5].sparse_categorical_crossentropy(m)
 
   return det_loss + plate_loss + color_loss + number_loss + mask_loss
 

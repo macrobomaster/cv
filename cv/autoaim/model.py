@@ -222,12 +222,12 @@ class FeatureAdapter:
     self.proj = nn.Linear(cmid * 4, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x0 = self.conv(x).relu()
+    x0 = self.conv(x).gelu()
     x1 = x0.max_pool2d((5, 5), stride=1, padding=2)
     x2 = x1.max_pool2d((5, 5), stride=1, padding=2)
     x3 = x2.max_pool2d((5, 5), stride=1, padding=2)
     x = x0.cat(x1, x2, x3, dim=1).mean((2, 3))
-    return self.proj(x).relu()
+    return self.proj(x).gelu()
 
 class Summarizer:
   def __init__(self, cstage:list[int], sideband:int, dim:int, dropout:float=0.0):
@@ -299,8 +299,8 @@ class Upsample:
 
   def __call__(self, x:Tensor) -> Tensor:
     x = self.trans(x)
-    x = self.conv1(x).relu()
-    return self.conv2(x).relu()
+    x = self.conv1(x).gelu()
+    return self.conv2(x).gelu()
 
 class PlateMaskHead:
   def __init__(self, in_dim:int, classes:int):
@@ -313,7 +313,14 @@ class PlateMaskHead:
     x = self.up1(x)
     x = self.up2(x)
     x = self.up3(x)
-    return self.conv(x)
+    x = self.conv(x).permute(0, 2, 3, 1)
+
+    if not Tensor.training:
+      x = x.softmax(3)
+      xm, xp = x.argmax(3, keepdim=True), x.max(3, keepdim=True).float()
+      return Tensor.cat(xm.flatten(1), xp.flatten(1), dim=1)
+    else:
+      return x
 
 class Heads:
   def __init__(self, in_dim:int, mid_dim:int=32, dropout:float=0.0):
@@ -343,7 +350,11 @@ class Model:
   def __call__(self, img:Tensor):
     xs = self.backbone(img)
     f = self.summarizer(xs)
-    return self.heads(f), self.plate_mask_head(xs[1])
+    if not Tensor.training:
+      pout = self.heads(f)
+      return pout.cat(self.plate_mask_head(xs[1]), dim=1)
+    else:
+      return self.heads(f) + (self.plate_mask_head(xs[1]),)
 
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
@@ -353,6 +364,8 @@ if __name__ == "__main__":
 
   if getenv("HALF", 0):
     dtypes.default_float = dtypes.float16
+  if getenv("TRAIN", 0):
+    Tensor.training = True
 
   model = Model()
 
