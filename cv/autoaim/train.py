@@ -60,7 +60,6 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor, m:Tensor):
   number_loss = masked_cross_entropy(pred[2], target_cls, has_number)
 
   # semantic segmentation loss
-  print(pred[5].shape, m.shape)
   mask_loss = pred[5].sparse_categorical_crossentropy(m)
 
   return det_loss + plate_loss + color_loss + number_loss + mask_loss
