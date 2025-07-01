@@ -101,7 +101,7 @@ def run():
   dataloader = Dataloader({
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
     "y": BatchDesc(shape=(18,), dtype=dtypes.float32),
-    "m": BatchDesc(shape=(128, 256), dtype=dtypes.uint8),
+    "m": BatchDesc(shape=(64, 128), dtype=dtypes.uint8),
   }, bs=BS, files_fn=get_train_files)
 
   model = Model()
