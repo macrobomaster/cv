@@ -26,7 +26,7 @@ END_LR = 1e-5
 EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
+def loss_fn(model, pred:tuple[tuple[Tensor, ...], Tensor], y:Tensor, m:Tensor):
   y_det = y[:, 0].cast(dtypes.int32)
   y_color = y[:, 1].cast(dtypes.int32)
   y_number = y[:, 2].cast(dtypes.int32)
@@ -36,6 +36,8 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
   has_color = y[:, 14] > 0
   has_number = y[:, 15] > 0
   has_plate = y[:, 16] > 0
+
+  pred, mask = pred
 
   plate_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
 
@@ -59,14 +61,18 @@ def loss_fn(model, pred: tuple[Tensor, ...], y: Tensor):
   target_cls = y_number.one_hot(7)
   number_loss = masked_cross_entropy(pred[2], target_cls, has_number)
 
-  return det_loss + plate_loss + color_loss + number_loss
+  # semantic segmentation loss
+  print(mask.shape, m.shape)
+  mask_loss = mask.sparse_categorical_crossentropy(m)
+
+  return det_loss + plate_loss + color_loss + number_loss + mask_loss
 
 @TinyJit
-def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
+def train_step(model, optim, lr_sched, switch_ema, x, y, m) -> Tensor:
   optim.zero_grad()
 
   pred = model(x)
-  loss = loss_fn(model, pred, y)
+  loss = loss_fn(model, pred, y, m)
 
   loss.backward()
 
@@ -96,7 +102,8 @@ def run():
 
   dataloader = Dataloader({
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-    "y": BatchDesc(shape=(17,), dtype=dtypes.float32),
+    "y": BatchDesc(shape=(18,), dtype=dtypes.float32),
+    "m": BatchDesc(shape=(128, 256), dtype=dtypes.uint8),
   }, bs=BS, files_fn=get_train_files)
 
   model = Model()

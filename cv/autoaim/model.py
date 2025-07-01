@@ -334,16 +334,16 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=384, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband:int=2, dropout:float=0.1):
+  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband:int=2, dropout:float=0.1):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband=sideband, sideband_only=False, dropout=dropout)
     self.summarizer = Summarizer(cstage, sideband, dim)
     self.heads = Heads(dim, dropout=dropout)
-    # self.plate_mask_head = PlateMaskHead(cstage[1], 2)
+    self.plate_mask_head = PlateMaskHead(cstage[1], 2)
 
   def __call__(self, img:Tensor):
     xs = self.backbone(img)
     f = self.summarizer(xs)
-    return self.heads(f)#, self.plate_mask_head(xs[1])
+    return self.heads(f), self.plate_mask_head(xs[1])
 
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters

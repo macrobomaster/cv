@@ -44,6 +44,7 @@ def alpha_overlay(img, background, x, y):
   alpha = alpha[:, :, np.newaxis]
   img = img[:, :, :3]
   background[y:y+img.shape[0], x:x+img.shape[1]] = img * alpha + background[y:y+img.shape[0], x:x+img.shape[1]] * (1 - alpha)
+  return alpha
 
 def resize_crop(img, target_width, target_height):
   if img is None or img.size == 0:
