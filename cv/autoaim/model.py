@@ -4,8 +4,8 @@ from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
-from ..common.tensor import norm, pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, ConvTransposeNorm, FFNBlock, UpsampleConvNorm
+from ..common.tensor import pixel_unshuffle
+from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, ConvTransposeNorm, FFNBlock
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2):
