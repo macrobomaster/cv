@@ -119,7 +119,7 @@ class Supervisor:
   def __init__(self, procs:list[SupervisedProcess]):
     self.sprocs = {p.name: p for p in procs}
 
-    kv_clear("global_rt")
+    kv_clear("global")
     kv_clear("watchdog")
 
   def run(self):
@@ -128,7 +128,7 @@ class Supervisor:
 
     try:
       while True:
-        kv = kv_getall("global_rt")
+        kv = kv_getall("global")
         self.ensure_running(kv)
 
         running = " ".join(colored(p.name, "green" if p.proc.is_alive() else "red") for p in self.sprocs.values() if p.proc is not None)

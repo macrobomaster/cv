@@ -182,4 +182,4 @@ def run():
     with open(BASE_PATH / "model.safetensors", "wb") as f2: f2.write(f.read())
 
   wandb.finish()
-  kv_put("global_rt", "do_shutdown", True)
+  kv_put("global", "do_shutdown", True)
