@@ -184,7 +184,7 @@ class Patcher:
     return out / 2
 
 class Backbone:
-  def __init__(self, cin:int, cstage:list[int], stages:list[int], sideband_dim:int, sideband_only:bool, shared_sideband_channel_mixer:bool=True, patch_size:int=2, dropout:float=0.0):
+  def __init__(self, cin:int, cstage:list[int], stages:list[int|tuple[int, int]], sideband_dim:int, sideband_only:bool, shared_sideband_channel_mixer:bool=True, patch_size:int=2, dropout:float=0.0):
     self.patcher = Patcher(patch_size)
     self.stem = Stem(cin * patch_size * patch_size, cstage[0])
 
@@ -196,7 +196,8 @@ class Backbone:
     self.sideband_token = Tensor.zeros(1, sideband_dim)
     self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], dropout=dropout)
     self.stage1 = ConvStage(cstage[0], cstage[1], stages[1], dropout=dropout)
-    self.stage2 = AttnStage(cstage[1], cstage[2], stages[2], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    self.stage20 = ConvStage(cstage[1], cstage[2], stages[2][0], dropout=dropout)
+    self.stage21 = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
     self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband_dim=sideband_dim, sideband_only=sideband_only, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
 
   def __call__(self, img:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -212,7 +213,8 @@ class Backbone:
 
     x0 = self.stage0(x)
     x1 = self.stage1(x0)
-    x2, sb = self.stage2(x1, sb)
+    _x2 = self.stage20(x1)
+    x2, sb = self.stage21(_x2, sb)
     x3, sb = self.stage3(x2, sb)
 
     return x0, x1, x2, x3, sb
@@ -324,7 +326,7 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=256, cstage:list[int]=[32, 64, 128, 256], stages:list[int]=[2, 2, 9, 2], sideband_dim:int=512, dropout:float=0.1):
+  def __init__(self, dim:int=256, cstage:list[int]=[32, 64, 128, 256], stages:list[int|tuple[int, int]]=[2, 2, (6, 3), 2], sideband_dim:int=512, dropout:float=0.1):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim, sideband_only=False, shared_sideband_channel_mixer=True, dropout=dropout)
     self.summarizer = Summarizer(cstage, sideband_dim, dim, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
