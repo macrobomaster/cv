@@ -26,7 +26,7 @@ END_LR = 1e-5
 EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
-def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor, m:Tensor):
+def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
   y_det = y[:, 0].cast(dtypes.int32)
   y_color = y[:, 1].cast(dtypes.int32)
   y_number = y[:, 2].cast(dtypes.int32)
