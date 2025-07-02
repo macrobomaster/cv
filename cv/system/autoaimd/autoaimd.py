@@ -1,7 +1,9 @@
 from pathlib import Path
-import pickle, itertools
+from typing import Callable, Any
+import pickle, itertools, time
 
 from tinygrad.tensor import Tensor
+from tinygrad.device import Device
 from tinygrad.dtype import dtypes
 from tinygrad.helpers import GlobalCounters, getenv
 from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
@@ -24,7 +26,7 @@ def run():
     dtypes.default_float = dtypes.float16
 
   # cache model jit
-  model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run"
+  model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run_{Device.DEFAULT}"
   if kv_get("autoaim", model_key) is None:
     logger.info("building cached model")
 
@@ -46,7 +48,7 @@ def run():
 
   # load model
   logger.info(f"loading cached {model_key}")
-  model_pred = pickle.loads(kv_get("autoaim", model_key))
+  model_pred: Callable[[Any, Tensor], Tensor] = pickle.loads(kv_get("autoaim", model_key))
 
   while True:
     sub.update(0)
@@ -58,8 +60,10 @@ def run():
     if sub.updated["camera_feed"]:
       frame = camera_feed["frame"]
       framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
+      ft = time.monotonic()
 
       model_out = model_pred(None, framet).tolist()[0]
+      mt = time.monotonic()
 
       model_out_iter = iter(model_out)
       detm, detp = tuple(itertools.islice(model_out_iter, 2))
@@ -67,6 +71,9 @@ def run():
       numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
       plate_mu = list(itertools.islice(model_out_iter, 10))
       plate_var = list(itertools.islice(model_out_iter, 10))
+      at = time.monotonic()
+
+      print("cap time:", camera_feed["st"] - camera_feed["ct"], "frame time:", ft - camera_feed["st"], "model time:", mt - ft, "accel time:", at - mt, "total model time:", at - camera_feed["st"], "total time:", at - camera_feed["ct"])
 
       match colorm:
         case 0: colorm = "none"
