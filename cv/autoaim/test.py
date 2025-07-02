@@ -44,8 +44,6 @@ if __name__ == "__main__":
     numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
     plate_mu = list(itertools.islice(model_out_iter, 10))
     plate_var = list(itertools.islice(model_out_iter, 10))
-    mask_mu = np.array(list(itertools.islice(model_out_iter, 64 * 128))).reshape((64, 128)).astype(np.uint8)
-    mask_var = np.array(list(itertools.islice(model_out_iter, 64 * 128))).reshape((64, 128)).astype(np.float32)
     match colorm:
       case 0: colorm = "none"
       case 1: colorm = "red"
@@ -106,12 +104,8 @@ if __name__ == "__main__":
       #   # draw frame axes
       #   cv2.drawFrameAxes(img, camera_matrix, dist_coeffs, rvec, tvec, 0.1)
 
-    # upsample mask
-    mask_mu = cv2.resize(mask_mu, (512, 256), interpolation=cv2.INTER_NEAREST)
-
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     cv2.imshow("img", img)
-    cv2.imshow("mask_mu", mask_mu * 255)
 
     key = cv2.waitKey(0)
     if key == ord("q"): break

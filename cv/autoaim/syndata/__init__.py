@@ -29,7 +29,7 @@ RESIZE_PIPELINE = A.Compose([
 plate_images = {}
 plate_corners = {}
 background_images = []
-def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int, int, np.ndarray]:
+def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int, int]:
   global plate_images, plate_corners, background_images
 
   # preload plate image
@@ -77,17 +77,11 @@ def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int,
   x = random.randint(0, img.shape[1] - plate.shape[1])
   y = random.randint(0, img.shape[0] - plate.shape[0])
 
-  mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
-
   # sometimes don't have a plate at all for a negative sample
   detected = random.random() > 0.2
   if detected:
     # put the plate on the background with alpha blending
-    plate_mask = alpha_overlay(plate, img, x, y)
-    # convert to actual mask
-    plate_mask = (plate_mask > 0.5).astype(np.uint8).squeeze(-1)
-    # put the plate on the background
-    mask[y:y+plate_mask.shape[0], x:x+plate_mask.shape[1]] = plate_mask
+    alpha_overlay(plate, img, x, y)
 
   # turn color into int
   match color:
@@ -101,4 +95,4 @@ def generate_sample(file) -> tuple[cv2.Mat, int, list[tuple[float, float]], int,
   bottom_left = x + plate_out["keypoints"][3][0], y + plate_out["keypoints"][3][1]
   bottom_right = x + plate_out["keypoints"][4][0], y + plate_out["keypoints"][4][1]
 
-  return img, int(detected), [center, top_left, top_right, bottom_left, bottom_right], color, number, mask
+  return img, int(detected), [center, top_left, top_right, bottom_left, bottom_right], color, number

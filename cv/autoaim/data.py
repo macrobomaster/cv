@@ -44,8 +44,8 @@ def load_single_file(file) -> dict[str, bytes]:
     color = 0
     number = 0
   elif file.startswith("syn:"):
-    img, detected, keypoints, color, number, mask = generate_sample(file)
-    has_color, has_number, has_plate, has_mask = 1, 1, 1, 1
+    img, detected, keypoints, color, number = generate_sample(file)
+    has_color, has_number, has_plate = 1, 1, 1
   elif file.startswith("path:"):
     img_file = file[5:]
     img = cv2.imread(img_file, cv2.IMREAD_UNCHANGED)
@@ -64,7 +64,7 @@ def load_single_file(file) -> dict[str, bytes]:
   else:
     raise ValueError("unknown file type")
 
-  output = OUTPUT_PIPELINE(image=img, keypoints=keypoints, mask=mask)
+  output = OUTPUT_PIPELINE(image=img, keypoints=keypoints)
   img = output["image"]
   xc, yc = output["keypoints"][0]
   if detected:
@@ -74,7 +74,6 @@ def load_single_file(file) -> dict[str, bytes]:
   xtr, ytr = output["keypoints"][2]
   xbl, ybl = output["keypoints"][3]
   xbr, ybr = output["keypoints"][4]
-  mask = output["mask"]
 
   # scale keypoints to (-1,1) range
   xc = xc / img.shape[1] * 2 - 1
@@ -105,21 +104,10 @@ def load_single_file(file) -> dict[str, bytes]:
     has_plate = 0
     has_color = 1
     has_number = 1
-    has_mask = 1
-
-  # get area of plate as the number of pixels that are active in the mask
-  if mask is not None:
-    mask_area = np.count_nonzero(mask)
-  else:
-    mask_area = 0
-
-  # downsample mask
-  mask = cv2.resize(mask, (img.shape[1] // 4, img.shape[0] // 4), interpolation=cv2.INTER_NEAREST)
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate, has_mask, mask_area), dtype=np.float32).tobytes(),
-    "m": mask.tobytes(),
+    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate), dtype=np.float32).tobytes(),
   }
 
 def get_train_files():
@@ -175,7 +163,6 @@ if __name__ == "__main__":
     print(anno)
     cv2.circle(img, (int(((anno[2] + 1) / 2) * 512), int(((anno[3] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
     cv2.imshow("img", img)
-    cv2.imshow("mask", np.frombuffer(data["m"], dtype=np.uint8).reshape((64, 128)) * 255)
     key = cv2.waitKey(0)
     if key == ord("q"):
       break
