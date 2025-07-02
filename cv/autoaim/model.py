@@ -22,13 +22,11 @@ class ChannelMixer:
 class TokenMixer:
   def __init__(self, dim:int):
     self.dim = dim
-    # self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
-    # self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
-    self.conv = RecConv(dim, kernel_size=5, levels=2)
+    self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
+    self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    return self.conv(x)
-    # return self.conv7x7(x) + self.conv3x3(x)
+    return self.conv7x7(x) + self.conv3x3(x)
 
 class ConvBlock:
   def __init__(self, dim:int, dropout:float=0.0):
