@@ -6,7 +6,7 @@ from tinygrad.device import is_dtype_supported
 from tinygrad.helpers import make_tuple, prod, round_up
 from tinygrad import nn
 
-from .tensor import rms_norm
+from .tensor import rms_norm, upsample
 
 class BatchNorm:
   def __init__(self, sz:int, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
@@ -97,9 +97,8 @@ class UpsampleConv:
     self.c = nn.Conv2d(in_channels, out_channels, kernel_size, 1, padding, groups=groups, dilation=dilation, bias=bias)
     self.scale_factor = stride
   def __call__(self, x:Tensor) -> Tensor:
-    bs, c, py, px = x.shape
     if self.scale_factor != 1:
-      x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, self.scale_factor, px, self.scale_factor).reshape(bs, c, py*self.scale_factor, px*self.scale_factor)
+      x = upsample(x, self.scale_factor)
     return self.c(x)
 
 class UpsampleConvNorm:
@@ -108,9 +107,8 @@ class UpsampleConvNorm:
     self.n = BatchNorm(out_channels)
     self.scale_factor = stride
   def __call__(self, x:Tensor) -> Tensor:
-    bs, c, py, px = x.shape
     if self.scale_factor != 1:
-      x = x.reshape(bs, c, py, 1, px, 1).expand(bs, c, py, self.scale_factor, px, self.scale_factor).reshape(bs, c, py*self.scale_factor, px*self.scale_factor)
+      x = upsample(x, self.scale_factor)
     return self.n(self.c(x))
 
 class SE:
@@ -191,7 +189,6 @@ class RecConv:
     self.levels = levels
     self.down = nn.Conv2d(dim, dim, kernel_size, 2, kernel_size//2, groups=dim, bias=False)
     self.convs = [nn.Conv2d(dim, dim, kernel_size, 1, kernel_size//2, groups=dim, bias=False) for _ in range(levels + 1)]
-    self.up = nn.ConvTranspose2d(dim, dim, round_up(kernel_size, 2), 2, kernel_size//2, groups=dim, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
     features = [x]
@@ -200,7 +197,7 @@ class RecConv:
 
     x = self.convs[-1](features[-1])
     for f, conv in zip(reversed(features[:-1]), reversed(self.convs[:-1])):
-      x = conv(self.up(x) + f)
+      x = conv(upsample(x, 2) + f)
 
     return x
 
