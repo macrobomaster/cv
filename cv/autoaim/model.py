@@ -16,7 +16,7 @@ class ChannelMixer:
     self.gate = nn.Conv2d(cin, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.up(x).gelu()
+    xx = self.up(x).relu().square()
     return self.down(xx) * self.gate(x).sigmoid()
 
 class TokenMixer:
@@ -149,8 +149,8 @@ class Stem:
     self.proj = ConvNorm(cmid, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x: Tensor) -> Tensor:
-    x = self.conv1(x).gelu()
-    x = self.conv2(x).gelu()
+    x = self.conv1(x).relu().square()
+    x = self.conv2(x).relu().square()
     return self.proj(x)
 
 class Patcher:
