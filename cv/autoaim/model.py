@@ -5,7 +5,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock
+from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2):
@@ -16,17 +16,19 @@ class ChannelMixer:
     self.gate = nn.Conv2d(cin, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.up(x).relu().square()
+    xx = self.up(x).gelu()
     return self.down(xx) * self.gate(x).sigmoid()
 
 class TokenMixer:
   def __init__(self, dim:int):
     self.dim = dim
-    self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
-    self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
+    # self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
+    # self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
+    self.conv = RecConv(dim, kernel_size=5, levels=2)
 
   def __call__(self, x:Tensor) -> Tensor:
-    return self.conv7x7(x) + self.conv3x3(x)
+    return self.conv(x)
+    # return self.conv7x7(x) + self.conv3x3(x)
 
 class ConvBlock:
   def __init__(self, dim:int, dropout:float=0.0):
@@ -149,8 +151,8 @@ class Stem:
     self.proj = ConvNorm(cmid, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x: Tensor) -> Tensor:
-    x = self.conv1(x).relu().square()
-    x = self.conv2(x).relu().square()
+    x = self.conv1(x).gelu()
+    x = self.conv2(x).gelu()
     return self.proj(x)
 
 class Patcher:
