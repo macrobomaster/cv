@@ -5,7 +5,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
+from ..common.nn import SRM, BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=3):
@@ -47,7 +47,7 @@ class AttnBlock:
     self.cpe = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
 
     self.tnorm = nn.RMSNorm(dim)
-    self.token_mixer = Attention(dim, dim // 4, heads=1, out="mod", dropout=dropout)
+    self.token_mixer = Attention(dim, dim // 4, heads=4, kv_heads=1, out="mod", dropout=dropout)
 
     if not sideband_only:
       self.cnorm = BatchNorm(dim)
@@ -138,11 +138,13 @@ class Stem:
     self.conv1 = ConvNorm(cin, cout, 5, 2, 2, bias=False)
     self.conv2 = ConvNorm(cout, cmid, 5, 2, 2, bias=False)
     self.proj = ConvNorm(cmid, cout, 1, 1, 0, bias=False)
+    self.srm = SRM(cout)
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
     x = self.conv2(x).gelu()
-    return self.proj(x)
+    x = self.proj(x)
+    return self.srm(x)
 
 class Patcher:
   def __init__(self, patch_size:int):
