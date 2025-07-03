@@ -5,19 +5,19 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import SRM, BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
+from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=3):
     if cout == 0: cout = cin
+    self.cout, self.exp = cout, exp
 
-    self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
+    self.up_gate = nn.Conv2d(cin, cout * exp + cout, 1, 1, 0, bias=False)
     self.down = nn.Conv2d(cout * exp, cout, 1, 1, 0, bias=False)
-    self.gate = nn.Conv2d(cin, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.up(x).gelu()
-    return self.down(xx) * self.gate(x).sigmoid()
+    xx, gate = self.up_gate(x).split([self.cout * self.exp, self.cout], dim=1)
+    return self.down(xx.gelu()) * gate.hardsigmoid()
 
 class ConvBlock:
   def __init__(self, dim:int, stage:int, dropout:float=0.0):
@@ -138,13 +138,11 @@ class Stem:
     self.conv1 = ConvNorm(cin, cout, 5, 2, 2, bias=False)
     self.conv2 = ConvNorm(cout, cmid, 5, 2, 2, bias=False)
     self.proj = ConvNorm(cmid, cout, 1, 1, 0, bias=False)
-    self.srm = SRM(cout)
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
     x = self.conv2(x).gelu()
-    x = self.proj(x)
-    return self.srm(x)
+    return self.proj(x)
 
 class Patcher:
   def __init__(self, patch_size:int):
@@ -333,14 +331,15 @@ class Model:
 
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
-  from tinygrad.helpers import GlobalCounters, getenv
+  from tinygrad.helpers import GlobalCounters, getenv, Context
   from tinygrad.engine.jit import TinyJit
   from functools import partial
+  import time
 
   BS = 1
-  if getenv("HALF", 0):
+  if getenv("HALF"):
     dtypes.default_float = dtypes.float16
-  if getenv("TRAIN", 0):
+  if getenv("TRAIN"):
     Tensor.training = True
     BS = 256
 
@@ -348,19 +347,47 @@ if __name__ == "__main__":
 
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
-    return model(x)
-  x = Tensor.randn(BS, 256, 512, 3).realize()
-  GlobalCounters.reset()
-  run(x)
-  x = Tensor.randn(BS, 256, 512, 3).realize()
-  GlobalCounters.reset()
-  run(x)
+    ret = model(x.to(None))
+    if isinstance(ret, Tensor):
+      return ret.to("CPU")
+    else:
+      return ret
 
-  # full run
-  x = Tensor.randn(BS, 256, 512, 3).realize()
-  GlobalCounters.reset()
-  x = run(x)
-  print(x)
+  # warmup runs
+  with Context(DEBUG=getenv("DEBUG", 2)):
+    x = Tensor.randn(BS, 256, 512, 3, device="CPU").realize()
+    GlobalCounters.reset()
+    run(x)
+    x = Tensor.randn(BS, 256, 512, 3, device="CPU").realize()
+    GlobalCounters.reset()
+    x = run(x)
+    print(x)
+
+  # full runs
+  tms = []
+  for _ in range(15):
+    x = Tensor.randn(BS, 256, 512, 3, device="CPU").realize()
+    GlobalCounters.reset()
+    st = time.perf_counter()
+    run(x)
+    tms.append(time.perf_counter() - st)
+
+  # remove first few runs to avoid warmup effects
+  tms = tms[5:]
+
+  print(f"average time: {sum(tms) / len(tms):.4f} seconds")
+  print(f"average latency: {(sum(tms) / len(tms)) * 1000:.2f} ms")
+  print(f"average fps: {BS / (sum(tms) / len(tms)):.2f} fps")
+
+  print(f"fastest time: {min(tms):.4f} seconds")
+  print(f"fastest latency: {min(tms) * 1000:.2f} ms")
+  print(f"fastest fps: {BS / min(tms):.2f} fps")
+
+  print(f"slowest time: {max(tms):.4f} seconds")
+  print(f"slowest latency: {max(tms) * 1000:.2f} ms")
+  print(f"slowest fps: {BS / max(tms):.2f} fps")
+
+  print(f"model size: {sum(p.numel() * p.dtype.itemsize for p in get_parameters(model)) / 1024**2:.2f} MB")
 
   print(f"model parameters: {sum(p.numel() for p in get_parameters(model))}")
   print(f"backbone parameters: {sum(p.numel() for p in get_parameters(model.backbone))}")

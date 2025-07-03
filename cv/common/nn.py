@@ -188,7 +188,7 @@ class Attention:
       case "proj":
         return self.proj(attn)
       case "mod":
-        return self.proj(attn.sigmoid() * self.gate(x).sigmoid())
+        return self.proj(attn.hardsigmoid() * self.gate(x).hardsigmoid())
       case _: return attn
 
 class RecConv:
@@ -251,17 +251,16 @@ class RefineGate2d:
 class FFNBlock:
   def __init__(self, cin:int, cout:int=0, exp:int=2, norm:bool=True, bias:bool=True, dropout:float=0.0):
     if cout == 0: cout = cin
-    self.cin, self.cout = cin, cout
+    self.cin, self.cout, self.exp = cin, cout, exp
     self.dropout = dropout
     if norm: self.norm = nn.RMSNorm(cin)
-    self.up = nn.Linear(cin, cout * exp, bias=bias)
+    self.up_gate = nn.Linear(cin, cout * exp + cout, bias=bias)
     self.down = nn.Linear(cout * exp, cout, bias=bias)
-    self.gate = nn.Linear(cin, cout, bias=bias)
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "norm"): x = self.norm(x)
-    xx = self.up(x).gelu()
-    x = self.down(xx) * self.gate(x).sigmoid()
+    xx, gate = self.up_gate(x).split([self.cout * self.exp, self.cout], dim=-1)
+    x = self.down(xx.gelu()) * gate.hardsigmoid()
     return x.dropout(self.dropout)
 
 class FFN:
