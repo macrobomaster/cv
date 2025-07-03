@@ -314,7 +314,7 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int|tuple[int, int]]=[2, 2, (6, 3), 2], sideband_dim:int=1024, dropout:float=0.0):
+  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int|tuple[int, int]]=[2, 2, (6, 3), 2], sideband_dim:int=512, dropout:float=0.0):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim, sideband_only=False, shared_sideband_channel_mixer=True, dropout=dropout)
     self.summarizer = Summarizer(cstage, sideband_dim, dim, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
