@@ -176,10 +176,8 @@ class Attention:
     v = v.reshape(b, kvt, self.kv_heads, self.value_dim)
 
     # gqa
-    print(q.shape, k.shape, v.shape, self.heads, self.kv_heads)
     k = k.repeat_interleave(self.heads // self.kv_heads, dim=2)
     v = v.repeat_interleave(self.heads // self.kv_heads, dim=2)
-    print(q.shape, k.shape, v.shape, self.heads, self.kv_heads)
 
     # sdpa
     q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
