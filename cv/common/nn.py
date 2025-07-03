@@ -3,7 +3,7 @@ from typing import Literal
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.device import is_dtype_supported
-from tinygrad.helpers import make_tuple, prod, round_up
+from tinygrad.helpers import make_tuple, prod
 from tinygrad import nn
 
 from .tensor import rms_norm, upsample

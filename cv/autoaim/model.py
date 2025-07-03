@@ -4,11 +4,11 @@ from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
-from ..common.tensor import pixel_unshuffle
+from ..common.tensor import channel_shuffle, pixel_unshuffle
 from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
 
 class ChannelMixer:
-  def __init__(self, cin:int, cout:int=0, exp:int=2):
+  def __init__(self, cin:int, cout:int=0, exp:int=3):
     if cout == 0: cout = cin
 
     self.up = nn.Conv2d(cin, cout * exp, 1, 1, 0, bias=False)
@@ -20,22 +20,18 @@ class ChannelMixer:
     return self.down(xx) * self.gate(x).sigmoid()
 
 class TokenMixer:
-  def __init__(self, dim:int):
-    self.dim = dim
-    # self.conv7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim, bias=False)
-    # self.conv3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
-    self.conv = RecConv(dim, kernel_size=5, levels=2)
+  def __init__(self, dim:int, stage:int):
+    self.conv = RecConv(dim, kernel_size=5, levels=3-stage)
 
   def __call__(self, x:Tensor) -> Tensor:
     return self.conv(x)
-    # return self.conv7x7(x) + self.conv3x3(x)
 
 class ConvBlock:
-  def __init__(self, dim:int, dropout:float=0.0):
+  def __init__(self, dim:int, stage:int, dropout:float=0.0):
     self.dropout = dropout
 
     self.tnorm = BatchNorm(dim)
-    self.token_mixer = TokenMixer(dim)
+    self.token_mixer = TokenMixer(dim, stage)
 
     self.cnorm = BatchNorm(dim)
     self.channel_mixer = ChannelMixer(dim)
@@ -119,9 +115,9 @@ class Downsample:
     return x + xx
 
 class ConvStage:
-  def __init__(self, cin:int, cout:int, num_blocks:int, dropout:float=0.0):
+  def __init__(self, cin:int, cout:int, num_blocks:int, stage:int, dropout:float=0.0):
     if cin != cout: self.downsample = Downsample(cin, cout)
-    self.blocks = [ConvBlock(cout, dropout=dropout) for _ in range(num_blocks)]
+    self.blocks = [ConvBlock(cout, stage, dropout=dropout) for _ in range(num_blocks)]
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "downsample"):
@@ -196,9 +192,9 @@ class Backbone:
       self.sideband_channel_mixer = None
 
     self.sideband_token = Tensor.zeros(1, sideband_dim)
-    self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], dropout=dropout)
-    self.stage1 = ConvStage(cstage[0], cstage[1], stages[1], dropout=dropout)
-    self.stage20 = ConvStage(cstage[1], cstage[2], stages[2][0], dropout=dropout)
+    self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], 0, dropout=dropout)
+    self.stage1 = ConvStage(cstage[0], cstage[1], stages[1], 1, dropout=dropout)
+    self.stage20 = ConvStage(cstage[1], cstage[2], stages[2][0], 2, dropout=dropout)
     self.stage21 = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
     self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband_dim=sideband_dim, sideband_only=sideband_only, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
 
@@ -222,19 +218,20 @@ class Backbone:
     return x0, x1, x2, x3, sb
 
 class FeatureAdapter:
-  def __init__(self, cin:int, cout:int, cmid:int=0):
-    if cmid == 0: cmid = cout // 4
-    self.dw = ConvNorm(cin, cin, 3, 1, 1, groups=cin, bias=False)
-    self.pw = ConvNorm(cin, cmid, 1, 1, 0, bias=False)
-    self.proj = nn.Linear(cmid * 4, cout)
+  def __init__(self, cin:int, cout:int):
+    cmid = cout // 4
+    self.proj_in = ConvNorm(cin, cmid * 2, 1, 1, 0, bias=False)
+    self.dw1 = ConvNorm(cmid, cmid, 3, 1, 1, groups=cmid, bias=False)
+    self.dw2 = ConvNorm(cmid, cmid, 3, 1, 1, groups=cmid, bias=False)
+    self.proj = nn.Linear(4 * cmid, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x0 = self.pw(self.dw(x)).relu()
-    x1 = x0.max_pool2d((5, 5), stride=1, padding=2)
-    x2 = x1.max_pool2d((5, 5), stride=1, padding=2)
-    x3 = x2.max_pool2d((5, 5), stride=1, padding=2)
-    x = Tensor.cat(x0, x1, x2, x3, dim=1).mean((2, 3))
-    return self.proj(x)
+    x = self.proj_in(x).relu()
+    x0, x1 = channel_shuffle(x)
+    x2 = self.dw1(x1).relu()
+    x3 = self.dw2(x2).relu()
+    x = Tensor.cat(x0, x1, x2, x3, dim=1)
+    return self.proj(x.mean((2, 3)))
 
 class Summarizer:
   def __init__(self, cstage:list[int], sideband_dim:int, dim:int, dropout:float=0.0):
@@ -317,7 +314,7 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=256, cstage:list[int]=[32, 64, 128, 256], stages:list[int|tuple[int, int]]=[2, 2, (6, 3), 2], sideband_dim:int=512, dropout:float=0.0):
+  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int|tuple[int, int]]=[2, 2, (6, 3), 2], sideband_dim:int=1024, dropout:float=0.0):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim, sideband_only=False, shared_sideband_channel_mixer=True, dropout=dropout)
     self.summarizer = Summarizer(cstage, sideband_dim, dim, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
@@ -363,4 +360,4 @@ if __name__ == "__main__":
   print(f"summarizer parameters: {sum(p.numel() for p in get_parameters(model.summarizer))}")
   print(f"head parameters: {sum(p.numel() for p in get_parameters(model.heads))}")
 
-  print(f"model gflops: {GlobalCounters.global_ops * 1e-9:.2f} GFLOPS")
+  print(f"model gflops: {GlobalCounters.global_ops * 1e-9:.2f} GFLOPs")
