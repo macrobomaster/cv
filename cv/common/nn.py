@@ -138,17 +138,21 @@ class SRM:
 
 class Attention:
   """
-  Cross and Self Attention with qk-norm and configurable output modulation
+  Cross and Self Attention with qk-norm, gqa, and configurable output modulation
   """
-  def __init__(self, dim:int, qk_dim:int, heads:int, out:Literal["proj", "mod"]|None="proj", dropout:float=0.0):
+  def __init__(self, dim:int, qk_dim:int, heads:int, kv_heads:int=0, out:Literal["proj", "mod"]|None="proj", dropout:float=0.0):
     assert qk_dim % heads == 0, "qk_dim must be divisible by heads"
     assert out in ["proj", "mod", None], "out must be one of 'proj', 'mod', or None"
+    if kv_heads == 0: kv_heads = heads
 
     self.dropout = dropout
 
-    self.dim, self.qk_dim, self.heads = dim, qk_dim, heads
+    self.dim, self.qk_dim, self.heads, self.kv_heads = dim, qk_dim, heads, kv_heads
     self.q = nn.Linear(dim, qk_dim, bias=False)
     self.kv = nn.Linear(dim, qk_dim + dim, bias=False)
+
+    self.q_norm = nn.RMSNorm(qk_dim // heads)
+    self.k_norm = nn.RMSNorm(qk_dim // kv_heads)
 
     self.out = out
     match out:
@@ -163,14 +167,24 @@ class Attention:
     if kv is not None: kvt = kv.shape[1]
     else: kvt = t
 
+    # q, k, v
     q = self.q(x)
     k, v = self.kv(x if kv is None else kv).split([self.qk_dim, self.dim], dim=-1)
-    q = rms_norm(q.reshape(b, t, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
-    k = rms_norm(k.reshape(b, kvt, self.heads, self.qk_dim // self.heads)).transpose(1, 2)
-    v = v.reshape(b, kvt, self.heads, c // self.heads).transpose(1, 2)
+    q = self.q_norm(q.reshape(b, t, self.heads, self.qk_dim // self.heads))
+    k = self.k_norm(k.reshape(b, kvt, self.kv_heads, self.qk_dim // self.kv_heads))
+    v = v.reshape(b, kvt, self.kv_heads, c // self.kv_heads)
 
+    # gqa
+    print(q.shape, k.shape, v.shape, self.heads, self.kv_heads)
+    k = k.repeat_interleave(self.heads // self.kv_heads, dim=2)
+    v = v.repeat_interleave(self.heads // self.kv_heads, dim=2)
+    print(q.shape, k.shape, v.shape, self.heads, self.kv_heads)
+
+    # sdpa
+    q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
     attn = q.scaled_dot_product_attention(k, v, dropout_p=self.dropout).transpose(1, 2).reshape(b, t, c)
 
+    # output modulation
     match self.out:
       case "proj":
         return self.proj(attn)
@@ -255,7 +269,7 @@ class FFN:
   def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=2, blocks:int=1, norm:bool=True, bias:bool=True, dropout:float=0.0):
     self.blocks = [FFNBlock(in_dim, mid_dim, exp, norm, bias, dropout)]
     self.blocks += [FFNBlock(mid_dim, mid_dim, exp, norm, bias, dropout) for _ in range(blocks - 1)]
-    self.out = nn.Linear(mid_dim, out_dim)
+    self.out = nn.Linear(mid_dim, out_dim, bias=bias)
 
   def __call__(self, x:Tensor) -> Tensor:
     for block in self.blocks:
