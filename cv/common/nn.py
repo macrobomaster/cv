@@ -141,18 +141,19 @@ class Attention:
   Cross and Self Attention with qk-norm, gqa, and configurable output modulation
   """
   def __init__(self, dim:int, qk_dim:int, heads:int, kv_heads:int=0, out:Literal["proj", "mod"]|None="proj", dropout:float=0.0):
+    if kv_heads == 0: kv_heads = heads
     assert qk_dim % heads == 0, "qk_dim must be divisible by heads"
     assert out in ["proj", "mod", None], "out must be one of 'proj', 'mod', or None"
-    if kv_heads == 0: kv_heads = heads
 
     self.dropout = dropout
 
     self.dim, self.qk_dim, self.heads, self.kv_heads = dim, qk_dim, heads, kv_heads
+    self.head_dim, self.value_dim = qk_dim // heads, dim // heads
     self.q = nn.Linear(dim, qk_dim, bias=False)
-    self.kv = nn.Linear(dim, qk_dim + dim, bias=False)
+    self.kv = nn.Linear(dim, self.kv_heads * (self.head_dim + self.value_dim), bias=False)
 
-    self.q_norm = nn.RMSNorm(qk_dim // heads)
-    self.k_norm = nn.RMSNorm(qk_dim // kv_heads)
+    self.q_norm = nn.RMSNorm(self.head_dim)
+    self.k_norm = nn.RMSNorm(self.head_dim)
 
     self.out = out
     match out:
@@ -169,10 +170,10 @@ class Attention:
 
     # q, k, v
     q = self.q(x)
-    k, v = self.kv(x if kv is None else kv).split([self.qk_dim, self.dim], dim=-1)
-    q = self.q_norm(q.reshape(b, t, self.heads, self.qk_dim // self.heads))
-    k = self.k_norm(k.reshape(b, kvt, self.kv_heads, self.qk_dim // self.kv_heads))
-    v = v.reshape(b, kvt, self.kv_heads, c // self.kv_heads)
+    k, v = self.kv(x if kv is None else kv).split([self.kv_heads * self.head_dim, self.kv_heads * self.value_dim], dim=-1)
+    q = self.q_norm(q.reshape(b, t, self.heads, self.head_dim))
+    k = self.k_norm(k.reshape(b, kvt, self.kv_heads, self.head_dim))
+    v = v.reshape(b, kvt, self.kv_heads, self.value_dim)
 
     # gqa
     print(q.shape, k.shape, v.shape, self.heads, self.kv_heads)
