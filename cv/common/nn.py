@@ -247,7 +247,7 @@ class FFNBlock:
 
   def __call__(self, x:Tensor) -> Tensor:
     if hasattr(self, "norm"): x = self.norm(x)
-    xx = self.up(x).relu().square()
+    xx = self.up(x).gelu()
     x = self.down(xx) * self.gate(x).sigmoid()
     return x.dropout(self.dropout)
 

@@ -4,7 +4,7 @@ from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
-from ..common.tensor import channel_shuffle, pixel_unshuffle
+from ..common.tensor import pixel_unshuffle
 from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
 
 class ChannelMixer:
@@ -19,19 +19,12 @@ class ChannelMixer:
     xx = self.up(x).gelu()
     return self.down(xx) * self.gate(x).sigmoid()
 
-class TokenMixer:
-  def __init__(self, dim:int, stage:int):
-    self.conv = RecConv(dim, kernel_size=5, levels=3-stage)
-
-  def __call__(self, x:Tensor) -> Tensor:
-    return self.conv(x)
-
 class ConvBlock:
   def __init__(self, dim:int, stage:int, dropout:float=0.0):
     self.dropout = dropout
 
     self.tnorm = BatchNorm(dim)
-    self.token_mixer = TokenMixer(dim, stage)
+    self.token_mixer = RecConv(dim, kernel_size=5, levels=3-stage)
 
     self.cnorm = BatchNorm(dim)
     self.channel_mixer = ChannelMixer(dim)
@@ -153,6 +146,7 @@ class Stem:
 
 class Patcher:
   def __init__(self, patch_size:int):
+    assert patch_size in (2, 4, 8), "patch_size must be one of 2, 4, or 8"
     self.patch_size = patch_size
 
   def __call__(self, x:Tensor) -> Tensor:
@@ -182,7 +176,7 @@ class Patcher:
     return out / 2
 
 class Backbone:
-  def __init__(self, cin:int, cstage:list[int], stages:list[int|tuple[int, int]], sideband_dim:int, sideband_only:bool, shared_sideband_channel_mixer:bool=True, patch_size:int=2, dropout:float=0.0):
+  def __init__(self, cin:int, cstage:list[int], stages:list[tuple[int, int]], sideband_dim:int, sideband_only:bool, shared_sideband_channel_mixer:bool=True, patch_size:int=2, dropout:float=0.0):
     self.patcher = Patcher(patch_size)
     self.stem = Stem(cin * patch_size * patch_size, cstage[0])
 
@@ -192,11 +186,13 @@ class Backbone:
       self.sideband_channel_mixer = None
 
     self.sideband_token = Tensor.zeros(1, sideband_dim)
-    self.stage0 = ConvStage(cstage[0], cstage[0], stages[0], 0, dropout=dropout)
-    self.stage1 = ConvStage(cstage[0], cstage[1], stages[1], 1, dropout=dropout)
-    self.stage20 = ConvStage(cstage[1], cstage[2], stages[2][0], 2, dropout=dropout)
-    self.stage21 = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
-    self.stage3 = AttnStage(cstage[2], cstage[3], stages[3], sideband_dim=sideband_dim, sideband_only=sideband_only, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    self.stage0c = ConvStage(cstage[0], cstage[0], stages[0][0], 0, dropout=dropout)
+    self.stage0a = AttnStage(cstage[0], cstage[0], stages[0][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    self.stage1c = ConvStage(cstage[0], cstage[1], stages[1][0], 1, dropout=dropout)
+    self.stage1a = AttnStage(cstage[1], cstage[1], stages[1][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    self.stage2c = ConvStage(cstage[1], cstage[2], stages[2][0], 2, dropout=dropout)
+    self.stage2a = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    self.stage3a = AttnStage(cstage[2], cstage[3], stages[3][1], sideband_dim=sideband_dim, sideband_only=sideband_only, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
 
   def __call__(self, img:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     # image normalization
@@ -209,28 +205,25 @@ class Backbone:
 
     sb = self.sideband_token.expand(x.shape[0], -1)
 
-    x0 = self.stage0(x)
-    x1 = self.stage1(x0)
-    _x2 = self.stage20(x1)
-    x2, sb = self.stage21(_x2, sb)
-    x3, sb = self.stage3(x2, sb)
+    # stages
+    _x0 = self.stage0c(x)
+    x0, sb = self.stage0a(_x0, sb)
+    _x1 = self.stage1c(x0)
+    x1, sb = self.stage1a(_x1, sb)
+    _x2 = self.stage2c(x1)
+    x2, sb = self.stage2a(_x2, sb)
+    x3, sb = self.stage3a(x2, sb)
 
     return x0, x1, x2, x3, sb
 
 class FeatureAdapter:
   def __init__(self, cin:int, cout:int):
-    cmid = cout // 4
-    self.proj_in = ConvNorm(cin, cmid * 2, 1, 1, 0, bias=False)
-    self.dw1 = ConvNorm(cmid, cmid, 3, 1, 1, groups=cmid, bias=False)
-    self.dw2 = ConvNorm(cmid, cmid, 3, 1, 1, groups=cmid, bias=False)
-    self.proj = nn.Linear(4 * cmid, cout)
+    self.dw = ConvNorm(cin, cin, 3, 1, 1, groups=cin, bias=False)
+    self.pw = ConvNorm(cin, cin, 1, 1, 0, bias=False)
+    self.proj = nn.Linear(cin, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.proj_in(x).relu()
-    x0, x1 = channel_shuffle(x)
-    x2 = self.dw1(x1).relu()
-    x3 = self.dw2(x2).relu()
-    x = Tensor.cat(x0, x1, x2, x3, dim=1)
+    x = self.pw(self.dw(x)).gelu()
     return self.proj(x.mean((2, 3)))
 
 class Summarizer:
@@ -246,11 +239,11 @@ class Summarizer:
     self.ffn = FFN(dim, dim, dim, exp=2, blocks=2, norm=True, dropout=dropout)
 
   def __call__(self, features:tuple[Tensor, ...]) -> Tensor:
-    x0 = self.x0_adapter(features[0]).relu()
-    x1 = self.x1_adapter(features[1]).relu()
-    x2 = self.x2_adapter(features[2]).relu()
-    x3 = self.x3_adapter(features[3]).relu()
-    sb = self.sb_adapter(features[4]).relu()
+    x0 = self.x0_adapter(features[0]).gelu()
+    x1 = self.x1_adapter(features[1]).gelu()
+    x2 = self.x2_adapter(features[2]).gelu()
+    x3 = self.x3_adapter(features[3]).gelu()
+    sb = self.sb_adapter(features[4]).gelu()
 
     f = Tensor.stack(x0, x1, x2, x3, sb, dim=1)
     sb = sb + self.attention(self.attention_norm(f))[:, -1, :]
@@ -314,7 +307,7 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[int|tuple[int, int]]=[2, 2, (6, 3), 2], sideband_dim:int=512, dropout:float=0.0):
+  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(1, 1), (1, 1), (6, 3), (0, 2)], sideband_dim:int=512, dropout:float=0.0):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim, sideband_only=False, shared_sideband_channel_mixer=True, dropout=dropout)
     self.summarizer = Summarizer(cstage, sideband_dim, dim, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
