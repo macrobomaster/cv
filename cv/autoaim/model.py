@@ -24,7 +24,7 @@ class ConvBlock:
     self.dropout = dropout
 
     self.tnorm = BatchNorm(dim)
-    self.token_mixer = RecConv(dim, kernel_size=5, levels=3-stage)
+    self.token_mixer = RecConv(dim, kernel_size=5, levels=4-stage)
 
     self.cnorm = BatchNorm(dim)
     self.channel_mixer = ChannelMixer(dim)
@@ -186,13 +186,16 @@ class Backbone:
       self.sideband_channel_mixer = None
 
     self.sideband_token = Tensor.zeros(1, sideband_dim)
-    self.stage0c = ConvStage(cstage[0], cstage[0], stages[0][0], 0, dropout=dropout)
-    self.stage0a = AttnStage(cstage[0], cstage[0], stages[0][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
-    self.stage1c = ConvStage(cstage[0], cstage[1], stages[1][0], 1, dropout=dropout)
-    self.stage1a = AttnStage(cstage[1], cstage[1], stages[1][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
-    self.stage2c = ConvStage(cstage[1], cstage[2], stages[2][0], 2, dropout=dropout)
-    self.stage2a = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
-    self.stage3a = AttnStage(cstage[2], cstage[3], stages[3][1], sideband_dim=sideband_dim, sideband_only=sideband_only, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+
+    self.stages = stages
+    if stages[0][0] > 0: self.stage0c = ConvStage(cstage[0], cstage[0], stages[0][0], 0, dropout=dropout)
+    if stages[0][1] > 0: self.stage0a = AttnStage(cstage[0], cstage[0], stages[0][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    if stages[1][0] > 0: self.stage1c = ConvStage(cstage[0], cstage[1], stages[1][0], 1, dropout=dropout)
+    if stages[1][1] > 0: self.stage1a = AttnStage(cstage[1], cstage[1], stages[1][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    if stages[2][0] > 0: self.stage2c = ConvStage(cstage[1], cstage[2], stages[2][0], 2, dropout=dropout)
+    if stages[2][1] > 0: self.stage2a = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
+    if stages[3][0] > 0: self.stage3c = ConvStage(cstage[2], cstage[3], stages[3][0], 3, dropout=dropout)
+    if stages[3][1] > 0: self.stage3a = AttnStage(cstage[2], cstage[3], stages[3][1], sideband_dim=sideband_dim, sideband_only=sideband_only, sideband_channel_mixer=self.sideband_channel_mixer, dropout=dropout)
 
   def __call__(self, img:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     # image normalization
@@ -206,13 +209,22 @@ class Backbone:
     sb = self.sideband_token.expand(x.shape[0], -1)
 
     # stages
-    _x0 = self.stage0c(x)
-    x0, sb = self.stage0a(_x0, sb)
-    _x1 = self.stage1c(x0)
-    x1, sb = self.stage1a(_x1, sb)
-    _x2 = self.stage2c(x1)
-    x2, sb = self.stage2a(_x2, sb)
-    x3, sb = self.stage3a(x2, sb)
+    if self.stages[0][0] > 0: _x0 = self.stage0c(x)
+    else: _x0 = x
+    if self.stages[0][1] > 0: x0, sb = self.stage0a(_x0, sb)
+    else: x0 = _x0
+    if self.stages[1][0] > 0: _x1 = self.stage1c(x0)
+    else: _x1 = x0
+    if self.stages[1][1] > 0: x1, sb = self.stage1a(_x1, sb)
+    else: x1 = _x1
+    if self.stages[2][0] > 0: _x2 = self.stage2c(x1)
+    else: _x2 = x1
+    if self.stages[2][1] > 0: x2, sb = self.stage2a(_x2, sb)
+    else: x2 = _x2
+    if self.stages[3][0] > 0: _x3 = self.stage3c(x2)
+    else: _x3 = x2
+    if self.stages[3][1] > 0: x3, sb = self.stage3a(_x3, sb)
+    else: x3 = _x3
 
     return x0, x1, x2, x3, sb
 
@@ -307,7 +319,7 @@ class Heads:
       return det, color, number, plate_logits_mu, plate_log_var
 
 class Model:
-  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(1, 1), (1, 1), (6, 3), (0, 2)], sideband_dim:int=512, dropout:float=0.0):
+  def __init__(self, dim:int=512, cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(2, 0), (1, 1), (6, 3), (0, 2)], sideband_dim:int=512, dropout:float=0.0):
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim, sideband_only=False, shared_sideband_channel_mixer=True, dropout=dropout)
     self.summarizer = Summarizer(cstage, sideband_dim, dim, dropout=dropout)
     self.heads = Heads(dim, dropout=dropout)
