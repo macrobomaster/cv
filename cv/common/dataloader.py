@@ -91,7 +91,7 @@ class Dataloader:
         try: enqueue_batch(self.num)
         except StopIteration: pass
 
-    gottten = [0]*32
+    gottten = [0]*8
     def receive_batch():
       while True:
         num = self.push_pull.pull()
@@ -118,11 +118,10 @@ class Dataloader:
     ret = []
     for _, t in d.items():
       assert isinstance(t, Tensor)
-      ret.append(t.to("CPU"))
-      # if isinstance(device, str):
-      #   ret.append(t.to(device))
-      # else:
-      #   ret.append(t.shard(device, axis=0))
+      if isinstance(device, str):
+        ret.append(t.to(device))
+      else:
+        ret.append(t.shard(device, axis=0))
     return *ret, c
 
 class DataloaderProc:
