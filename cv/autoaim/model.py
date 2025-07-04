@@ -43,6 +43,7 @@ class AttnBlock:
     self.dropout = dropout
     self.sideband, self.sideband_dim, self.sideband_only = sideband_dim // dim, sideband_dim, sideband_only
 
+    self.cpe_norm = BatchNorm(dim)
     self.cpe = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
 
     self.tnorm = nn.RMSNorm(dim)
@@ -61,7 +62,7 @@ class AttnBlock:
     b, c, h, w = x.shape
 
     # conditional positional encoding
-    xx = self.cpe(x)
+    xx = self.cpe(self.cpe_norm(x))
     x = x + xx
 
     # concat sideband to tokens
@@ -354,6 +355,22 @@ class Model:
     f = self.summarizer(xs)
     return self.heads(f)
 
+  def fuse(self):
+    # search model recursively for FusedBlock instances
+    def _find_fused_blocks(m, prefix=""):
+      blocks = []
+      for attr in dir(m):
+        if attr.startswith("__"): continue
+        if isinstance(getattr(m, attr), Tensor): continue
+        if isinstance(getattr(m, attr), FusedBlock): blocks.append((getattr(m, attr), prefix + attr))
+        if hasattr(getattr(m, attr), "__dict__"): blocks.extend(_find_fused_blocks(getattr(m, attr), prefix + attr + "."))
+      return blocks
+
+    # fuse in reverse order to fuse children first
+    for block in reversed(_find_fused_blocks(self)):
+      print(f"Fusing block: {block[1]}")
+      block[0].fuse()
+
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
   from tinygrad.helpers import GlobalCounters, getenv, Context
@@ -369,21 +386,7 @@ if __name__ == "__main__":
     BS = 256
 
   model = Model()
-
-  if getenv("FUSE"):
-    # search model recursively for FusedBlock instances
-    def _find_fused_blocks(m, prefix=""):
-      blocks = []
-      for attr in dir(m):
-        if attr.startswith("__"): continue
-        if isinstance(getattr(m, attr), Tensor): continue
-        if isinstance(getattr(m, attr), FusedBlock): blocks.append((getattr(m, attr), prefix + attr))
-        if hasattr(getattr(m, attr), "__dict__"): blocks.extend(_find_fused_blocks(getattr(m, attr), prefix + attr + "."))
-      return blocks
-    # fuse in reverse order to fuse children first
-    for block in reversed(_find_fused_blocks(model)):
-      print(f"Fusing block: {block[1]}")
-      block[0].fuse()
+  if getenv("FUSE"): model.fuse()
 
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
