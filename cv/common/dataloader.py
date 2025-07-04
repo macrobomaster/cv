@@ -118,10 +118,11 @@ class Dataloader:
     ret = []
     for _, t in d.items():
       assert isinstance(t, Tensor)
-      if isinstance(device, str):
-        ret.append(t.to(device))
-      else:
-        ret.append(t.shard(device, axis=0))
+      ret.append(t.contiguous())
+      # if isinstance(device, str):
+      #   ret.append(t.to(device))
+      # else:
+      #   ret.append(t.shard(device, axis=0))
     return *ret, c
 
 class DataloaderProc:
