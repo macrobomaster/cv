@@ -33,7 +33,7 @@ OUTPUT_PIPELINE = A.Compose([
 ])
 
 def load_single_file(file) -> dict[str, bytes]:
-  has_color, has_number, has_plate, has_mask = 0, 0, 0, 0
+  has_color, has_number, has_plate = 0, 0, 0
   if file.startswith("fake:"):
     img = np.zeros((256, 512, 3), dtype=np.uint8)
     detected = 0
