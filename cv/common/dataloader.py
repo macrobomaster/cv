@@ -118,7 +118,7 @@ class Dataloader:
     ret = []
     for _, t in d.items():
       assert isinstance(t, Tensor)
-      ret.append(t.contiguous())
+      ret.append(t.to("CPU"))
       # if isinstance(device, str):
       #   ret.append(t.to(device))
       # else:
