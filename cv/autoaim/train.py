@@ -80,7 +80,6 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
 def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
   optim.zero_grad()
 
-  x, y = x.shard(GPUS, axis=0), y.shard(GPUS, axis=0)
   pred = model(x)
   loss = loss_fn(model, pred, y)
 
