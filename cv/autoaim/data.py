@@ -61,16 +61,16 @@ def load_single_file(file) -> dict[str, bytes]:
   else:
     raise ValueError("unknown file type")
 
-  output = OUTPUT_PIPELINE(image=img, keypoints=keypoints)
+  output = OUTPUT_PIPELINE(image=img)
   img = output["image"]
-  xc, yc = output["keypoints"][0]
+  xc, yc = keypoints[0]
   if detected:
     if xc < 0 or xc > img.shape[1] or yc < 0 or yc > img.shape[0]:
       detected = 0
-  xtl, ytl = output["keypoints"][1]
-  xtr, ytr = output["keypoints"][2]
-  xbl, ybl = output["keypoints"][3]
-  xbr, ybr = output["keypoints"][4]
+  xtl, ytl = keypoints[1]
+  xtr, ytr = keypoints[2]
+  xbl, ybl = keypoints[3]
+  xbr, ybr = keypoints[4]
 
   # get plate area
   if detected:
