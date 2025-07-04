@@ -39,7 +39,7 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
 
   plate_area = y[:, 17]
 
-  area_weight = 1 / plate_area.clamp(1, 1000)
+  area_weight = 1 / plate_area.div(100)
   area_weight = area_weight / area_weight.mean()
   area_weight = (plate_area > 1).where(area_weight, 1)
 
