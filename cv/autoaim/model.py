@@ -5,7 +5,7 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
+from ..common.nn import FusedBlock, BatchNorm, ConvNorm, Attention, FFN, FFNBlock, RecConv
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=3):
@@ -133,11 +133,10 @@ class AttnStage:
     return x, sb
 
 class Stem:
-  def __init__(self, cin:int, cout:int, exp:float=2):
-    cmid = int(cout * exp)
+  def __init__(self, cin:int, cout:int):
     self.conv1 = ConvNorm(cin, cout, 5, 2, 2, bias=False)
-    self.conv2 = ConvNorm(cout, cmid, 5, 2, 2, bias=False)
-    self.proj = ConvNorm(cmid, cout, 1, 1, 0, bias=False)
+    self.conv2 = ConvNorm(cout, cout, 5, 2, 2, groups=cout, bias=False)
+    self.proj = ConvNorm(cout, cout, 1, 1, 0, bias=False)
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
@@ -344,6 +343,20 @@ if __name__ == "__main__":
     BS = 256
 
   model = Model()
+
+  if not getenv("TRAIN"):
+    # search model recursively for FusedBlock instances, not with nn.Module or named_children
+    def _find_fused_blocks(m, prefix=""):
+      blocks = []
+      for attr in dir(m):
+        if attr.startswith("__"): continue
+        if isinstance(getattr(m, attr), Tensor): continue
+        if isinstance(getattr(m, attr), FusedBlock): blocks.append((getattr(m, attr), prefix + attr))
+        elif hasattr(getattr(m, attr), "__dict__"): blocks.extend(_find_fused_blocks(getattr(m, attr), prefix + attr + "."))
+      return blocks
+    for block in _find_fused_blocks(model):
+      print(f"Fusing block: {block[1]}")
+      block[0].fuse()
 
   @partial(TinyJit, prune=True)
   def run(x:Tensor):
