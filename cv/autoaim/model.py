@@ -43,7 +43,6 @@ class AttnBlock:
     self.dropout = dropout
     self.sideband, self.sideband_dim, self.sideband_only = sideband_dim // dim, sideband_dim, sideband_only
 
-    self.cpe_norm = BatchNorm(dim)
     self.cpe = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False)
 
     self.tnorm = nn.RMSNorm(dim)
@@ -62,7 +61,7 @@ class AttnBlock:
     b, c, h, w = x.shape
 
     # conditional positional encoding
-    xx = self.cpe(self.cpe_norm(x))
+    xx = self.cpe(x)
     x = x + xx
 
     # concat sideband to tokens
@@ -91,13 +90,19 @@ class AttnBlock:
 
     return x, sb
 
-class Downsample:
+class Downsample(FusedBlock):
   def __init__(self, cin:int, cout:int):
+    self.cout = cout
     self.pw = ConvNorm(cin, cout, 1, 1, 0, bias=False)
-    self.dw = ConvNorm(cout, cout, 3, 2, 1, groups=cout, bias=False)
+    self.dw3x3 = ConvNorm(cout, cout, 3, 2, 1, groups=cout, bias=False)
+    self.dw7x7 = ConvNorm(cout, cout, 7, 2, 3, groups=cout, bias=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    xx = self.dw(self.pw(x))
+    xx = self.pw(x).gelu()
+    if not self.fused:
+      xx = (self.dw3x3(xx) + self.dw7x7(xx)).gelu()
+    else:
+      xx = self.conv(xx).gelu()
 
     # shortcut
     x = pixel_unshuffle(x, 2)
@@ -106,6 +111,24 @@ class Downsample:
     x = x.mean(2)
 
     return x + xx
+
+  def fuse(self) -> bool:
+    if not (was_fused := super().fuse()):
+      dw7x7_w = self.dw7x7.c.weight
+      dw3x3_w = self.dw3x3.c.weight.pad((2, 2, 2, 2))
+      w = dw3x3_w + dw7x7_w
+
+      dw7x7_b = self.dw7x7.c.bias
+      dw3x3_b = self.dw3x3.c.bias
+      b = dw3x3_b + dw7x7_b
+
+      self.conv = nn.Conv2d(self.cout, self.cout, 7, 2, 3, groups=self.cout, bias=True)
+      self.conv.weight.replace(w)
+      self.conv.bias.replace(b)
+
+      del self.dw3x3
+      del self.dw7x7
+    return was_fused
 
 class ConvStage:
   def __init__(self, cin:int, cout:int, num_blocks:int, stage:int, dropout:float=0.0):
@@ -141,7 +164,7 @@ class Stem:
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv1(x).gelu()
     x = self.conv2(x).gelu()
-    return self.proj(x)
+    return self.proj(x).gelu()
 
 class Patcher:
   def __init__(self, patch_size:int):
@@ -344,7 +367,7 @@ if __name__ == "__main__":
 
   model = Model()
 
-  if not getenv("TRAIN"):
+  if getenv("FUSE"):
     # search model recursively for FusedBlock instances, not with nn.Module or named_children
     def _find_fused_blocks(m, prefix=""):
       blocks = []
@@ -352,9 +375,10 @@ if __name__ == "__main__":
         if attr.startswith("__"): continue
         if isinstance(getattr(m, attr), Tensor): continue
         if isinstance(getattr(m, attr), FusedBlock): blocks.append((getattr(m, attr), prefix + attr))
-        elif hasattr(getattr(m, attr), "__dict__"): blocks.extend(_find_fused_blocks(getattr(m, attr), prefix + attr + "."))
+        if hasattr(getattr(m, attr), "__dict__"): blocks.extend(_find_fused_blocks(getattr(m, attr), prefix + attr + "."))
       return blocks
-    for block in _find_fused_blocks(model):
+    # fuse in reverse order to fuse children first
+    for block in reversed(_find_fused_blocks(model)):
       print(f"Fusing block: {block[1]}")
       block[0].fuse()
 
