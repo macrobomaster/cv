@@ -30,7 +30,7 @@ OUTPUT_PIPELINE = A.Compose([
     A.PlanckianJitter(),
   ], p=0.5),
   A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
-], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
+])
 
 def load_single_file(file) -> dict[str, bytes]:
   has_color, has_number, has_plate, has_mask = 0, 0, 0, 0
