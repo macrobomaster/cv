@@ -12,8 +12,6 @@ from ..common.dataloader import DataloaderProc
 from ..common import BASE_PATH
 
 OUTPUT_PIPELINE = A.Compose([
-  A.Perspective(p=0.25),
-  A.Affine(translate_percent=(-0.2, 0.2), scale=(0.9, 1.1), rotate=(-45, 45), shear=(-5, 5), border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
   A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
   A.HueSaturationValue(hue_shift_limit=0, sat_shift_limit=(-20, 20), val_shift_limit=0, p=0.5),
   A.OneOf([
@@ -77,7 +75,12 @@ def load_single_file(file) -> dict[str, bytes]:
 
   # get plate area
   if detected:
-    plate_area = abs((xtr - xtl) * (ytr - ytl) + (xbl - xtl) * (ybl - ytl))
+    # bounding box of keypoints
+    min_x = min(xtl, xtr, xbl, xbr)
+    max_x = max(xtl, xtr, xbl, xbr)
+    min_y = min(ytl, ytr, ybl, ybr)
+    max_y = max(ytl, ytr, ybl, ybr)
+    plate_area = (max_x - min_x) * (max_y - min_y)
     if plate_area < 1:
       plate_area = 1
   else:
