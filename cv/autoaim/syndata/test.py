@@ -8,7 +8,7 @@ if __name__ == "__main__":
   while True:
     num = random.choice([1, 2, 3, 4, 5, 6])
     color = random.choice(["red", "blue"])
-    img, detected, keypoints, color, number, mask = generate_sample(f"fake:{num}_{color}")
+    img, detected, keypoints, color, number = generate_sample(f"fake:{num}_{color}")
 
     for keypoint in keypoints:
       x, y = keypoint
@@ -19,7 +19,6 @@ if __name__ == "__main__":
     # convert from rgb to bgr
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     cv2.imshow("img", img)
-    cv2.imshow("mask", mask * 255)
 
     key = cv2.waitKey(0)
     if key == ord("q"): break
