@@ -72,19 +72,6 @@ def load_single_file(file) -> dict[str, bytes]:
   xbl, ybl = keypoints[3]
   xbr, ybr = keypoints[4]
 
-  # get plate area
-  if detected:
-    # bounding box of keypoints
-    min_x = min(xtl, xtr, xbl, xbr)
-    max_x = max(xtl, xtr, xbl, xbr)
-    min_y = min(ytl, ytr, ybl, ybr)
-    max_y = max(ytl, ytr, ybl, ybr)
-    plate_area = (max_x - min_x) * (max_y - min_y)
-    if plate_area < 1:
-      plate_area = 1
-  else:
-    plate_area = 1
-
   # scale keypoints to (-1,1) range
   xc = xc / img.shape[1] * 2 - 1
   yc = yc / img.shape[0] * 2 - 1
@@ -117,7 +104,7 @@ def load_single_file(file) -> dict[str, bytes]:
 
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate, plate_area), dtype=np.float32).tobytes(),
+    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate), dtype=np.float32).tobytes(),
   }
 
 def get_train_files():

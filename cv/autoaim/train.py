@@ -37,15 +37,8 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
   has_number = y[:, 15] > 0
   has_plate = y[:, 16] > 0
 
-  plate_area = y[:, 17]
-
-  area_weight = 1 / plate_area.div(100)
-  area_weight = area_weight / area_weight.mean()
-  area_weight = (plate_area > 1).where(area_weight, 1)
-
   plate_loss = twohot_loss(pred[3], y_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
-  plate_loss = gaussian_uncertainty(plate_loss, pred[4])
-  plate_loss = plate_loss.mean(-1) * area_weight
+  plate_loss = gaussian_uncertainty(plate_loss, pred[4]).mean(-1)
   plate_loss = masked_mean(plate_loss, has_plate)
 
   # quality factor from center keypoint
@@ -59,19 +52,16 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
   target_cls = y_det.one_hot(2)
   target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 1), dim=1)
   det_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
-  det_loss = det_loss * area_weight
   det_loss = masked_mean(det_loss, has_det)
 
   # color loss
   target_cls = y_color.one_hot(4)
   color_loss = cross_entropy(pred[1], target_cls)
-  color_loss = color_loss * area_weight
   color_loss = masked_mean(color_loss, has_color)
 
   # number loss
   target_cls = y_number.one_hot(7)
   number_loss = cross_entropy(pred[2], target_cls)
-  number_loss = number_loss * area_weight
   number_loss = masked_mean(number_loss, has_number)
 
   return det_loss + plate_loss + color_loss + number_loss
@@ -111,7 +101,7 @@ def run():
 
   dataloader = Dataloader({
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-    "y": BatchDesc(shape=(18,), dtype=dtypes.float32),
+    "y": BatchDesc(shape=(17,), dtype=dtypes.float32),
   }, bs=BS, files_fn=get_train_files)
 
   model = Model()
