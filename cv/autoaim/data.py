@@ -1,6 +1,5 @@
 import glob
 
-from tinygrad.dtype import _to_np_dtype, dtypes
 from tinygrad.helpers import getenv
 import albumentations as A
 import cv2
