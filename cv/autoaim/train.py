@@ -45,7 +45,7 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
 
   plate_loss = twohot_loss(pred[3], y_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
   plate_loss = gaussian_uncertainty(plate_loss, pred[4])
-  plate_loss = plate_loss * area_weight
+  plate_loss = plate_loss.mean(-1) * area_weight
   plate_loss = masked_mean(plate_loss, has_plate)
 
   # quality factor from center keypoint
