@@ -56,40 +56,6 @@ def twohot(x:Tensor, bins:int, low:float, high:float) -> Tensor:
 
   return below.one_hot(bins) * w_below[..., None] + above.one_hot(bins) * w_above[..., None]
 
-def twohot_loss(logits:Tensor, y:Tensor, bins:int, low:float, high:float) -> Tensor:
-  target = twohot(y, bins, low, high)
-  loss = -logits.log_softmax(-1).mul(target).sum(-1)
-  return loss.mean()
-
-def masked_twohot_uncertainty_loss(logits:Tensor, log_var:Tensor, y:Tensor, mask:Tensor, bins:int, low:float, high:float) -> Tensor:
-  target = twohot(y, bins, low, high)
-  # cross entropy
-  loss = -logits.log_softmax(-1).mul(target).sum(-1)
-  # aleatoric uncertainty as a gaussian
-  loss = log_var.neg().exp() * loss + log_var
-  # mean across outputs
-  loss = loss.mean(-1)
-  # masking
-  return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
-
-def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2) -> Tensor:
-  p, ce = pred.sigmoid(), pred.binary_crossentropy_logits(y, reduction="none")
-  pt = p * y + (1 - p) * (1 - y)
-  alpha_ = y * alpha + (1 - y) * (1 - alpha)
-  loss = ce * ((1 - pt) ** gamma) * alpha_
-  return loss.mean()
-
-def masked_mal_loss(pred:Tensor, y:Tensor, quality:Tensor, mask:Tensor, gamma:float=2) -> Tensor:
-  target = y.where(quality.detach() ** gamma, 0)
-  ce = pred.binary_crossentropy_logits(target, reduction="none").contiguous().contiguous_backward()
-  loss = ce * y.where(1, pred.sigmoid().detach() ** gamma)
-  loss = loss.sum(-1)
-  return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
-
-def masked_cross_entropy(pred:Tensor, y:Tensor, mask:Tensor) -> Tensor:
-  ce = pred.cross_entropy(y, reduction="none")
-  return mask.where(ce, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
-
 def norm(x:Tensor, axis:int|None=None, eps:float=1e-6) -> Tensor:
   return x * x.square().sum(axis, keepdim=True).add(eps).rsqrt()
 
@@ -101,27 +67,6 @@ def telu(x:Tensor) -> Tensor:
 
 def log_gaussian_pdf(y:Tensor, mu:Tensor, log_var:Tensor) -> Tensor:
   return -0.5 * log_var - 0.5 * math.log(2 * math.pi) - 0.5 * y.unsqueeze(1).sub(mu).square().div(log_var.exp())
-
-def masked_mdn_loss(y:Tensor, mu:Tensor, log_var:Tensor, pi:Tensor, temp:Tensor, mask:Tensor, entropy_reg:float=0.02) -> Tensor:
-  log_prob = log_gaussian_pdf(y, mu, log_var)
-
-  # apply temperature
-  pi = pi / temp
-  log_pi = pi.log_softmax().unsqueeze(-1)
-
-  loss = Tensor.logsumexp(log_prob + log_pi, axis=1).sum(-1).neg()
-
-  # entropy regularization
-  if entropy_reg > 0:
-    entropy = pi.softmax().mul(log_pi.squeeze(-1)).sum(-1).neg()
-    loss = loss - entropy_reg * entropy
-
-  return mask.where(loss, 0).sum() / mask.cast(dtypes.int32).sum().add(1e-6)
-
-def hinge_discriminator_loss(logits_real:Tensor, logits_fake:Tensor) -> Tensor:
-  real_loss = (1.0 - logits_real).relu().mean()
-  fake_loss = (1.0 + logits_fake).relu().mean()
-  return 0.5 * (real_loss + fake_loss)
 
 def _dft_matrix(n:int) -> tuple[Tensor, Tensor]:
   x = Tensor.arange(n, dtype=dtypes.float32).reshape(n, 1)

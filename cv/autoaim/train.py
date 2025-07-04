@@ -11,7 +11,7 @@ import wandb
 from ..system.core.logging import logger
 from ..system.core.keyvalue import kv_put
 from ..common.dataloader import BatchDesc, Dataloader
-from ..common.tensor import masked_cross_entropy, masked_mal_loss, masked_twohot_uncertainty_loss
+from ..common.losses import twohot_loss, cross_entropy, mal_loss, gaussian_uncertainty, masked_mean
 from ..common.optim import CLaProp, CosineWarmupLR, grad_clip_norm, SwitchEMA
 from .common import BASE_PATH
 from .model import Model
@@ -21,7 +21,7 @@ GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
 BS = 256 * len(GPUS)
 WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
-START_LR = 2e-3
+START_LR = 2e-3 * len(GPUS)
 END_LR = 1e-5
 EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
@@ -37,7 +37,16 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
   has_number = y[:, 15] > 0
   has_plate = y[:, 16] > 0
 
-  plate_loss = masked_twohot_uncertainty_loss(pred[3], pred[4], y_plate, has_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
+  plate_area = y[:, 17]
+
+  area_weight = 1 / plate_area
+  area_weight = area_weight / area_weight.mean()
+  area_weight = (plate_area > 1).where(area_weight, 1)
+
+  plate_loss = twohot_loss(pred[3], y_plate, model.heads.plate_head.bins, model.heads.plate_head.low, model.heads.plate_head.high)
+  plate_loss = gaussian_uncertainty(plate_loss, pred[4])
+  plate_loss = plate_loss * area_weight
+  plate_loss = masked_mean(plate_loss, has_plate)
 
   # quality factor from center keypoint
   if not hasattr(loss_fn, "plate_twohot_weights"):
@@ -49,15 +58,21 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
   # det loss
   target_cls = y_det.one_hot(2)
   target_quality = target_cls[:, :1].cat(quality.unsqueeze(-1).expand(y.shape[0], 1), dim=1)
-  det_loss = masked_mal_loss(pred[0], target_cls, target_quality, has_det, gamma=1.5)
+  det_loss = mal_loss(pred[0], target_cls, target_quality, gamma=1.5)
+  det_loss = det_loss * area_weight
+  det_loss = masked_mean(det_loss, has_det)
 
   # color loss
   target_cls = y_color.one_hot(4)
-  color_loss = masked_cross_entropy(pred[1], target_cls, has_color)
+  color_loss = cross_entropy(pred[1], target_cls)
+  color_loss = color_loss * area_weight
+  color_loss = masked_mean(color_loss, has_color)
 
   # number loss
   target_cls = y_number.one_hot(7)
-  number_loss = masked_cross_entropy(pred[2], target_cls, has_number)
+  number_loss = cross_entropy(pred[2], target_cls)
+  number_loss = number_loss * area_weight
+  number_loss = masked_mean(number_loss, has_number)
 
   return det_loss + plate_loss + color_loss + number_loss
 
@@ -96,7 +111,7 @@ def run():
 
   dataloader = Dataloader({
     "x": BatchDesc(shape=(256, 512, 3), dtype=dtypes.uint8),
-    "y": BatchDesc(shape=(17,), dtype=dtypes.float32),
+    "y": BatchDesc(shape=(18,), dtype=dtypes.float32),
   }, bs=BS, files_fn=get_train_files)
 
   model = Model()
