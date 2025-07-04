@@ -371,7 +371,7 @@ if __name__ == "__main__":
   model = Model()
 
   if getenv("FUSE"):
-    # search model recursively for FusedBlock instances, not with nn.Module or named_children
+    # search model recursively for FusedBlock instances
     def _find_fused_blocks(m, prefix=""):
       blocks = []
       for attr in dir(m):
