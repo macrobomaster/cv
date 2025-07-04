@@ -91,8 +91,8 @@ class AttnBlock:
     return x, sb
 
 class Downsample(FusedBlock):
-  def __init__(self, cin:int, cout:int):
-    self.cout = cout
+  def __init__(self, cin:int, cout:int, shortcut:bool=True):
+    self.cout, self.shortcut = cout, shortcut
     self.pw = ConvNorm(cin, cout, 1, 1, 0, bias=False)
     self.dw3x3 = ConvNorm(cout, cout, 3, 2, 1, groups=cout, bias=False)
     self.dw7x7 = ConvNorm(cout, cout, 7, 2, 3, groups=cout, bias=False)
@@ -105,12 +105,16 @@ class Downsample(FusedBlock):
       xx = self.conv(xx).gelu()
 
     # shortcut
-    x = pixel_unshuffle(x, 2)
-    b, c, h, w = x.shape
-    x = x.reshape(b, xx.shape[1], c // xx.shape[1], h, w)
-    x = x.mean(2)
+    if self.shortcut:
+      x = pixel_unshuffle(x, 2)
+      b, c, h, w = x.shape
+      x = x.reshape(b, xx.shape[1], c // xx.shape[1], h, w)
+      x = x.mean(2)
+      x = x + xx
+    else:
+      x = xx
 
-    return x + xx
+    return x
 
   def fuse(self) -> bool:
     if not (was_fused := super().fuse()):
@@ -252,13 +256,12 @@ class Backbone:
 
 class FeatureAdapter:
   def __init__(self, cin:int, cout:int):
-    self.dw = ConvNorm(cin, cin, 3, 1, 1, groups=cin, bias=False)
-    self.pw = ConvNorm(cin, cin, 1, 1, 0, bias=False)
+    self.down = Downsample(cin, cin, shortcut=False)
     self.proj = nn.Linear(cin, cout)
 
   def __call__(self, x:Tensor) -> Tensor:
-    x = self.pw(self.dw(x)).gelu()
-    return self.proj(x.mean((2, 3)))
+    x = self.down(x).mean((2, 3))
+    return self.proj(x)
 
 class Summarizer:
   def __init__(self, cstage:list[int], sideband_dim:int, dim:int, dropout:float=0.0):
