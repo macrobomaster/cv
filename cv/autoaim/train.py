@@ -1,4 +1,4 @@
-import time
+import time, math
 
 from tinygrad.tensor import Tensor
 from tinygrad.helpers import getenv, GlobalCounters
@@ -19,10 +19,10 @@ from .data import get_train_files
 
 GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
 BS = 256 * len(GPUS)
-WARMUP_STEPS = 400
+WARMUP_STEPS = 500
 WARMPUP_LR = 1e-7
-START_LR = 2e-3
-END_LR = 1e-5
+START_LR = 2e-3 * math.sqrt(BS / 256)
+END_LR = 3e-4
 EPOCHS = 50
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
@@ -110,7 +110,7 @@ def run():
   for _, x in get_state_dict(model_ema).items(): x.to_(GPUS)
 
   parameters = get_parameters(model)
-  optim = CLaProp(parameters, weight_decay=0.01)
+  optim = CLaProp(parameters, weight_decay=0.05)
   lr_sched = CosineWarmupLR(optim, WARMUP_STEPS, WARMPUP_LR, START_LR, END_LR, EPOCHS, STEPS_PER_EPOCH)
 
   if (ckpt := getenv("CKPT", "")) != "":
@@ -131,7 +131,7 @@ def run():
       state_dict = safe_load(BASE_PATH / "intermediate" / f"optim_{ckpt}.safetensors")
       load_state_dict(optim, state_dict, strict=False)
 
-  switch_ema = SwitchEMA(model, model_ema, EPOCHS, STEPS_PER_EPOCH, momentum=0.999)
+  switch_ema = SwitchEMA(model, model_ema, EPOCHS, STEPS_PER_EPOCH, momentum=0.99)
 
   steps = 0
   for epoch in range(EPOCHS):
