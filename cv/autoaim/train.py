@@ -21,9 +21,9 @@ GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
 BS = 256 * len(GPUS)
 WARMUP_STEPS = 400
 WARMPUP_LR = 1e-7
-START_LR = 2e-3 * len(GPUS)
+START_LR = 2e-3
 END_LR = 1e-5
-EPOCHS = 50
+EPOCHS = 75
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
@@ -67,8 +67,10 @@ def loss_fn(model, pred:tuple[Tensor, ...], y:Tensor):
   return det_loss + plate_loss + color_loss + number_loss
 
 @TinyJit
-def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
+def train_step(model, optim, lr_sched, switch_ema, dataloader, dln) -> Tensor:
   optim.zero_grad()
+
+  x, y = dataloader.slice(dln, GPUS)
 
   pred = model(x)
   loss = loss_fn(model, pred, y)
@@ -80,7 +82,7 @@ def train_step(model, optim, lr_sched, switch_ema, x, y) -> Tensor:
   optim.step()
   lr_sched.step()
 
-  switch_ema.update()
+  # switch_ema.update()
 
   return Tensor.cat(loss.float().reshape(1), global_norm.float().reshape(1), optim.lr.float().reshape(1))
 
@@ -136,15 +138,15 @@ def run():
   steps = 0
   for epoch in range(EPOCHS):
     dataloader.load()
-    i, d = 0, dataloader.next(GPUS)
+    i, d = 0, dataloader.next()
     while d is not None:
       st = time.perf_counter()
       GlobalCounters.reset()
 
-      out = train_step(model, optim, lr_sched, switch_ema, *d[:-1])
+      out = train_step(model, optim, lr_sched, switch_ema, dataloader, d[0])
       pt = time.perf_counter()
 
-      try: next_d = dataloader.next(GPUS)
+      try: next_d = dataloader.next()
       except StopIteration: next_d = None
       dt = time.perf_counter()
 

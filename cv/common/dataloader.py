@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from tinygrad.helpers import prod, getenv, Context
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import DType
+from tinygrad.uop.ops import UOp
 
 from ..system.core import messaging
 from ..system.core.logging import logger
@@ -49,27 +50,20 @@ class Dataloader:
       if self.push_pull.pull(False) == True:
         started += 1
         logger.info(f"dataloader {started} connected")
-      time.sleep(0.1)
     logger.info("all dataloaders connected")
 
-    szs = {name: (bs, *desc.shape) for name, desc in descs.items()}
+    self.szs = {name: (8, bs, *desc.shape) for name, desc in descs.items()}
 
-    inflight_shms = []
-    for i in range(8):
-      shms = {}
-      for name, desc in descs.items():
-        if os.path.exists(f"/dev/shm/dataloader_{name}_{i}"): os.unlink(f"/dev/shm/dataloader_{name}_{i}")
-        shms[name] = shared_memory.SharedMemory(name=f"dataloader_{name}_{i}", create=True, size=prod(szs[name]) * desc.dtype.itemsize)
-      inflight_shms.append(shms)
+    self.shms = {}
+    for name, desc in descs.items():
+      if os.path.exists(f"/dev/shm/dataloader_{name}"): os.unlink(f"/dev/shm/dataloader_{name}")
+      self.shms[name] = shared_memory.SharedMemory(name=f"dataloader_{name}", create=True, size=prod(self.szs[name]) * desc.dtype.itemsize)
 
-    self.inflight = []
-    for i in range(8):
-      tensors = {}
-      for name, desc in descs.items():
-        tensors[name] = Tensor.empty(*szs[name], dtype=desc.dtype, device=f"disk:/dev/shm/dataloader_{name}_{i}")
-      self.inflight.append(tensors)
+    self.tensors = {}
+    for name, desc in descs.items():
+      self.tensors[name] = Tensor.empty(*self.szs[name], dtype=desc.dtype, device=f"disk:/dev/shm/dataloader_{name}")
 
-    kv_put("dataloader", "inflight", pickle.dumps(self.inflight))
+    kv_put("dataloader", "tensors", pickle.dumps(self.tensors))
 
     # start
     for _ in range(5):
@@ -98,7 +92,7 @@ class Dataloader:
         gottten[num] += 1
         if gottten[num] == self.bs: break
       gottten[num] = 0
-      return self.inflight[num], Cookie(num)
+      return num, Cookie(num)
 
     for bn in range(8):
       enqueue_batch(bn)
@@ -113,16 +107,20 @@ class Dataloader:
     self.iter = iter(self._epoch())
     self.loading = True
 
-  def next(self, device:str|tuple[str, ...]):
+  def next(self):
     d, c = next(self.iter)
+    return UOp.variable("dln", 0, 7).bind(d), c
+
+  def slice(self, dln:UOp, device:str|tuple[str, ...]):
     ret = []
-    for _, t in d.items():
-      assert isinstance(t, Tensor)
+    for _, t in self.tensors.items():
       if isinstance(device, str):
-        ret.append(t.to(device))
+        t = t.to(device)
       else:
-        ret.append(t.shard(device, axis=0))
-    return *ret, c
+        t = t.shard(device, axis=1)
+      t = t.shrink(((dln, dln+1), *[None]*len(t.shape[1:]))).reshape(t.shape[1:]).contiguous().realize()
+      ret.append(t)
+    return ret
 
 class DataloaderProc:
   def __init__(self, load_single_fn:Callable):
@@ -140,7 +138,7 @@ class DataloaderProc:
     sync.update(None)
 
     # grab the shared memory
-    inflight = pickle.loads(kv_get("dataloader", "inflight"))
+    tensors = pickle.loads(kv_get("dataloader", "tensors"))
 
     logger.info("dataloader online")
 
@@ -153,8 +151,8 @@ class DataloaderProc:
         # write to shared memory
         name = ""
         try:
-          for name, t in inflight[num].items():
-            t[idx].contiguous().realize().uop.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
+          for name, t in tensors.items():
+            t[num][idx].contiguous().realize().uop.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
         except Exception as e:
           logger.error(f"failed to load {file}, {name}")
           raise e
