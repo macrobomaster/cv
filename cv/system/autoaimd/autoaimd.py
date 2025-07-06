@@ -33,6 +33,7 @@ def run():
     model = Model()
     state_dict = safe_load(str(Path(__file__).parent.parent.parent.parent / "weights/model.safetensors"))
     load_state_dict(model, state_dict, verbose=False)
+    model.fuse()
     if HALF:
       for key, param in get_state_dict(model).items():
         if "norm" in key: continue
@@ -73,7 +74,7 @@ def run():
       plate_var = list(itertools.islice(model_out_iter, 10))
       at = time.monotonic()
 
-      print("cap time:", camera_feed["st"] - camera_feed["ct"], "frame time:", ft - camera_feed["st"], "model time:", mt - ft, "accel time:", at - mt, "total model time:", at - camera_feed["st"], "total time:", at - camera_feed["ct"])
+      # print("cap time:", camera_feed["st"] - camera_feed["ct"], "frame time:", ft - camera_feed["st"], "model time:", mt - ft, "accel time:", at - mt, "total model time:", at - camera_feed["st"], "total time:", at - camera_feed["ct"])
 
       match colorm:
         case 0: colorm = "none"
