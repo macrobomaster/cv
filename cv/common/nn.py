@@ -243,13 +243,9 @@ class Attention:
     k = self.k_norm(k.reshape(b, kvt, self.kv_heads, self.head_dim))
     v = v.reshape(b, kvt, self.kv_heads, self.value_dim)
 
-    # gqa
-    k = k.repeat_interleave(self.heads // self.kv_heads, dim=2)
-    v = v.repeat_interleave(self.heads // self.kv_heads, dim=2)
-
     # sdpa
     q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-    attn = q.scaled_dot_product_attention(k, v, dropout_p=self.dropout).transpose(1, 2).reshape(b, t, c)
+    attn = q.scaled_dot_product_attention(k, v, enable_gqa=True, dropout_p=self.dropout).transpose(1, 2).reshape(b, t, c)
 
     # output modulation
     match self.out:
