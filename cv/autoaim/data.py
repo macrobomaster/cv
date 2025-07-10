@@ -134,7 +134,7 @@ def get_train_files():
 
   fake_files = [
     "fake:"
-  ] * len(real_files)
+  ] * 32000
 
   if getenv("FAKEFILES", 0):
     return fake_files
