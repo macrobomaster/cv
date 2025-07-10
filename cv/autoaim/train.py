@@ -5,7 +5,8 @@ from tinygrad.helpers import getenv, GlobalCounters
 from tinygrad.dtype import dtypes
 from tinygrad.engine.jit import TinyJit
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, safe_load, safe_save
-from tinygrad.device import Device
+from tinygrad.device import Device, finalize_profile
+from tinygrad.uop.ops import print_match_stats
 import wandb
 
 from ..system.core.logging import logger
@@ -134,10 +135,10 @@ def run():
   switch_ema = SwitchEMA(model, model_ema, EPOCHS, STEPS_PER_EPOCH, momentum=0.99)
 
   steps = 0
-  for epoch in range(EPOCHS):
+  for epoch in range(EPOCHS if not getenv("VIZ") else 1):
     dataloader.load()
     i, d = 0, dataloader.next(GPUS)
-    while d is not None:
+    while d is not None and (i < 6 or not getenv("VIZ")):
       st = time.perf_counter()
       GlobalCounters.reset()
 
@@ -171,12 +172,17 @@ def run():
       steps += 1
 
     # save intermediate model
-    safe_save(get_state_dict(model), str(BASE_PATH / f"intermediate/model_{epoch}.safetensors"))
-    safe_save(get_state_dict(optim), str(BASE_PATH / f"intermediate/optim_{epoch}.safetensors"))
+    if not getenv("VIZ"):
+      safe_save(get_state_dict(model), str(BASE_PATH / f"intermediate/model_{epoch}.safetensors"))
+      safe_save(get_state_dict(optim), str(BASE_PATH / f"intermediate/optim_{epoch}.safetensors"))
 
   # copy the last intermediate to the final model
-  with open(BASE_PATH / "intermediate" / f"model_{epoch}.safetensors", "rb") as f:
-    with open(BASE_PATH / "model.safetensors", "wb") as f2: f2.write(f.read())
+  if not getenv("VIZ"):
+    with open(BASE_PATH / "intermediate" / f"model_{epoch}.safetensors", "rb") as f:
+      with open(BASE_PATH / "model.safetensors", "wb") as f2: f2.write(f.read())
 
   wandb.finish()
-  kv_put("global", "do_shutdown", True)
+  if not getenv("VIZ"): kv_put("global", "do_shutdown", True)
+  else:
+    finalize_profile()
+    print_match_stats()
