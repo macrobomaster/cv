@@ -132,6 +132,8 @@
             in
             with pkgs-x86_64-linux;
             [
+              rerun
+              (python.withPackages python-packages)
               aravis
               aravis.lib
               gobject-introspection
@@ -140,12 +142,10 @@
               sqlite-web
               picocom
               tmux
-              rerun
               (pkgs.writeShellScriptBin "rerun-web" ''
                 #!/usr/bin/env bash
                 ${rerun}/bin/rerun --web-viewer
               '')
-              (python.withPackages python-packages)
             ];
 
           shellHook = ''
