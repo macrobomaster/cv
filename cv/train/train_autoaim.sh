@@ -9,7 +9,7 @@ export BEAM_LOCAL_MAX=1024
 export IGNORE_JIT_FIRST_BEAM=1
 export JITBEAM=4
 
-export IGNORE_OOB=0
+export IGNORE_OOB=1
 export FUSE_ARANGE=1
 # export WINO=1
 # export SINGLE_KERNEL_SOFTMAX=1
