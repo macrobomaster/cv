@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Callable, Any
-import pickle, itertools, time
+import pickle, itertools, time, sys
 
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
@@ -11,6 +11,7 @@ from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
+from ..core.exit_codes import EXIT_RESTART
 from ...autoaim.model import Model
 from ...autoaim.common import pred, MODEL_VERSION
 
@@ -46,6 +47,8 @@ def run():
       pred(model, fake_input).tolist()
 
     kv_put("autoaim", model_key, pickle.dumps(pred))
+    logger.info("cached model built, restarting to use cached version")
+    sys.exit(EXIT_RESTART)
 
   # load model
   logger.info(f"loading cached {model_key}")

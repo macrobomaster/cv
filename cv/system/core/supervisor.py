@@ -8,20 +8,24 @@ from tinygrad.helpers import colored
 from .logging import logger
 from .keyvalue import kv_get, kv_getall, kv_clear
 from . import messaging
+from .exit_codes import EXIT_RESTART
 
 class SupervisedProcess:
   name: str
   module: str
   should_run: Callable[[dict], bool]
+  restart_on_exit_codes: list[int]
 
   proc: Process | None = None
   shutting_down: bool = False
+  last_exit_code: int | None = None
 
-  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True, watchdog_dt:float=-1):
+  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True, watchdog_dt:float=-1, restart_on_exit_codes:list[int]=None):
     self.name = name
     self.module = module
     self.should_run = should_run
     self.watchdog_dt = watchdog_dt
+    self.restart_on_exit_codes = restart_on_exit_codes or [EXIT_RESTART]
 
   @staticmethod
   def _start(name:str, module:str):
@@ -40,6 +44,9 @@ class SupervisedProcess:
       logger.info(f"{name} exiting")
     except KeyboardInterrupt:
       pass
+    except SystemExit as e:
+      # Preserve the exit code for the supervisor
+      sys.exit(e.code)
     except Exception:
       logger.error(f"exception in {name}")
       raise
@@ -152,6 +159,17 @@ class Supervisor:
 
   def ensure_running(self, kv:dict):
     for p in self.sprocs.values():
+      # Check if process exited and handle exit codes
+      if p.proc is not None and not p.proc.is_alive():
+        exit_code = p.proc.exitcode
+        p.last_exit_code = exit_code
+        
+        if exit_code in p.restart_on_exit_codes and not p.shutting_down:
+          logger.info(f"{p.name} exited with code {exit_code}, restarting")
+          p.proc = None  # Clear the process so it can be restarted
+        else:
+          logger.debug(f"{p.name} exited with code {exit_code}")
+
       if p.should_run(kv):
         p.start()
       else:
