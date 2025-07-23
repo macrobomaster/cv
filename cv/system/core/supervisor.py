@@ -6,7 +6,7 @@ from setproctitle import setproctitle
 from tinygrad.helpers import colored
 
 from .logging import logger
-from .keyvalue import kv_get, kv_getall, kv_clear
+from .keyvalue import kv_get, kv_getall, kv_clear, kv_put
 from . import messaging
 
 class SupervisedProcess:
@@ -121,6 +121,7 @@ class Supervisor:
 
     kv_clear("global")
     kv_clear("watchdog")
+    kv_clear("restart")
 
   def run(self):
     logger.bind("supervisor")
@@ -130,6 +131,7 @@ class Supervisor:
       while True:
         kv = kv_getall("global")
         self.ensure_running(kv)
+        self.check_restart_requests()
 
         running = " ".join(colored(p.name, "green" if p.proc.is_alive() else "red") for p in self.sprocs.values() if p.proc is not None)
         logger.debug(f"{running}")
@@ -158,3 +160,12 @@ class Supervisor:
         p.stop(block=False)
 
       p.watchdog()
+
+  def check_restart_requests(self):
+    restart_requests = kv_getall("restart")
+    for process_name, should_restart in restart_requests.items():
+      if should_restart and process_name in self.sprocs:
+        logger.info(f"restarting {process_name} due to kv store request")
+        self.sprocs[process_name].restart()
+        # Clear the restart request
+        kv_put("restart", process_name, False)

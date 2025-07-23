@@ -46,6 +46,11 @@ def run():
       pred(model, fake_input).tolist()
 
     kv_put("autoaim", model_key, pickle.dumps(pred))
+    
+    # Request restart after building cached model
+    logger.info("cached model built, requesting restart")
+    kv_put("restart", "autoaimd", True)
+    return  # Exit to allow supervisor to restart us
 
   # load model
   logger.info(f"loading cached {model_key}")
