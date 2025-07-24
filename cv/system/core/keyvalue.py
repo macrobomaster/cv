@@ -13,6 +13,8 @@ _kv_connection = None
 def kv_connection():
   global _kv_connection
   if _kv_connection is None:
+    # Ensure SYSTEM_PATH exists before creating the database connection
+    SYSTEM_PATH.mkdir(parents=True, exist_ok=True)
     _kv_connection = sqlite3.connect(KVPATH, timeout=2, isolation_level="IMMEDIATE")
     # another connection has set it already or is in the process of setting it
     # that connection will lock the database
