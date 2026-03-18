@@ -44,7 +44,7 @@ class FrequencyKeeper:
     dt = now - self.last_time
     if dt < self.dt:
       time.sleep(self.dt - dt)
-    self.last_time = now
+    self.last_time = time.monotonic()
 
 class Debounce:
   def __init__(self, dt:float=0.1):
