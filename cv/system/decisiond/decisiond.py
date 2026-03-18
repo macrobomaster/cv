@@ -48,15 +48,19 @@ class ArcSegment:
 # -- waypoint follower with arc blending --
 
 class WaypointFollower:
-  def __init__(self, waypoints: list[tuple[float, float]], speed: float, blend_radius: float):
+  def __init__(self, waypoints: list[tuple[float, float]], speed: float, blend_radius: float, loop: bool = False):
     self.segments = _build_path(waypoints, speed, blend_radius)
     self.total_duration = sum(s.duration for s in self.segments)
     self.elapsed = 0.0
+    self.loop = loop
 
   def step(self, dt: float) -> tuple[float, float]:
     self.elapsed += dt
     if self.elapsed >= self.total_duration:
-      return 0.0, 0.0
+      if self.loop:
+        self.elapsed %= self.total_duration
+      else:
+        return 0.0, 0.0
     t = self.elapsed
     for seg in self.segments:
       if t <= seg.duration:
@@ -156,6 +160,12 @@ def _build_path(waypoints: list[tuple[float, float]], speed: float, blend_radius
 
   return segments
 
+# -- path config --
+
+PATH_WAYPOINTS = [(0, 0), (0.2, 0), (0.2, 0.2), (0, 0.2), (0, 0)]
+PATH_SPEED = 1
+PATH_BLEND_RADIUS = 0.1
+
 # -- main loop --
 
 def run():
@@ -163,9 +173,10 @@ def run():
   sub = messaging.Sub(["autoaim", "plate", "game_running", "team_color"], poll="autoaim")
 
   follower = WaypointFollower(
-    waypoints=[(0, 0), (0.2, 0), (0.2, 0.2), (0, 0.2), (0, 0)],
-    speed=1,
-    blend_radius=0.1,
+    waypoints=PATH_WAYPOINTS,
+    speed=PATH_SPEED,
+    blend_radius=PATH_BLEND_RADIUS,
+    loop=True,
   )
 
   fk = FrequencyKeeper(100)

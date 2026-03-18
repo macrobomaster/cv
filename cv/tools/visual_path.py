@@ -8,14 +8,12 @@ from collections import deque
 
 import rerun as rr
 
-from ..system.decisiond.decisiond import WaypointFollower, _build_path, LineSegment, ArcSegment
+from ..system.decisiond.decisiond import (
+  WaypointFollower, _build_path, LineSegment, ArcSegment,
+  PATH_WAYPOINTS, PATH_SPEED, PATH_BLEND_RADIUS,
+)
 from ..system.core import messaging
 from ..system.core.helpers import FrequencyKeeper
-
-# path config — must match decisiond.run()
-WAYPOINTS = [(0, 0), (6.2, 0), (6.2, 6.2), (0, 6.2), (0, 0)]
-SPEED = 1.03
-BLEND_RADIUS = 0.5
 
 # visualization
 ARC_SAMPLE_STEP = 0.05  # radians (~3 degrees)
@@ -96,17 +94,17 @@ def main():
   rr.connect_grpc()
 
   # build path
-  segments = _build_path(WAYPOINTS, SPEED, BLEND_RADIUS)
+  segments = _build_path(PATH_WAYPOINTS, PATH_SPEED, PATH_BLEND_RADIUS)
   total_duration = sum(s.duration for s in segments)
-  start = WAYPOINTS[0]
+  start = PATH_WAYPOINTS[0]
 
   # -- static: planned path --
   path_points = sample_path_points(segments, start)
   rr.log("path/planned", rr.LineStrips2D([path_points], colors=[[100, 100, 255]], radii=[0.03]), static=True)
 
   # -- static: waypoint markers --
-  wp_points = [(x, z) for x, z in WAYPOINTS]
-  wp_labels = [f"WP{i} ({x},{z})" for i, (x, z) in enumerate(WAYPOINTS)]
+  wp_points = [(x, z) for x, z in PATH_WAYPOINTS]
+  wp_labels = [f"WP{i} ({x},{z})" for i, (x, z) in enumerate(PATH_WAYPOINTS)]
   rr.log("path/waypoints", rr.Points2D(wp_points, colors=[[255, 200, 0]], radii=[0.08], labels=wp_labels), static=True)
 
   # -- static: segment boundaries (where lines meet arcs) --
