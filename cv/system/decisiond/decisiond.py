@@ -83,7 +83,7 @@ def compute_lead_offset(pos:tuple, vel:tuple, dist:float) -> tuple[float, float]
     delta_xc *= scale
     delta_yc *= scale
 
-  return delta_xc, delta_yc
+  return float(delta_xc), float(delta_yc)
 
 class ShootDecision:
   def __init__(self):
