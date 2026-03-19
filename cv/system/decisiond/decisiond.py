@@ -91,26 +91,25 @@ class SpinCompensator:
   """Detects spinning targets and aims at the center of rotation.
 
   When the target robot is spinning, armor plates orbit the chassis center.
-  This class detects spin via x-position variance, estimates the center of
-  spin from the windowed mean, and tracks translational drift by comparing
-  the means of the older and newer halves of the window. The drift is
-  heavily EMA-smoothed (alpha=0.01) to filter out the spin-frequency
-  oscillation that leaks into the half-mean difference.
+  Spin is detected via x-position variance in a sliding window. The center
+  is estimated as the windowed mean of recent detections.
+
+  Lead is not applied during spin because the plate is only visible during
+  part of each revolution, always sweeping the same direction. This makes
+  any position-derived velocity biased in the sweep direction regardless
+  of the robot's actual translational movement.
   """
   def __init__(self, window_sec:float=SPIN_WINDOW_SEC, var_threshold:float=SPIN_VAR_THRESHOLD):
     self.window_sec = window_sec
     self.var_threshold = var_threshold
     self.history: deque[tuple[float, float, float]] = deque()
-    self.drift_vx = 0.0
-    self.drift_vy = 0.0
 
-  def step(self, xc:float, yc:float) -> tuple[float, float, bool, float, float]:
+  def step(self, xc:float, yc:float) -> tuple[float, float, bool]:
     """Process a detection and return spin-compensated aim point.
 
     Returns:
-      (xc, yc, is_spinning, drift_vx, drift_vy)
-      xc, yc: center of spin if spinning, raw detection if not
-      drift_vx, drift_vy: translational drift velocity in px/s (0 if not spinning)
+      (xc, yc, is_spinning)
+      xc, yc: windowed mean (center of spin) if spinning, raw detection if not
     """
     now = time.monotonic()
     self.history.append((now, xc, yc))
@@ -119,7 +118,7 @@ class SpinCompensator:
       self.history.popleft()
 
     if len(self.history) < 10:
-      return xc, yc, False, 0.0, 0.0
+      return xc, yc, False
 
     n = len(self.history)
     mean_x = sum(h[1] for h in self.history) / n
@@ -127,36 +126,12 @@ class SpinCompensator:
     var_x = sum((h[1] - mean_x) ** 2 for h in self.history) / n
 
     if var_x > self.var_threshold:
-      # estimate drift from difference of older vs newer half-means
-      mid = n // 2
-      if mid >= 5:
-        older = list(self.history)[:mid]
-        newer = list(self.history)[mid:]
-        mean_t1 = sum(h[0] for h in older) / len(older)
-        mean_x1 = sum(h[1] for h in older) / len(older)
-        mean_y1 = sum(h[2] for h in older) / len(older)
-        mean_t2 = sum(h[0] for h in newer) / len(newer)
-        mean_x2 = sum(h[1] for h in newer) / len(newer)
-        mean_y2 = sum(h[2] for h in newer) / len(newer)
-        dt = mean_t2 - mean_t1
-        if dt > 0.01:
-          raw_vx = (mean_x2 - mean_x1) / dt
-          raw_vy = (mean_y2 - mean_y1) / dt
-          # heavy smoothing (alpha=0.01) to filter spin-frequency oscillation
-          # from the drift estimate while preserving the true translational component
-          self.drift_vx += 0.01 * (raw_vx - self.drift_vx)
-          self.drift_vy += 0.01 * (raw_vy - self.drift_vy)
+      return float(mean_x), float(mean_y), True
 
-      return float(mean_x), float(mean_y), True, self.drift_vx, self.drift_vy
-
-    self.drift_vx = 0.0
-    self.drift_vy = 0.0
-    return xc, yc, False, 0.0, 0.0
+    return xc, yc, False
 
   def reset(self):
     self.history.clear()
-    self.drift_vx = 0.0
-    self.drift_vy = 0.0
 
 class ShootDecision:
   def __init__(self):
@@ -221,22 +196,12 @@ def run():
         xc, yc = plate_mu[0], plate_mu[1]
 
         # detect spin and compensate aim point to target center of rotation
-        xc, yc, is_spinning, drift_vx, drift_vy = spin_comp.step(xc, yc)
+        xc, yc, is_spinning = spin_comp.step(xc, yc)
 
         # aim ahead of moving targets based on projectile time-of-flight
-        if is_spinning:
-          # during spin, lead using heavily-smoothed drift velocity of spin center
-          tof = plate["dist"] / PROJECTILE_SPEED
-          lead_x = drift_vx * tof
-          lead_y = drift_vy * tof
-          lead_mag = math.sqrt(lead_x * lead_x + lead_y * lead_y)
-          if lead_mag > MAX_LEAD_PX:
-            scale = MAX_LEAD_PX / lead_mag
-            lead_x *= scale
-            lead_y *= scale
-          xc += lead_x
-          yc += lead_y
-        elif "vel" in plate:
+        # during spin, lead is skipped: any position-derived velocity has an
+        # unremovable directional bias from one-sided plate visibility
+        if not is_spinning and "vel" in plate:
           lead_x, lead_y = compute_lead_offset(plate["pos"], plate["vel"], plate["dist"])
           xc += lead_x
           yc += lead_y
