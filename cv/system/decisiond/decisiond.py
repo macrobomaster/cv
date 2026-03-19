@@ -162,7 +162,7 @@ def _build_path(waypoints: list[tuple[float, float]], speed: float, blend_radius
 
 # -- path config --
 
-PATH_WAYPOINTS = [(0, 0), (5.5, 0), (5.5, 1), (0, 1), (0, 2), (5.5, 2), (5.5, 3), (0, 3), (0, 4), (4, 4)]
+PATH_WAYPOINTS = [(0, 0), (5.5, 0), (5.5, 1), (0, 1), (0, 2), (5.5, 2), (5.5, 3), (0, 2.8), (0, 3.8), (5, 3.8)]
 PATH_SPEED = 1
 PATH_BLEND_RADIUS = 0.5
 
@@ -176,7 +176,7 @@ def run():
     waypoints=PATH_WAYPOINTS,
     speed=PATH_SPEED,
     blend_radius=PATH_BLEND_RADIUS,
-    loop=True,
+    loop=False,
   )
 
   fk = FrequencyKeeper(100)
