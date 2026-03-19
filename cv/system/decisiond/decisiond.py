@@ -9,8 +9,10 @@ from ..plated.plated import CAMERA_MATRIX
 
 MAINTAIN_DIST = 2
 CHASE_SPEED = 2
-PROJECTILE_SPEED = 25  # m/s
-MAX_LEAD_PX = 80       # max lead offset in pixels, prevents runaway predictions
+PROJECTILE_SPEED = 25       # m/s
+MAX_LEAD_PX = 80            # max lead offset in pixels, prevents runaway predictions
+SPIN_WINDOW_SEC = 1.0       # time window for spin detection (~1-2 revolutions at 1-2 Hz)
+SPIN_VAR_THRESHOLD = 1000.0 # residual x-variance (px²) above which target is classified as spinning
 
 @dataclass(frozen=True)
 class Waypoint:
@@ -85,6 +87,75 @@ def compute_lead_offset(pos:tuple, vel:tuple, dist:float) -> tuple[float, float]
 
   return float(delta_xc), float(delta_yc)
 
+class SpinCompensator:
+  """Detects spinning targets and provides compensated aim point.
+
+  When the target robot is spinning, armor plates orbit the chassis center.
+  This class detects spin via x-position variance, estimates the center of
+  spin from the windowed mean, and tracks translational drift by comparing
+  the means of the older and newer halves of the window (EMA-smoothed).
+  """
+  def __init__(self, window_sec:float=SPIN_WINDOW_SEC, var_threshold:float=SPIN_VAR_THRESHOLD):
+    self.window_sec = window_sec
+    self.var_threshold = var_threshold
+    self.history: deque[tuple[float, float, float]] = deque()
+    self.drift_vx = 0.0
+    self.drift_vy = 0.0
+    self.drift_ema = 0.05  # EMA smoothing factor for drift velocity
+
+  def step(self, xc:float, yc:float) -> tuple[float, float, bool, float, float]:
+    """Process a detection and return spin-compensated aim point.
+
+    Returns:
+      (xc, yc, is_spinning, drift_vx, drift_vy)
+      xc, yc: center of spin if spinning, raw detection if not
+      drift_vx, drift_vy: translational drift velocity in px/s (0 if not spinning)
+    """
+    now = time.monotonic()
+    self.history.append((now, xc, yc))
+
+    while self.history and now - self.history[0][0] > self.window_sec:
+      self.history.popleft()
+
+    if len(self.history) < 10:
+      return xc, yc, False, 0.0, 0.0
+
+    n = len(self.history)
+    mean_x = sum(h[1] for h in self.history) / n
+    mean_y = sum(h[2] for h in self.history) / n
+    var_x = sum((h[1] - mean_x) ** 2 for h in self.history) / n
+
+    if var_x > self.var_threshold:
+      # estimate drift from difference of older vs newer half-means
+      mid = n // 2
+      if mid >= 5:
+        older = list(self.history)[:mid]
+        newer = list(self.history)[mid:]
+        mean_t1 = sum(h[0] for h in older) / len(older)
+        mean_x1 = sum(h[1] for h in older) / len(older)
+        mean_y1 = sum(h[2] for h in older) / len(older)
+        mean_t2 = sum(h[0] for h in newer) / len(newer)
+        mean_x2 = sum(h[1] for h in newer) / len(newer)
+        mean_y2 = sum(h[2] for h in newer) / len(newer)
+        dt = mean_t2 - mean_t1
+        if dt > 0.01:
+          raw_vx = (mean_x2 - mean_x1) / dt
+          raw_vy = (mean_y2 - mean_y1) / dt
+          self.drift_vx += self.drift_ema * (raw_vx - self.drift_vx)
+          self.drift_vy += self.drift_ema * (raw_vy - self.drift_vy)
+
+      return float(mean_x), float(mean_y), True, self.drift_vx, self.drift_vy
+
+    # not spinning, reset drift
+    self.drift_vx = 0.0
+    self.drift_vy = 0.0
+    return xc, yc, False, 0.0, 0.0
+
+  def reset(self):
+    self.history.clear()
+    self.drift_vx = 0.0
+    self.drift_vy = 0.0
+
 class ShootDecision:
   def __init__(self):
     self.window = deque(maxlen=10)
@@ -121,6 +192,7 @@ def run():
 
   autoaim_valid_debounce = Debounce(1)
   shoot_decision = ShootDecision()
+  spin_comp = SpinCompensator()
 
   follower = WaypointFollower([
     Waypoint(6.2, 0, 6),
@@ -146,8 +218,23 @@ def run():
         plate_mu = autoaim["plate_mu"]
         xc, yc = plate_mu[0], plate_mu[1]
 
+        # detect spin and compensate aim point to target center of rotation
+        xc, yc, is_spinning, drift_vx, drift_vy = spin_comp.step(xc, yc)
+
         # aim ahead of moving targets based on projectile time-of-flight
-        if "vel" in plate:
+        if is_spinning:
+          # during spin, lead using drift velocity of spin center (px/s)
+          tof = plate["dist"] / PROJECTILE_SPEED
+          lead_x = drift_vx * tof
+          lead_y = drift_vy * tof
+          lead_mag = math.sqrt(lead_x * lead_x + lead_y * lead_y)
+          if lead_mag > MAX_LEAD_PX:
+            scale = MAX_LEAD_PX / lead_mag
+            lead_x *= scale
+            lead_y *= scale
+          xc += lead_x
+          yc += lead_y
+        elif "vel" in plate:
           lead_x, lead_y = compute_lead_offset(plate["pos"], plate["vel"], plate["dist"])
           xc += lead_x
           yc += lead_y
@@ -192,4 +279,4 @@ def run():
         pub.send("shoot", False)
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
-        pass
+        spin_comp.reset()
