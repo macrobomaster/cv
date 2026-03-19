@@ -106,7 +106,7 @@ def run():
           pub.send("plate", {
             "rot": rot,
             "pos": pos,
-            "dist": dist * 3,
+            "dist": dist,
             "rvec": rvec.flatten().tolist(),
             "tvec": tvec.flatten().tolist(),
           })
