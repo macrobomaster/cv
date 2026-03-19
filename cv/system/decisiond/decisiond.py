@@ -188,6 +188,8 @@ def run():
 
     now = time.monotonic()
     wall_dt = now - st
+    if wall_dt > 9:
+      logger.warning("STARTING")
     if wall_dt > 10 and wall_dt <= 120:
       if last_step_t is None:
         last_step_t = now
@@ -195,5 +197,7 @@ def run():
       last_step_t = now
       vx, vz = follower.step(dt)
       pub.send("chassis_velocity", {"x": vx, "z": vz})
+    else:
+      pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
 
     fk.step()
