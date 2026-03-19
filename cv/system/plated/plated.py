@@ -26,10 +26,10 @@ class PlateKF:
     self.dt = dt
     self.reset()
 
-  def predict_and_correct(self, pos, rot) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+  def predict_and_correct(self, pos, rot) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
     self.km.predict()
     est = self.km.correct(np.array([*pos, *rot], dtype=np.float32).reshape(6, 1)).flatten().tolist()
-    return (est[0], est[1], est[2]), (est[9], est[10], est[11])
+    return (est[0], est[1], est[2]), (est[3], est[4], est[5]), (est[9], est[10], est[11])
 
   def reset(self):
     self.km = cv2.KalmanFilter(18, 6, 0)
@@ -99,13 +99,14 @@ def run():
           rot = R.from_rotvec(rvec.flatten()).as_euler("xyz")
           pos = tvec.flatten()
 
-          pos, rot = kf.predict_and_correct(pos, rot)
+          pos, vel, rot = kf.predict_and_correct(pos, rot)
 
           dist = np.linalg.norm(pos)
 
           pub.send("plate", {
             "rot": rot,
             "pos": pos,
+            "vel": vel,
             "dist": dist * 2.5,
             "rvec": rvec.flatten().tolist(),
             "tvec": tvec.flatten().tolist(),

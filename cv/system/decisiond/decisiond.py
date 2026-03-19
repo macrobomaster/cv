@@ -2,16 +2,15 @@ import time, math
 from dataclasses import dataclass
 from collections import deque
 
-import numpy as np
-import cv2
-
 from ..core import messaging
 from ..core.logging import logger
-from ..core.keyvalue import kv_get, kv_put
 from ..core.helpers import Debounce, FrequencyKeeper
+from ..plated.plated import CAMERA_MATRIX
 
 MAINTAIN_DIST = 2
 CHASE_SPEED = 2
+PROJECTILE_SPEED = 25  # m/s
+MAX_LEAD_PX = 80       # max lead offset in pixels, prevents runaway predictions
 
 @dataclass(frozen=True)
 class Waypoint:
@@ -44,84 +43,47 @@ class WaypointFollower:
     vz = dz / self.cur_waypoint.dt
     return vx, vz
 
-class AimErrorKF:
-  def __init__(self, dt:float=1/100):
-    self.dt = dt
-    self.reset()
+def compute_lead_offset(pos:tuple, vel:tuple, dist:float) -> tuple[float, float]:
+  """Compute pixel-space lead offset to aim ahead of a moving target.
 
-  def predict_and_correct(self, x:float, y:float) -> tuple[float, float]:
-    self.km.predict()
-    est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten().tolist()
-    return est[0], est[1]
+  Uses the 3D velocity from the plate Kalman filter and projectile time-of-flight
+  to predict where the target will be when the projectile arrives. Returns the
+  pixel offset between the current and predicted positions.
+  """
+  fx, fy = CAMERA_MATRIX[0, 0], CAMERA_MATRIX[1, 1]
+  cx, cy = CAMERA_MATRIX[0, 2], CAMERA_MATRIX[1, 2]
 
-  def reset(self):
-    self.km = cv2.KalmanFilter(6, 2, 0)
-    self.km.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-5
-    self.km.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-4
-    self.km.errorCovPost = np.eye(6, dtype=np.float32)
-    transition_matrix = np.eye(6, dtype=np.float32)
-    transition_matrix[0, 2] = self.dt
-    transition_matrix[1, 3] = self.dt
-    transition_matrix[2, 4] = self.dt
-    transition_matrix[3, 5] = self.dt
-    transition_matrix[0, 4] = 0.5 * self.dt * self.dt
-    transition_matrix[1, 5] = 0.5 * self.dt * self.dt
-    self.km.transitionMatrix = transition_matrix
-    measurement_matrix = np.zeros((2, 6), dtype=np.float32)
-    measurement_matrix[0, 0] = 1
-    measurement_matrix[1, 1] = 1
-    self.km.measurementMatrix = measurement_matrix
+  px, py, pz = pos
+  vx, vy, vz = vel
 
-class AimAhead:
-  def __init__(self):
-    self.vx = 0
-    self.x_queue = deque(maxlen=10)
+  tof = dist / PROJECTILE_SPEED
 
-  def step(self, x:float) -> float:
-    # add x to the queue
-    self.x_queue.append(x)
+  # predicted position when projectile arrives
+  pred_x = px + vx * tof
+  pred_y = py + vy * tof
+  pred_z = pz + vz * tof
 
-    # average velocity over the last 10 samples
-    if len(self.x_queue) == self.x_queue.maxlen:
-      vx = 0
-      for i in range(len(self.x_queue) - 1):
-        vx += self.x_queue[i + 1] - self.x_queue[i]
-      self.vx = vx / (len(self.x_queue) - 1)
+  # guard against degenerate depth
+  if pz < 0.1 or pred_z < 0.1:
+    return 0.0, 0.0
 
-    # shoot slightly ahead of the target
-    if self.vx > 0.1:
-      x += self.vx * 0.1
-    elif self.vx < 0.1:
-      x -= self.vx * 0.1
+  # project current and predicted positions to pixel space (pinhole model)
+  cur_px = fx * px / pz + cx
+  cur_py = fy * py / pz + cy
+  pred_px = fx * pred_x / pred_z + cx
+  pred_py = fy * pred_y / pred_z + cy
 
-    return x
+  delta_xc = pred_px - cur_px
+  delta_yc = pred_py - cur_py
 
-class AimErrorSpinCompensator:
-  def __init__(self, size:int=100):
-    self.size = size
-    self.xs = deque(maxlen=size)
-    self.maxs = deque(maxlen=size // 10)
-    self.mins = deque(maxlen=size // 10)
+  # clamp to prevent runaway predictions from noisy velocity estimates
+  lead_mag = math.sqrt(delta_xc * delta_xc + delta_yc * delta_yc)
+  if lead_mag > MAX_LEAD_PX:
+    scale = MAX_LEAD_PX / lead_mag
+    delta_xc *= scale
+    delta_yc *= scale
 
-  def correct(self, x:float) -> float:
-    self.xs.append(x)
-    if len(self.xs) < self.size:
-      return x
-
-    # see if we have clustering of max and min values
-    # self.maxs.append(max(self.xs))
-    # self.mins.append(min(self.xs))
-    # if len(self.maxs) == self.maxs.maxlen and len(self.mins) == self.mins.maxlen:
-    #   max_avg = sum(self.maxs) / len(self.maxs)
-    #   min_avg = sum(self.mins) / len(self.mins)
-    #   # see if all maxs and mins are near their average
-    #   for i in range(len(self.maxs)):
-    #     if abs(self.maxs[i] - max_avg) > 0.1 or abs(self.mins[i] - min_avg) > 0.1:
-    #       return x
-
-    # compute the average of the last size elements
-    avg = sum(self.xs) / len(self.xs)
-    return avg
+  return delta_xc, delta_yc
 
 class ShootDecision:
   def __init__(self):
@@ -158,9 +120,6 @@ def run():
   sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
 
   autoaim_valid_debounce = Debounce(1)
-  aim_error_kf = AimErrorKF()
-  aim_ahead = AimAhead()
-  aim_error_spin_comp = AimErrorSpinCompensator()
   shoot_decision = ShootDecision()
 
   follower = WaypointFollower([
@@ -187,15 +146,18 @@ def run():
         plate_mu = autoaim["plate_mu"]
         xc, yc = plate_mu[0], plate_mu[1]
 
+        # aim ahead of moving targets based on projectile time-of-flight
+        if "vel" in plate:
+          lead_x, lead_y = compute_lead_offset(plate["pos"], plate["vel"], plate["dist"])
+          xc += lead_x
+          yc += lead_y
+
         x = (xc - 256) / 256
         y = (yc - 128) / 128
-        # x, y = aim_error_kf.predict_and_correct(x, y)
-        # x = aim_ahead.step(x)
-        # x = aim_error_spin_comp.correct(x)
 
         # offset y by some amount relative to the distance to the plate
         y -= 0.1 * plate["dist"]
-        y += 0.8
+        y += 0.7
 
         shoot = shoot_decision.step(x, y)
 
@@ -230,4 +192,4 @@ def run():
         pub.send("shoot", False)
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
-        aim_error_kf.reset()
+        pass
