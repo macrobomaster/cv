@@ -137,7 +137,6 @@ class ShootDecision:
   def __init__(self):
     self.window = deque(maxlen=10)
 
-    # only shoot a 3 round burst
     self.burst_start = 0
     self.last_burst = 0
 
@@ -148,7 +147,7 @@ class ShootDecision:
 
     now = time.monotonic()
     if self.burst_start > 0:
-      if now - self.burst_start > 0.5:
+      if now - self.burst_start > 2.0:
         self.last_burst = now
         self.burst_start = 0
         return False
