@@ -1,5 +1,9 @@
 import time, math
 from dataclasses import dataclass
+from collections import deque
+
+import numpy as np
+import cv2
 
 from ..core import messaging
 from ..core.logging import logger
@@ -166,11 +170,85 @@ PATH_WAYPOINTS = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)]
 PATH_SPEED = 1
 PATH_BLEND_RADIUS = 0.1
 
+# -- aiming constants --
+
+MAINTAIN_DIST = 2         # m, target follow distance
+CHASE_SPEED = 2           # m/s max chassis speed
+PROJECTILE_SPEED = 25     # m/s
+GRAVITY = 9.81            # m/s^2
+IMG_W, IMG_H = 512, 256
+FOCAL_Y = 829.0           # camera focal length in pixels
+
+# -- aiming components --
+
+class AimErrorKF:
+  """Kalman filter on aim error: state = [x, y, vx, vy, ax, ay].
+  Provides smoothed position and velocity estimates for lead prediction."""
+  def __init__(self, dt=1/100):
+    self.dt = dt
+    self.reset()
+
+  def predict_and_correct(self, x, y):
+    self.km.predict()
+    est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten()
+    return float(est[0]), float(est[1]), float(est[2]), float(est[3])
+
+  def reset(self):
+    self.km = cv2.KalmanFilter(6, 2, 0)
+    self.km.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-5
+    self.km.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-4
+    self.km.errorCovPost = np.eye(6, dtype=np.float32)
+    dt = self.dt
+    F = np.eye(6, dtype=np.float32)
+    F[0, 2] = dt; F[1, 3] = dt; F[2, 4] = dt; F[3, 5] = dt
+    F[0, 4] = 0.5 * dt * dt; F[1, 5] = 0.5 * dt * dt
+    self.km.transitionMatrix = F
+    H = np.zeros((2, 6), dtype=np.float32)
+    H[0, 0] = 1; H[1, 1] = 1
+    self.km.measurementMatrix = H
+
+class ShootDecision:
+  """Burst fire when aim error stays small for a sustained window."""
+  def __init__(self, threshold=0.25, burst_dur=0.5, cooldown=0.5):
+    self.threshold = threshold
+    self.burst_dur = burst_dur
+    self.cooldown = cooldown
+    self.window = deque(maxlen=10)
+    self.burst_start = 0
+    self.last_burst = 0
+
+  def step(self, x, y):
+    self.window.append(math.hypot(x, y))
+    now = time.monotonic()
+    if self.burst_start > 0:
+      if now - self.burst_start > self.burst_dur:
+        self.last_burst = now
+        self.burst_start = 0
+        return False
+      return True
+    if now - self.last_burst > self.cooldown and len(self.window) == self.window.maxlen:
+      if sum(self.window) / len(self.window) < self.threshold:
+        self.burst_start = now
+    return False
+
+def gravity_drop_offset(dist):
+  """Normalized-coord y offset for bullet drop at given distance (meters).
+  Uses projectile physics: drop = 0.5*g*t^2, projected back to image space."""
+  if dist < 0.5:
+    return 0.0
+  tof = dist / PROJECTILE_SPEED
+  drop = 0.5 * GRAVITY * tof * tof
+  return (FOCAL_Y * drop / dist) / (IMG_H / 2)
+
 # -- main loop --
 
 def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
   sub = messaging.Sub(["autoaim", "plate", "game_running", "team_color"], poll="autoaim")
+
+  autoaim_valid_debounce = Debounce(1)
+  aim_kf = AimErrorKF()
+  shoot_decision = ShootDecision()
 
   follower = WaypointFollower(
     waypoints=PATH_WAYPOINTS,
@@ -186,18 +264,82 @@ def run():
   while True:
     sub.update(timeout=0)
 
-    now = time.monotonic()
-    wall_dt = now - st
-    if wall_dt > 9:
-      logger.warning("STARTING")
-    if wall_dt > 10 and wall_dt <= 120:
-      if last_step_t is None:
-        last_step_t = now
-      dt = now - last_step_t
-      last_step_t = now
-      vx, vz = follower.step(dt)
-      pub.send("chassis_velocity", {"x": vx, "z": vz})
-    else:
-      pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
+    autoaim = sub["autoaim"]
+    plate = sub["plate"]
+    has_target = False
 
-    fk.step()
+    if autoaim is not None and sub.updated["autoaim"]:
+      if autoaim["valid"] and plate is not None:
+        has_target = True
+
+        # plate center in normalized coords [-1, 1]
+        plate_mu = autoaim["plate_mu"]
+        x_raw = (plate_mu[0] - IMG_W / 2) / (IMG_W / 2)
+        y_raw = (plate_mu[1] - IMG_H / 2) / (IMG_H / 2)
+
+        # KF smoothing + velocity estimation (replaces AimAhead + SpinCompensator)
+        x, y, vx, vy = aim_kf.predict_and_correct(x_raw, y_raw)
+
+        dist = plate["dist"]
+
+        # lead prediction: aim where target will be when bullet arrives
+        if dist > 0.5:
+          tof = dist / PROJECTILE_SPEED
+          x += vx * tof
+
+        # vertical compensation: physics-based gravity drop
+        y -= gravity_drop_offset(dist)
+        # empirical camera-barrel offset (tune for your setup)
+        y -= 0.1 * dist
+        y += 0.4
+
+        shoot = shoot_decision.step(x, y)
+
+        # scale error by distance, apply gain
+        x_err = (x / max(1, dist)) * 0.5
+        y_err = (y / max(1, dist)) * 0.5
+        pub.send("aim_error", {"x": x_err, "y": y_err})
+        pub.send("shoot", shoot)
+
+        # chassis: maintain distance to target
+        cv = {"x": 0.0, "z": 0.0}
+        if dist > MAINTAIN_DIST + 0.1:
+          cv["x"] = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
+        elif dist < MAINTAIN_DIST - 0.1:
+          cv["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
+
+        # chassis: rotate toward target
+        pos = plate["pos"]
+        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
+        angle_y = math.degrees(math.atan2(pos[1], pos[2]))
+        pub.send("aim_angle", {"x": angle_x, "y": angle_y})
+
+        if angle_x > 0.5:
+          cv["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
+        elif angle_x < -0.5:
+          cv["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
+
+        pub.send("chassis_velocity", cv)
+      else:
+        pub.send("aim_error", {"x": 0.0, "y": 0.0})
+
+      if autoaim_valid_debounce.debounce(not autoaim["valid"]):
+        aim_kf.reset()
+
+    # # fall back to waypoint path when no target
+    # if not has_target:
+    #   now = time.monotonic()
+    #   wall_dt = now - st
+    #   if wall_dt > 9:
+    #     logger.warning("STARTING")
+    #   if wall_dt > 10 and wall_dt <= 120:
+    #     if last_step_t is None:
+    #       last_step_t = now
+    #     dt = now - last_step_t
+    #     last_step_t = now
+    #     vx, vz = follower.step(dt)
+    #     pub.send("chassis_velocity", {"x": vx, "z": vz})
+    #   else:
+    #     pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
+    #
+    # fk.step()
