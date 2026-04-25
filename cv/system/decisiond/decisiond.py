@@ -248,7 +248,7 @@ def run():
 
   autoaim_valid_debounce = Debounce(1)
   aim_kf = AimErrorKF()
-  shoot_decision = ShootDecision()
+  shoot_decision = ShootDecision(threshold=3.0)  # degrees
 
   follower = WaypointFollower(
     waypoints=PATH_WAYPOINTS,
@@ -258,6 +258,7 @@ def run():
   )
 
   fk = FrequencyKeeper(100)
+  cv_smooth = [0.0, 0.0]  # EMA-smoothed chassis velocity [x, z]
 
   st = time.monotonic()
   last_step_t = None
@@ -272,54 +273,55 @@ def run():
       if autoaim["valid"] and plate is not None:
         has_target = True
 
-        # plate center in normalized coords [-1, 1]
-        plate_mu = autoaim["plate_mu"]
-        x_raw = (plate_mu[0] - IMG_W / 2) / (IMG_W / 2)
-        y_raw = (plate_mu[1] - IMG_H / 2) / (IMG_H / 2)
-
-        # KF smoothing + velocity estimation (replaces AimAhead + SpinCompensator)
-        x, y, vx, vy = aim_kf.predict_and_correct(x_raw, y_raw)
-
+        pos = plate["pos"]
         dist = plate["dist"]
 
-        # lead prediction: aim where target will be when bullet arrives
+        # aim using 3D angle to target (distance-independent)
+        aim_x = math.degrees(math.atan2(pos[0], pos[2]))
+        aim_y = math.degrees(math.atan2(pos[1], pos[2]))
+
+        # lead prediction using 3D velocity from plate KF
+        if dist > 0.5 and "vel" in plate:
+          vel = plate["vel"]
+          tof = dist / PROJECTILE_SPEED
+          pred = (pos[0] + vel[0] * tof, pos[1] + vel[1] * tof, pos[2] + vel[2] * tof)
+          aim_x = math.degrees(math.atan2(pred[0], pred[2]))
+          aim_y = math.degrees(math.atan2(pred[1], pred[2]))
+
+        # gravity drop compensation (aim higher)
         if dist > 0.5:
           tof = dist / PROJECTILE_SPEED
-          x += vx * tof
+          drop = 0.5 * GRAVITY * tof * tof
+          aim_y -= math.degrees(math.atan2(drop, dist))
 
-        # vertical compensation: physics-based gravity drop
-        y -= gravity_drop_offset(dist)
-        # empirical camera-barrel offset (tune for your setup)
-        y -= 0.1 * dist
-        y += 0.4
+        pub.send("aim_angle", {"x": aim_x, "y": aim_y})
 
-        shoot = shoot_decision.step(x, y)
+        shoot = shoot_decision.step(aim_x, aim_y)
 
-        # scale error by distance, apply gain
-        x_err = (x / max(1, dist)) * 0.5
-        y_err = (y / max(1, dist)) * 0.5
+        # send angle-based aim error, scaled by distance
+        x_err = (aim_x / max(1, dist)) * 0.5
+        y_err = (aim_y / max(1, dist)) * 0.5
         pub.send("aim_error", {"x": x_err, "y": y_err})
         pub.send("shoot", shoot)
 
         # chassis: maintain distance to target
-        cv = {"x": 0.0, "z": 0.0}
+        cv_target = [0.0, 0.0]
         if dist > MAINTAIN_DIST + 0.1:
-          cv["x"] = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
+          cv_target[0] = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
         elif dist < MAINTAIN_DIST - 0.1:
-          cv["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
+          cv_target[0] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
 
         # chassis: rotate toward target
-        pos = plate["pos"]
-        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
-        angle_y = math.degrees(math.atan2(pos[1], pos[2]))
-        pub.send("aim_angle", {"x": angle_x, "y": angle_y})
+        if aim_x > 0.5:
+          cv_target[1] = min(CHASE_SPEED, abs(aim_x) / 5)
+        elif aim_x < -0.5:
+          cv_target[1] = -min(CHASE_SPEED, abs(aim_x) / 5)
 
-        if angle_x > 0.5:
-          cv["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
-        elif angle_x < -0.5:
-          cv["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
-
-        pub.send("chassis_velocity", cv)
+        # smooth chassis velocity to prevent oscillation
+        alpha = 0.1
+        cv_smooth[0] += alpha * (cv_target[0] - cv_smooth[0])
+        cv_smooth[1] += alpha * (cv_target[1] - cv_smooth[1])
+        pub.send("chassis_velocity", {"x": cv_smooth[0], "z": cv_smooth[1]})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
         pub.send("spinning", True)  # keep alive = don't spin when no target
