@@ -2,247 +2,345 @@ import time, math
 from dataclasses import dataclass
 from collections import deque
 
+import numpy as np
+import cv2
+
 from ..core import messaging
 from ..core.logging import logger
+from ..core.keyvalue import kv_get, kv_put
 from ..core.helpers import Debounce, FrequencyKeeper
-from ..plated.plated import CAMERA_MATRIX
 
-MAINTAIN_DIST = 2
-CHASE_SPEED = 2
-PROJECTILE_SPEED = 25       # m/s
-MAX_LEAD_PX = 80            # max lead offset in pixels, prevents runaway predictions
-SPIN_WINDOW_SEC = 1.0       # time window for spin detection (~1-2 revolutions at 1-2 Hz)
-SPIN_VAR_THRESHOLD = 1000.0 # residual x-variance (px²) above which target is classified as spinning
+# -- path segment types --
 
-@dataclass(frozen=True)
-class Waypoint:
-  x: float
-  z: float
-  dt: float
+@dataclass
+class LineSegment:
+  direction: tuple[float, float]
+  speed: float
+  length: float
 
-class WaypointFollower:
-  def __init__(self, waypoints:list[Waypoint]):
-    self.waypoints = waypoints
-    self.last_waypoint = Waypoint(0, 0, 0)
-    self.cur_waypoint = self.waypoints.pop(0)
-    self.dt_elapsed = self.cur_waypoint.dt
-    self.elapsed = 0
+  @property
+  def duration(self) -> float:
+    return self.length / self.speed
 
-  def step(self, dt:float) -> tuple[float, float]:
-    self.elapsed += dt
-    if not self.waypoints and self.elapsed > self.dt_elapsed:
-      return 0, 0
+  def velocity(self, t: float) -> tuple[float, float]:
+    return self.direction[0] * self.speed, self.direction[1] * self.speed
 
-    if self.elapsed > self.dt_elapsed:
-      self.last_waypoint = self.cur_waypoint
-      self.cur_waypoint = self.waypoints.pop(0)
-      self.dt_elapsed += self.cur_waypoint.dt
+@dataclass
+class ArcSegment:
+  center: tuple[float, float]
+  radius: float
+  start_angle: float
+  sweep: float  # signed: positive = CCW, negative = CW
+  speed: float
 
-    # compute velocity required to reach the waypoint in the dt
-    dx = self.cur_waypoint.x - self.last_waypoint.x
-    dz = self.cur_waypoint.z - self.last_waypoint.z
-    vx = dx / self.cur_waypoint.dt
-    vz = dz / self.cur_waypoint.dt
+  @property
+  def length(self) -> float:
+    return abs(self.radius * self.sweep)
+
+  @property
+  def duration(self) -> float:
+    return self.length / self.speed
+
+  def velocity(self, t: float) -> tuple[float, float]:
+    frac = t / self.duration if self.duration > 0 else 0
+    angle = self.start_angle + frac * self.sweep
+    sign = 1 if self.sweep > 0 else -1
+    vx = sign * -math.sin(angle) * self.speed
+    vz = sign *  math.cos(angle) * self.speed
     return vx, vz
 
-def compute_lead_offset(pos:tuple, vel:tuple, dist:float) -> tuple[float, float]:
-  """Compute pixel-space lead offset to aim ahead of a moving target.
+# -- waypoint follower with arc blending --
 
-  Uses the 3D velocity from the plate Kalman filter and projectile time-of-flight
-  to predict where the target will be when the projectile arrives. Returns the
-  pixel offset between the current and predicted positions.
-  """
-  fx, fy = CAMERA_MATRIX[0, 0], CAMERA_MATRIX[1, 1]
-  cx, cy = CAMERA_MATRIX[0, 2], CAMERA_MATRIX[1, 2]
+class WaypointFollower:
+  def __init__(self, waypoints: list[tuple[float, float]], speed: float, blend_radius: float, loop: bool = False):
+    self.segments = _build_path(waypoints, speed, blend_radius)
+    self.total_duration = sum(s.duration for s in self.segments)
+    self.elapsed = 0.0
+    self.loop = loop
 
-  px, py, pz = pos
-  vx, vy, vz = vel
-
-  tof = dist / PROJECTILE_SPEED
-
-  # predicted position when projectile arrives
-  pred_x = px + vx * tof
-  pred_y = py + vy * tof
-  pred_z = pz + vz * tof
-
-  # guard against degenerate depth
-  if pz < 0.1 or pred_z < 0.1:
+  def step(self, dt: float) -> tuple[float, float]:
+    self.elapsed += dt
+    if self.elapsed >= self.total_duration:
+      if self.loop:
+        self.elapsed %= self.total_duration
+      else:
+        return 0.0, 0.0
+    t = self.elapsed
+    for seg in self.segments:
+      if t <= seg.duration:
+        return seg.velocity(t)
+      t -= seg.duration
     return 0.0, 0.0
 
-  # project current and predicted positions to pixel space (pinhole model)
-  cur_px = fx * px / pz + cx
-  cur_py = fy * py / pz + cy
-  pred_px = fx * pred_x / pred_z + cx
-  pred_py = fy * pred_y / pred_z + cy
+def _build_path(waypoints: list[tuple[float, float]], speed: float, blend_radius: float):
+  n = len(waypoints)
+  assert n >= 2, "need at least 2 waypoints"
 
-  delta_xc = pred_px - cur_px
-  delta_yc = pred_py - cur_py
+  # segment directions and lengths
+  dirs: list[tuple[float, float]] = []
+  lens: list[float] = []
+  for i in range(n - 1):
+    dx = waypoints[i + 1][0] - waypoints[i][0]
+    dz = waypoints[i + 1][1] - waypoints[i][1]
+    l = math.hypot(dx, dz)
+    assert l > 1e-9, f"duplicate waypoints at index {i} and {i + 1}"
+    dirs.append((dx / l, dz / l))
+    lens.append(l)
 
-  # clamp to prevent runaway predictions from noisy velocity estimates
-  lead_mag = math.sqrt(delta_xc * delta_xc + delta_yc * delta_yc)
-  if lead_mag > MAX_LEAD_PX:
-    scale = MAX_LEAD_PX / lead_mag
-    delta_xc *= scale
-    delta_yc *= scale
+  # blend info at each internal corner (indices 1..n-2)
+  # tangent_dists[i] = tangent distance consumed at waypoint i (0 for endpoints)
+  tangent_dists = [0.0] * n
+  corner_info: list[dict | None] = [None] * n
 
-  return float(delta_xc), float(delta_yc)
+  for i in range(1, n - 1):
+    d1 = dirs[i - 1]
+    d2 = dirs[i]
 
-class SpinCompensator:
-  """Detects spinning targets and aims at the center of rotation.
+    cos_theta = max(-1.0, min(1.0, d1[0] * d2[0] + d1[1] * d2[1]))
+    theta = math.acos(cos_theta)
 
-  When the target robot is spinning, armor plates orbit the chassis center.
-  Spin is detected via x-position variance in a sliding window. The center
-  is estimated as the windowed mean of recent detections.
+    if theta < 1e-6 or theta > math.pi - 1e-6:
+      continue  # nearly straight or U-turn, skip blend
 
-  Lead is not applied during spin because the plate is only visible during
-  part of each revolution, always sweeping the same direction. This makes
-  any position-derived velocity biased in the sweep direction regardless
-  of the robot's actual translational movement.
-  """
-  def __init__(self, window_sec:float=SPIN_WINDOW_SEC, var_threshold:float=SPIN_VAR_THRESHOLD):
-    self.window_sec = window_sec
-    self.var_threshold = var_threshold
-    self.history: deque[tuple[float, float, float]] = deque()
+    phi = math.pi - theta
+    td = blend_radius / math.tan(phi / 2)
 
-  def step(self, xc:float, yc:float) -> tuple[float, float, bool]:
-    """Process a detection and return spin-compensated aim point.
+    # clamp so blends don't overlap on short segments
+    max_td = min(lens[i - 1] / 2, lens[i] / 2)
+    td = min(td, max_td)
+    actual_r = td * math.tan(phi / 2)
 
-    Returns:
-      (xc, yc, is_spinning)
-      xc, yc: windowed mean (center of spin) if spinning, raw detection if not
-    """
-    now = time.monotonic()
-    self.history.append((now, xc, yc))
+    cross = d1[0] * d2[1] - d1[1] * d2[0]
 
-    while self.history and now - self.history[0][0] > self.window_sec:
-      self.history.popleft()
+    tangent_dists[i] = td
+    corner_info[i] = {
+      "td": td,
+      "radius": actual_r,
+      "theta": theta,
+      "ccw": cross > 0,
+      "d1": d1,
+      "d2": d2,
+    }
 
-    if len(self.history) < 10:
-      return xc, yc, False
+  # assemble segment list
+  segments: list[LineSegment | ArcSegment] = []
 
-    n = len(self.history)
-    mean_x = sum(h[1] for h in self.history) / n
-    mean_y = sum(h[2] for h in self.history) / n
-    var_x = sum((h[1] - mean_x) ** 2 for h in self.history) / n
+  for i in range(n - 1):
+    d = dirs[i]
+    line_len = lens[i] - tangent_dists[i] - tangent_dists[i + 1]
 
-    if var_x > self.var_threshold:
-      return float(mean_x), float(mean_y), True
+    if line_len > 1e-6:
+      segments.append(LineSegment(direction=d, speed=speed, length=line_len))
 
-    return xc, yc, False
+    # arc at the end-corner of this segment (waypoint i+1)
+    ci = corner_info[i + 1]
+    if ci is not None:
+      p = waypoints[i + 1]
+      d1 = ci["d1"]
+      td = ci["td"]
+      r = ci["radius"]
+      ccw = ci["ccw"]
+
+      # tangent point on incoming segment
+      t1x = p[0] - d1[0] * td
+      t1z = p[1] - d1[1] * td
+
+      # normal toward arc center
+      if ccw:
+        nx, nz = -d1[1], d1[0]
+      else:
+        nx, nz = d1[1], -d1[0]
+
+      cx = t1x + nx * r
+      cz = t1z + nz * r
+
+      start_angle = math.atan2(t1z - cz, t1x - cx)
+      sweep = ci["theta"] if ccw else -ci["theta"]
+
+      segments.append(ArcSegment(
+        center=(cx, cz), radius=r,
+        start_angle=start_angle, sweep=sweep, speed=speed,
+      ))
+
+  return segments
+
+# -- path config --
+
+PATH_WAYPOINTS = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)]
+PATH_SPEED = 1
+PATH_BLEND_RADIUS = 0.1
+
+# -- aiming constants --
+
+MAINTAIN_DIST = 2         # m, target follow distance
+CHASE_SPEED = 2           # m/s max chassis speed
+PROJECTILE_SPEED = 25     # m/s
+GRAVITY = 9.81            # m/s^2
+IMG_W, IMG_H = 512, 256
+FOCAL_Y = 829.0           # camera focal length in pixels
+
+# -- aiming components --
+
+class AimErrorKF:
+  """Kalman filter on aim error: state = [x, y, vx, vy, ax, ay].
+  Provides smoothed position and velocity estimates for lead prediction."""
+  def __init__(self, dt=1/100):
+    self.dt = dt
+    self.reset()
+
+  def predict_and_correct(self, x, y):
+    self.km.predict()
+    est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten()
+    return float(est[0]), float(est[1]), float(est[2]), float(est[3])
 
   def reset(self):
-    self.history.clear()
+    self.km = cv2.KalmanFilter(6, 2, 0)
+    self.km.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-5
+    self.km.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-4
+    self.km.errorCovPost = np.eye(6, dtype=np.float32)
+    dt = self.dt
+    F = np.eye(6, dtype=np.float32)
+    F[0, 2] = dt; F[1, 3] = dt; F[2, 4] = dt; F[3, 5] = dt
+    F[0, 4] = 0.5 * dt * dt; F[1, 5] = 0.5 * dt * dt
+    self.km.transitionMatrix = F
+    H = np.zeros((2, 6), dtype=np.float32)
+    H[0, 0] = 1; H[1, 1] = 1
+    self.km.measurementMatrix = H
 
 class ShootDecision:
-  def __init__(self):
+  """Burst fire when aim error stays small for a sustained window."""
+  def __init__(self, threshold=0.25, burst_dur=0.5, cooldown=0.5):
+    self.threshold = threshold
+    self.burst_dur = burst_dur
+    self.cooldown = cooldown
     self.window = deque(maxlen=10)
-
     self.burst_start = 0
     self.last_burst = 0
 
-  def step(self, x:float, y:float) -> bool:
-    # add distance to the window
-    dist = math.sqrt(x*x + y*y)
-    self.window.append(dist)
-
+  def step(self, x, y):
+    self.window.append(math.hypot(x, y))
     now = time.monotonic()
     if self.burst_start > 0:
-      if now - self.burst_start > 2.0:
+      if now - self.burst_start > self.burst_dur:
         self.last_burst = now
         self.burst_start = 0
         return False
-      else:
-        # shoot
-        return True
-    else:
-      if now - self.last_burst > 0.5:
-        if len(self.window) == self.window.maxlen:
-          avg = sum(self.window) / len(self.window)
-          if avg < 0.25:
-            self.burst_start = now
+      return True
+    if now - self.last_burst > self.cooldown and len(self.window) == self.window.maxlen:
+      if sum(self.window) / len(self.window) < self.threshold:
+        self.burst_start = now
     return False
 
+def gravity_drop_offset(dist):
+  """Normalized-coord y offset for bullet drop at given distance (meters).
+  Uses projectile physics: drop = 0.5*g*t^2, projected back to image space."""
+  if dist < 0.5:
+    return 0.0
+  tof = dist / PROJECTILE_SPEED
+  drop = 0.5 * GRAVITY * tof * tof
+  return (FOCAL_Y * drop / dist) / (IMG_H / 2)
+
+# -- main loop --
+
 def run():
-  pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
-  sub = messaging.Sub(["autoaim", "plate"], poll="autoaim")
+  pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot", "spinning"])
+  sub = messaging.Sub(["autoaim", "plate", "game_running", "team_color"], poll="autoaim")
 
   autoaim_valid_debounce = Debounce(1)
+  aim_kf = AimErrorKF()
   shoot_decision = ShootDecision()
-  spin_comp = SpinCompensator()
 
-  follower = WaypointFollower([
-    Waypoint(6.2, 0, 6),
-    Waypoint(6.2, 6.2, 6),
-    Waypoint(0, 6.2, 6),
-    Waypoint(0, 0, 6),
-  ])
+  follower = WaypointFollower(
+    waypoints=PATH_WAYPOINTS,
+    speed=PATH_SPEED,
+    blend_radius=PATH_BLEND_RADIUS,
+    loop=False,
+  )
 
-  fk = FrequencyKeeper(200)
+  fk = FrequencyKeeper(100)
 
-  ste = time.monotonic()
   st = time.monotonic()
+  last_step_t = None
   while True:
-    sub.update()
+    sub.update(timeout=0)
 
     autoaim = sub["autoaim"]
-    if autoaim is None: continue
     plate = sub["plate"]
-    if plate is None: continue
+    has_target = False
 
-    if sub.updated["autoaim"]:
-      if autoaim["valid"]:
+    if autoaim is not None and sub.updated["autoaim"]:
+      if autoaim["valid"] and plate is not None:
+        has_target = True
+
+        # plate center in normalized coords [-1, 1]
         plate_mu = autoaim["plate_mu"]
-        xc, yc = plate_mu[0], plate_mu[1]
+        x_raw = (plate_mu[0] - IMG_W / 2) / (IMG_W / 2)
+        y_raw = (plate_mu[1] - IMG_H / 2) / (IMG_H / 2)
 
-        # detect spin and compensate aim point to target center of rotation
-        xc, yc, is_spinning = spin_comp.step(xc, yc)
+        # KF smoothing + velocity estimation (replaces AimAhead + SpinCompensator)
+        x, y, vx, vy = aim_kf.predict_and_correct(x_raw, y_raw)
 
-        # aim ahead of moving targets based on projectile time-of-flight
-        # during spin, lead is skipped: any position-derived velocity has an
-        # unremovable directional bias from one-sided plate visibility
-        if not is_spinning and "vel" in plate:
-          lead_x, lead_y = compute_lead_offset(plate["pos"], plate["vel"], plate["dist"])
-          xc += lead_x
-          yc += lead_y
+        dist = plate["dist"]
 
-        x = (xc - 256) / 256
-        y = (yc - 128) / 128
+        # lead prediction: aim where target will be when bullet arrives
+        if dist > 0.5:
+          tof = dist / PROJECTILE_SPEED
+          x += vx * tof
 
-        # offset y by some amount relative to the distance to the plate
-        y -= 0.1 * plate["dist"]
-        y += 0.7
+        # vertical compensation: physics-based gravity drop
+        y -= gravity_drop_offset(dist)
+        # empirical camera-barrel offset (tune for your setup)
+        y -= 0.1 * dist
+        y += 0.4
 
         shoot = shoot_decision.step(x, y)
 
-        # scale error based on distance
-        x = x / max(1, plate["dist"])
-        y = y / max(1, plate["dist"])
-
-        pub.send("aim_error", {"x": x * 0.5, "y": y * 0.5})
+        # scale error by distance, apply gain
+        x_err = (x / max(1, dist)) * 0.5
+        y_err = (y / max(1, dist)) * 0.5
+        pub.send("aim_error", {"x": x_err, "y": y_err})
         pub.send("shoot", shoot)
 
-        chassis_velocity = {"x": 0.0, "z": 0.0}
-        if plate["dist"] > MAINTAIN_DIST + 0.1:
-          chassis_velocity["x"] = min(CHASE_SPEED, max(0, plate["dist"] - MAINTAIN_DIST))
-        elif plate["dist"] < MAINTAIN_DIST - 0.1:
-          chassis_velocity["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, plate["dist"]))
+        # chassis: maintain distance to target
+        cv = {"x": 0.0, "z": 0.0}
+        if dist > MAINTAIN_DIST + 0.1:
+          cv["x"] = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
+        elif dist < MAINTAIN_DIST - 0.1:
+          cv["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
 
+        # chassis: rotate toward target
         pos = plate["pos"]
-
-        # compute angle on xz plane
         angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
-        # compute angle on yz plane
         angle_y = math.degrees(math.atan2(pos[1], pos[2]))
         pub.send("aim_angle", {"x": angle_x, "y": angle_y})
 
         if angle_x > 0.5:
-          chassis_velocity["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
+          cv["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
         elif angle_x < -0.5:
-          chassis_velocity["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
+          cv["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
 
-        pub.send("chassis_velocity", chassis_velocity)
+        pub.send("chassis_velocity", cv)
       else:
-        pub.send("shoot", False)
+        pub.send("aim_error", {"x": 0.0, "y": 0.0})
+        pub.send("spinning", True)  # keep alive = don't spin when no target
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
-        spin_comp.reset()
+        aim_kf.reset()
+
+    # # fall back to waypoint path when no target
+    # if not has_target:
+    #   now = time.monotonic()
+    #   wall_dt = now - st
+    #   if wall_dt > 9:
+    #     logger.warning("STARTING")
+    #   if wall_dt > 10 and wall_dt <= 120:
+    #     if last_step_t is None:
+    #       last_step_t = now
+    #     dt = now - last_step_t
+    #     last_step_t = now
+    #     vx, vz = follower.step(dt)
+    #     pub.send("chassis_velocity", {"x": vx, "z": vz})
+    #   else:
+    #     pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
+    #
+    # fk.step()

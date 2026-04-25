@@ -107,7 +107,7 @@ def run():
             "rot": rot,
             "pos": pos,
             "vel": vel,
-            "dist": dist * 2.5,
+            "dist": dist,
             "rvec": rvec.flatten().tolist(),
             "tvec": tvec.flatten().tolist(),
           })
