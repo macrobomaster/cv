@@ -243,7 +243,7 @@ def gravity_drop_offset(dist):
 # -- main loop --
 
 def run():
-  pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
+  pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot", "spinning"])
   sub = messaging.Sub(["autoaim", "plate", "game_running", "team_color"], poll="autoaim")
 
   autoaim_valid_debounce = Debounce(1)
@@ -322,6 +322,7 @@ def run():
         pub.send("chassis_velocity", cv)
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
+        pub.send("spinning", True)  # keep alive = don't spin when no target
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         aim_kf.reset()
