@@ -2,12 +2,8 @@ import time, math
 from dataclasses import dataclass
 from collections import deque
 
-import numpy as np
-import cv2
-
 from ..core import messaging
 from ..core.logging import logger
-from ..core.keyvalue import kv_get, kv_put
 from ..core.helpers import Debounce, FrequencyKeeper
 
 # -- path segment types --
@@ -176,36 +172,8 @@ MAINTAIN_DIST = 2         # m, target follow distance
 CHASE_SPEED = 2           # m/s max chassis speed
 PROJECTILE_SPEED = 25     # m/s
 GRAVITY = 9.81            # m/s^2
-IMG_W, IMG_H = 512, 256
-FOCAL_Y = 829.0           # camera focal length in pixels
 
 # -- aiming components --
-
-class AimErrorKF:
-  """Kalman filter on aim error: state = [x, y, vx, vy, ax, ay].
-  Provides smoothed position and velocity estimates for lead prediction."""
-  def __init__(self, dt=1/100):
-    self.dt = dt
-    self.reset()
-
-  def predict_and_correct(self, x, y):
-    self.km.predict()
-    est = self.km.correct(np.array([[x], [y]], dtype=np.float32)).flatten()
-    return float(est[0]), float(est[1]), float(est[2]), float(est[3])
-
-  def reset(self):
-    self.km = cv2.KalmanFilter(6, 2, 0)
-    self.km.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-5
-    self.km.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-4
-    self.km.errorCovPost = np.eye(6, dtype=np.float32)
-    dt = self.dt
-    F = np.eye(6, dtype=np.float32)
-    F[0, 2] = dt; F[1, 3] = dt; F[2, 4] = dt; F[3, 5] = dt
-    F[0, 4] = 0.5 * dt * dt; F[1, 5] = 0.5 * dt * dt
-    self.km.transitionMatrix = F
-    H = np.zeros((2, 6), dtype=np.float32)
-    H[0, 0] = 1; H[1, 1] = 1
-    self.km.measurementMatrix = H
 
 class ShootDecision:
   """Burst fire when aim error stays small for a sustained window."""
@@ -231,15 +199,6 @@ class ShootDecision:
         self.burst_start = now
     return False
 
-def gravity_drop_offset(dist):
-  """Normalized-coord y offset for bullet drop at given distance (meters).
-  Uses projectile physics: drop = 0.5*g*t^2, projected back to image space."""
-  if dist < 0.5:
-    return 0.0
-  tof = dist / PROJECTILE_SPEED
-  drop = 0.5 * GRAVITY * tof * tof
-  return (FOCAL_Y * drop / dist) / (IMG_H / 2)
-
 # -- main loop --
 
 def run():
@@ -247,7 +206,6 @@ def run():
   sub = messaging.Sub(["autoaim", "plate", "game_running", "team_color"], poll="autoaim")
 
   autoaim_valid_debounce = Debounce(1)
-  aim_kf = AimErrorKF()
   shoot_decision = ShootDecision(threshold=3.0)  # degrees
 
   follower = WaypointFollower(
@@ -258,7 +216,6 @@ def run():
   )
 
   fk = FrequencyKeeper(100)
-  cv_smooth = [0.0, 0.0]  # EMA-smoothed chassis velocity [x, z]
 
   st = time.monotonic()
   last_step_t = None
@@ -276,17 +233,15 @@ def run():
         pos = plate["pos"]
         dist = plate["dist"]
 
-        # aim using 3D angle to target (distance-independent)
-        aim_x = math.degrees(math.atan2(pos[0], pos[2]))
-        aim_y = math.degrees(math.atan2(pos[1], pos[2]))
-
-        # lead prediction using 3D velocity from plate KF
+        # lead prediction: predict where target will be at time-of-flight
         if dist > 0.5 and "vel" in plate:
           vel = plate["vel"]
           tof = dist / PROJECTILE_SPEED
-          pred = (pos[0] + vel[0] * tof, pos[1] + vel[1] * tof, pos[2] + vel[2] * tof)
-          aim_x = math.degrees(math.atan2(pred[0], pred[2]))
-          aim_y = math.degrees(math.atan2(pred[1], pred[2]))
+          pos = (pos[0] + vel[0] * tof, pos[1] + vel[1] * tof, pos[2] + vel[2] * tof)
+
+        # aim using 3D angle to target (already KF-smoothed by plated)
+        aim_x = math.degrees(math.atan2(pos[0], pos[2]))
+        aim_y = math.degrees(math.atan2(pos[1], pos[2]))
 
         # gravity drop compensation (aim higher)
         if dist > 0.5:
@@ -304,23 +259,19 @@ def run():
         pub.send("aim_error", {"x": x_err, "y": y_err})
         pub.send("shoot", shoot)
 
-        # chassis: maintain distance to target
-        cv_target = 0.0
-        if dist > MAINTAIN_DIST + 0.1:
-          cv_target = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
-        elif dist < MAINTAIN_DIST - 0.1:
-          cv_target = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
-
-        # smooth chassis velocity to prevent oscillation
-        alpha = 0.1
-        cv_smooth[0] += alpha * (cv_target - cv_smooth[0])
-        pub.send("chassis_velocity", {"x": cv_smooth[0], "z": 0.0})
+        # chassis: maintain distance to target (using KF-smoothed dist)
+        dist_err = dist - MAINTAIN_DIST
+        if abs(dist_err) > 0.1:
+          cv_x = max(-CHASE_SPEED, min(CHASE_SPEED, dist_err))
+        else:
+          cv_x = 0.0
+        pub.send("chassis_velocity", {"x": cv_x, "z": 0.0})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
         pub.send("spinning", True)  # keep alive = don't spin when no target
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
-        aim_kf.reset()
+        pass  # plate KF reset handled by plated
 
     # # fall back to waypoint path when no target
     # if not has_target:

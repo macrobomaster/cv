@@ -34,7 +34,7 @@ class PlateKF:
   def reset(self):
     self.km = cv2.KalmanFilter(18, 6, 0)
     self.km.processNoiseCov = np.eye(18, dtype=np.float32) * 1e-5
-    self.km.measurementNoiseCov = np.eye(6, dtype=np.float32) * 1e-4
+    self.km.measurementNoiseCov = np.eye(6, dtype=np.float32) * 1e-2
     self.km.errorCovPost = np.eye(18, dtype=np.float32)
     transition_matrix = np.eye(18, dtype=np.float32)
     transition_matrix[0, 3] = self.dt
