@@ -305,23 +305,16 @@ def run():
         pub.send("shoot", shoot)
 
         # chassis: maintain distance to target
-        cv_target = [0.0, 0.0]
+        cv_target = 0.0
         if dist > MAINTAIN_DIST + 0.1:
-          cv_target[0] = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
+          cv_target = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
         elif dist < MAINTAIN_DIST - 0.1:
-          cv_target[0] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
-
-        # chassis: rotate toward target
-        if aim_x > 0.5:
-          cv_target[1] = min(CHASE_SPEED, abs(aim_x) / 5)
-        elif aim_x < -0.5:
-          cv_target[1] = -min(CHASE_SPEED, abs(aim_x) / 5)
+          cv_target = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
 
         # smooth chassis velocity to prevent oscillation
         alpha = 0.1
-        cv_smooth[0] += alpha * (cv_target[0] - cv_smooth[0])
-        cv_smooth[1] += alpha * (cv_target[1] - cv_smooth[1])
-        pub.send("chassis_velocity", {"x": cv_smooth[0], "z": cv_smooth[1]})
+        cv_smooth[0] += alpha * (cv_target - cv_smooth[0])
+        pub.send("chassis_velocity", {"x": cv_smooth[0], "z": 0.0})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
         pub.send("spinning", True)  # keep alive = don't spin when no target
