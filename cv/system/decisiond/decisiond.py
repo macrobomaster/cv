@@ -253,9 +253,9 @@ def run():
 
         shoot = shoot_decision.step(aim_x, aim_y)
 
-        # send angle-based aim error, scaled by distance
-        x_err = (aim_x / max(1, dist)) * 0.5
-        y_err = (aim_y / max(1, dist)) * 0.5
+        # send angle-based aim error, normalized to [-1, 1]
+        x_err = max(-1.0, min(1.0, aim_x / max(1, dist) * 0.05))
+        y_err = max(-1.0, min(1.0, aim_y / max(1, dist) * 0.05))
         pub.send("aim_error", {"x": x_err, "y": y_err})
         pub.send("shoot", shoot)
 
