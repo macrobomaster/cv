@@ -171,6 +171,7 @@ PATH_BLEND_RADIUS = 0.1
 MAINTAIN_DIST = 1         # m, target follow distance
 CHASE_SPEED = 4           # m/s max chassis speed
 CHASE_GAIN = 3            # proportional gain for chase
+ALIGN_GAIN = 2            # proportional gain for plate-normal alignment strafe
 PROJECTILE_SPEED = 25     # m/s
 GRAVITY = 9.81            # m/s^2
 
@@ -268,7 +269,21 @@ def run():
         else:
           cv_z = 0.0
 
-        pub.send("chassis_velocity", {"x": 0.0, "z": cv_z})
+        # chassis: strafe to align with plate normal
+        # plate normal from euler xyz: n = Rx(a) @ Ry(b) @ [0,0,1]
+        rot = plate["rot"]
+        a, b = rot[0], rot[1]
+        n_x = math.sin(b)
+        n_z = math.cos(a) * math.cos(b)
+        # camera-to-plate unit vector in XZ plane
+        orig_pos = plate["pos"]
+        v_x = orig_pos[0] / max(0.01, dist)
+        v_z = orig_pos[2] / max(0.01, dist)
+        # cross product y-component: zero when plate faces us
+        align_err = v_z * n_x - v_x * n_z
+        cv_x = max(-CHASE_SPEED, min(CHASE_SPEED, align_err * ALIGN_GAIN))
+
+        pub.send("chassis_velocity", {"x": cv_x, "z": cv_z})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
         pub.send("shoot", False)
