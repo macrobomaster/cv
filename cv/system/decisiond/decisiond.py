@@ -258,6 +258,7 @@ def run():
         y_err = max(-1.0, min(1.0, aim_y / max(1, dist) * 0.05))
         pub.send("aim_error", {"x": x_err, "y": y_err})
         pub.send("shoot", shoot)
+        pub.send("spinning", True)
 
         # chassis: maintain distance to target (using KF-smoothed dist)
         dist_err = dist - MAINTAIN_DIST
@@ -268,7 +269,9 @@ def run():
         pub.send("chassis_velocity", {"x": cv_x, "z": 0.0})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
-        pub.send("spinning", True)  # keep alive = don't spin when no target
+        pub.send("shoot", False)
+        pub.send("spinning", False)
+        pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         pass  # plate KF reset handled by plated

@@ -20,7 +20,7 @@ def run():
   protocol = Protocol(port)
 
   pub = messaging.Pub(["game_running"])
-  sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity"])
+  sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "spinning"])
 
   while True:
     kv_put("watchdog", "commsd", time.monotonic())
@@ -52,6 +52,12 @@ def run():
       protocol.msg(Command.MOVE_ROBOT, x, z)
     if not sub.alive["chassis_velocity"]:
       protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
+
+    spinning = sub["spinning"]
+    if spinning is not None and sub.updated["spinning"]:
+      protocol.msg(Command.CONTROL_SPINNING, 0xff if spinning else 0x00)
+    if not sub.alive["spinning"]:
+      protocol.msg(Command.CONTROL_SPINNING, 0x00)
 
     game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
     if game_running is not None:
