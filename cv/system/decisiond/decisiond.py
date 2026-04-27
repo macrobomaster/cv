@@ -169,9 +169,9 @@ PATH_BLEND_RADIUS = 0.1
 # -- aiming constants --
 
 MAINTAIN_DIST = 1         # m, target follow distance
-CHASE_SPEED = 4           # m/s max chassis speed
-CHASE_GAIN = 3            # proportional gain for chase
-ALIGN_GAIN = 2            # proportional gain for plate-normal alignment strafe
+CHASE_SPEED = 2           # m/s max chassis speed
+CHASE_GAIN = 1.5          # proportional gain for chase
+ALIGN_GAIN = 1            # proportional gain for plate-normal alignment strafe
 PROJECTILE_SPEED = 25     # m/s
 GRAVITY = 9.81            # m/s^2
 
