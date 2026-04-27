@@ -262,14 +262,14 @@ def run():
         pub.send("shoot", shoot)
         pub.send("spinning", True)
 
-        # chassis: maintain distance to target (z = forward/back)
+        # chassis: maintain distance to target (x = forward/back)
         dist_err = dist - MAINTAIN_DIST
         if abs(dist_err) > 0.1:
-          cv_z = max(-CHASE_SPEED, min(CHASE_SPEED, dist_err * CHASE_GAIN))
+          cv_x = max(-CHASE_SPEED, min(CHASE_SPEED, dist_err * CHASE_GAIN))
         else:
-          cv_z = 0.0
+          cv_x = 0.0
 
-        # chassis: strafe to align with plate normal
+        # chassis: strafe to align with plate normal (z = left/right)
         # plate normal from euler xyz: n = Rx(a) @ Ry(b) @ [0,0,1]
         rot = plate["rot"]
         a, b = rot[0], rot[1]
@@ -281,7 +281,7 @@ def run():
         v_z = orig_pos[2] / max(0.01, dist)
         # cross product y-component: zero when plate faces us
         align_err = v_z * n_x - v_x * n_z
-        cv_x = max(-CHASE_SPEED, min(CHASE_SPEED, align_err * ALIGN_GAIN))
+        cv_z = max(-CHASE_SPEED, min(CHASE_SPEED, align_err * ALIGN_GAIN))
 
         pub.send("chassis_velocity", {"x": cv_x, "z": cv_z})
       else:
