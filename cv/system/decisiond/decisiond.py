@@ -283,7 +283,7 @@ def run():
         align_err = v_z * n_x - v_x * n_z
         cv_z = max(-CHASE_SPEED, min(CHASE_SPEED, align_err * ALIGN_GAIN))
 
-        pub.send("chassis_velocity", {"x": cv_x, "z": cv_z})
+        pub.send("chassis_velocity", {"x": cv_x, "z": 0})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
         pub.send("shoot", False)
