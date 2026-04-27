@@ -168,8 +168,10 @@ PATH_BLEND_RADIUS = 0.1
 
 # -- aiming constants --
 
-MAINTAIN_DIST = 2         # m, target follow distance
-CHASE_SPEED = 2           # m/s max chassis speed
+MAINTAIN_DIST = 1         # m, target follow distance
+CHASE_SPEED = 4           # m/s max chassis speed
+CHASE_GAIN = 3            # proportional gain for chase
+ALIGN_GAIN = 2            # proportional gain for plate-normal alignment strafe
 PROJECTILE_SPEED = 25     # m/s
 GRAVITY = 9.81            # m/s^2
 
@@ -260,13 +262,19 @@ def run():
         pub.send("shoot", shoot)
         pub.send("spinning", True)
 
-        # chassis: maintain distance to target (using KF-smoothed dist)
+        # chassis: maintain distance to target (z = forward/back)
         dist_err = dist - MAINTAIN_DIST
         if abs(dist_err) > 0.1:
-          cv_x = max(-CHASE_SPEED, min(CHASE_SPEED, dist_err))
+          cv_z = max(-CHASE_SPEED, min(CHASE_SPEED, dist_err * CHASE_GAIN))
         else:
-          cv_x = 0.0
-        pub.send("chassis_velocity", {"x": cv_x, "z": 0.0})
+          cv_z = 0.0
+
+        # chassis: strafe to align with plate normal (x = left/right)
+        rot = plate["rot"]
+        plate_yaw = rot[1]  # y-euler = plate horizontal facing
+        cv_x = max(-CHASE_SPEED, min(CHASE_SPEED, plate_yaw * ALIGN_GAIN))
+
+        pub.send("chassis_velocity", {"x": cv_x, "z": cv_z})
       else:
         pub.send("aim_error", {"x": 0.0, "y": 0.0})
         pub.send("shoot", False)
@@ -275,21 +283,3 @@ def run():
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         pass  # plate KF reset handled by plated
-
-    # # fall back to waypoint path when no target
-    # if not has_target:
-    #   now = time.monotonic()
-    #   wall_dt = now - st
-    #   if wall_dt > 9:
-    #     logger.warning("STARTING")
-    #   if wall_dt > 10 and wall_dt <= 120:
-    #     if last_step_t is None:
-    #       last_step_t = now
-    #     dt = now - last_step_t
-    #     last_step_t = now
-    #     vx, vz = follower.step(dt)
-    #     pub.send("chassis_velocity", {"x": vx, "z": vz})
-    #   else:
-    #     pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
-    #
-    # fk.step()
