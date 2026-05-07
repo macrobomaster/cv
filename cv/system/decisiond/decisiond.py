@@ -246,10 +246,6 @@ def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot", "spinning"])
   sub = messaging.Sub(["autoaim", "plate", "game_running", "team_color"], poll="autoaim")
 
-  autoaim_valid_debounce = Debounce(1)
-  aim_kf = AimErrorKF()
-  shoot_decision = ShootDecision()
-
   follower = WaypointFollower(
     waypoints=PATH_WAYPOINTS,
     speed=PATH_SPEED,
@@ -264,83 +260,18 @@ def run():
   while True:
     sub.update(timeout=0)
 
-    autoaim = sub["autoaim"]
-    plate = sub["plate"]
-    has_target = False
+    now = time.monotonic()
+    wall_dt = now - st
+    if wall_dt > 0:
+      logger.warning("STARTING")
+    if wall_dt > 1 and wall_dt <= 120:
+      if last_step_t is None:
+        last_step_t = now
+      dt = now - last_step_t
+      last_step_t = now
+      vx, vz = follower.step(dt)
+      pub.send("chassis_velocity", {"x": vx, "z": vz})
+    else:
+      pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
 
-    if autoaim is not None and sub.updated["autoaim"]:
-      if autoaim["valid"] and plate is not None:
-        has_target = True
-
-        # plate center in normalized coords [-1, 1]
-        plate_mu = autoaim["plate_mu"]
-        x_raw = (plate_mu[0] - IMG_W / 2) / (IMG_W / 2)
-        y_raw = (plate_mu[1] - IMG_H / 2) / (IMG_H / 2)
-
-        # KF smoothing + velocity estimation (replaces AimAhead + SpinCompensator)
-        x, y, vx, vy = aim_kf.predict_and_correct(x_raw, y_raw)
-
-        dist = plate["dist"]
-
-        # lead prediction: aim where target will be when bullet arrives
-        if dist > 0.5:
-          tof = dist / PROJECTILE_SPEED
-          x += vx * tof
-
-        # vertical compensation: physics-based gravity drop
-        y -= gravity_drop_offset(dist)
-        # empirical camera-barrel offset (tune for your setup)
-        y -= 0.1 * dist
-        y += 0.4
-
-        shoot = shoot_decision.step(x, y)
-
-        # scale error by distance, apply gain
-        x_err = (x / max(1, dist)) * 0.5
-        y_err = (y / max(1, dist)) * 0.5
-        pub.send("aim_error", {"x": x_err, "y": y_err})
-        pub.send("shoot", shoot)
-
-        # chassis: maintain distance to target
-        cv = {"x": 0.0, "z": 0.0}
-        if dist > MAINTAIN_DIST + 0.1:
-          cv["x"] = min(CHASE_SPEED, max(0, dist - MAINTAIN_DIST))
-        elif dist < MAINTAIN_DIST - 0.1:
-          cv["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - min(MAINTAIN_DIST, dist))
-
-        # chassis: rotate toward target
-        pos = plate["pos"]
-        angle_x = math.degrees(math.atan2(pos[2], pos[0])) - 87
-        angle_y = math.degrees(math.atan2(pos[1], pos[2]))
-        pub.send("aim_angle", {"x": angle_x, "y": angle_y})
-
-        if angle_x > 0.5:
-          cv["z"] = min(CHASE_SPEED, abs(angle_x) / 5)
-        elif angle_x < -0.5:
-          cv["z"] = -min(CHASE_SPEED, abs(angle_x) / 5)
-
-        pub.send("chassis_velocity", cv)
-      else:
-        pub.send("aim_error", {"x": 0.0, "y": 0.0})
-        pub.send("spinning", True)  # keep alive = don't spin when no target
-
-      if autoaim_valid_debounce.debounce(not autoaim["valid"]):
-        aim_kf.reset()
-
-    # # fall back to waypoint path when no target
-    # if not has_target:
-    #   now = time.monotonic()
-    #   wall_dt = now - st
-    #   if wall_dt > 9:
-    #     logger.warning("STARTING")
-    #   if wall_dt > 10 and wall_dt <= 120:
-    #     if last_step_t is None:
-    #       last_step_t = now
-    #     dt = now - last_step_t
-    #     last_step_t = now
-    #     vx, vz = follower.step(dt)
-    #     pub.send("chassis_velocity", {"x": vx, "z": vz})
-    #   else:
-    #     pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
-    #
-    # fk.step()
+    fk.step()
