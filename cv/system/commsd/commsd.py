@@ -53,10 +53,10 @@ def run():
       if not sub.alive["chassis_velocity"]:
         protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
 
-    if sub.alive["spinning"]:
-      protocol.msg(Command.CONTROL_SPINNING, 0x00)
-    else:
-      protocol.msg(Command.CONTROL_SPINNING, 0xff)
+    # if sub.alive["spinning"]:
+    #   protocol.msg(Command.CONTROL_SPINNING, 0x00)
+    # else:
+    #   protocol.msg(Command.CONTROL_SPINNING, 0xff)
 
     # game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
     # if game_running is not None:
