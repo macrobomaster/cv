@@ -185,16 +185,11 @@ def run():
     if True:
       if sub.updated["autoaim"]:
         if autoaim["valid"]:
-          # if autoaim["colorm"] != "blank" and autoaim["colorm"] != team_color:
           if True:
-            plate_mu = autoaim["plate_mu"]
-            xc, yc = plate_mu[0], plate_mu[1]
-
-            x = (xc - 256) / 256
-            y = (yc - 128) / 128
-            # x, y = aim_error_kf.predict_and_correct(x, y)
-            # x = aim_ahead.step(x)
-            # x = aim_error_spin_comp.correct(x)
+            # Aim from the filtered 3D plate position. pos is in meters from PnP in plated.
+            pos = plate["pos"]
+            x = pos[0] / max(0.1, abs(pos[2]))  # horizontal angle proxy
+            y = pos[1] / max(0.1, abs(pos[2]))  # vertical angle proxy
 
             # offset y by some amount relative to the distance to the plate
             y -= 0.1 * plate["dist"]
