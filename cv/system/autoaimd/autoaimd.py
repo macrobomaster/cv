@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Callable, Any
-import pickle, itertools, time
+import pickle, time
 
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
@@ -11,8 +11,8 @@ from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
-from ...autoaim.model import Model
-from ...autoaim.common import pred, MODEL_VERSION
+from ...autoaim.model import Model, CLASS_DECODE_TABLE, N_FEAT_TOKENS
+from ...autoaim.common import pred_backbone, pred_decoder, TemporalInference, MODEL_VERSION, IMG_H, IMG_W, T
 
 HALF = getenv("HALF", 0)
 BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
@@ -25,14 +25,15 @@ def run():
   if getenv("HALF", 0) == 1:
     dtypes.default_float = dtypes.float16
 
-  # cache model jit
-  model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_run_{Device.DEFAULT}"
-  if kv_get("autoaim", model_key) is None:
+  # cache model jit — separate backbone and decoder
+  backbone_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_backbone_{Device.DEFAULT}"
+  decoder_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_decoder_{Device.DEFAULT}"
+  if kv_get("autoaim", backbone_key) is None:
     logger.info("building cached model")
 
-    model = Model()
+    model = Model(temporal_size=T)
     state_dict = safe_load(str(Path(__file__).parent.parent.parent.parent / "weights/model.safetensors"))
-    load_state_dict(model, state_dict, verbose=False)
+    load_state_dict(model, state_dict, verbose=False, strict=False)
     model.fuse()
     if HALF:
       for key, param in get_state_dict(model).items():
@@ -40,21 +41,33 @@ def run():
         if ".n" in key: continue
         param.replace(param.half()).realize()
 
-    # run to initialize jit
-    fake_input = Tensor.empty(256, 512, 3, dtype=dtypes.uint8, device="PYTHON").realize()
+    # warmup backbone jit (input is now T frames)
+    fake_input = Tensor.empty(1, T, IMG_H, IMG_W, 3, dtype=dtypes.uint8, device="PYTHON").realize()
     for _ in range(3):
-      pred(model, fake_input).tolist()
+      tokens = pred_backbone(model, fake_input)
+      tokens.tolist()
 
-    kv_put("autoaim", model_key, pickle.dumps(pred))
-    
+    # warmup decoder jit (no T multiplier — temporal is fused at stem)
+    fake_tokens = Tensor.empty(1, N_FEAT_TOKENS, 512, device="PYTHON").realize()
+    for _ in range(3):
+      pred_decoder(model, fake_tokens).tolist()
+
+    kv_put("autoaim", backbone_key, pickle.dumps(pred_backbone))
+    kv_put("autoaim", decoder_key, pickle.dumps(pred_decoder))
+
     # Request restart after building cached model
     logger.info("cached model built, requesting restart")
     kv_put("restart", "autoaimd", True)
     return  # Exit to allow supervisor to restart us
 
   # load model
-  logger.info(f"loading cached {model_key}")
-  model_pred: Callable[[Any, Tensor], Tensor] = pickle.loads(kv_get("autoaim", model_key))
+  logger.info(f"loading cached {backbone_key}")
+  model_backbone: Callable[[Any, Tensor], Tensor] = pickle.loads(kv_get("autoaim", backbone_key))
+  model_decoder: Callable[[Any, Tensor], Tensor] = pickle.loads(kv_get("autoaim", decoder_key))
+
+  color_names = {0: "none", 1: "red", 2: "blue"}
+
+  infer = TemporalInference(model_backbone, model_decoder, None, T=T)
 
   while True:
     sub.update(0)
@@ -68,46 +81,24 @@ def run():
       framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
       ft = time.monotonic()
 
-      model_out = model_pred(None, framet).tolist()[0]
+      model_out = infer(framet)
       mt = time.monotonic()
 
-      model_out_iter = iter(model_out)
-      detm, detp = tuple(itertools.islice(model_out_iter, 2))
-      colorm, colorp = tuple(itertools.islice(model_out_iter, 2))
-      numberm, numberp = tuple(itertools.islice(model_out_iter, 2))
-      plate_mu = list(itertools.islice(model_out_iter, 10))
-      plate_var = list(itertools.islice(model_out_iter, 10))
-      at = time.monotonic()
+      class_id = int(model_out[0])
+      confidence = model_out[1]
+      corners = list(model_out[2:10])  # 4 corners in [0, 1] image-normalized coords, TL/TR/BL/BR
 
-      # print("cap time:", camera_feed["st"] - camera_feed["ct"], "frame time:", ft - camera_feed["st"], "model time:", mt - ft, "accel time:", at - mt, "total model time:", at - camera_feed["st"], "total time:", at - camera_feed["ct"])
+      detected, color_id, number = CLASS_DECODE_TABLE[class_id]
+      color_name = color_names.get(color_id, "blank")
 
-      match colorm:
-        case 0: colorm = "none"
-        case 1: colorm = "red"
-        case 2: colorm = "blue"
-        case 3: colorm = "blank"
-      for j in range(5):
-        plate_mu[j * 2] = ((plate_mu[j * 2] + 1) / 2) * 512
-        plate_mu[j * 2 + 1] = ((plate_mu[j * 2 + 1] + 1) / 2) * 256
-
-      valid = True
-      if detm == 0: valid = False
-      if detp < 0.6: valid = False
-      if colorm == "none": valid = False
-      if colorp < 0.6: valid = False
-
-      plate_var_avg = sum(plate_var) / len(plate_var)
-      if plate_var_avg > 4: valid = False
+      valid = detected == 1 and confidence > 0.6
 
       pub.send("autoaim", {
         "valid": valid,
-        "detm": detm,
-        "detp": detp,
-        "colorm": colorm,
-        "colorp": colorp,
-        "numberm": numberm,
-        "numberp": numberp,
-        "plate_mu": plate_mu,
-        "plate_var": plate_var,
-        "plate_var_avg": plate_var_avg,
+        "class_id": class_id,
+        "confidence": confidence,
+        "detected": detected,
+        "color": color_name,
+        "number": number,
+        "corners": corners,
       })

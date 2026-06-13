@@ -1,12 +1,8 @@
-import math
-
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import cv2
 
 from ..core import messaging
-from ..core.logging import logger
-from ..core.keyvalue import kv_get, kv_put
 from ..core.helpers import Debounce
 
 CAMERA_MATRIX = np.array([[831.90808403,   0.        , 208.91197384],
@@ -14,12 +10,16 @@ CAMERA_MATRIX = np.array([[831.90808403,   0.        , 208.91197384],
                           [  0.        ,   0.        ,   1.        ]], dtype=np.float32)
 DIST_COEFFS = np.array([[-0.1703448 ,  0.59690183,  0.00502021, -0.00725316, -1.45582172]], dtype=np.float32)
 PLATE_WIDTH, PLATE_HEIGHT = 0.095, 0.104
+# Corner order matches autoaim's syndata keypoint order: TL, TR, BL, BR (image-space convention,
+# y-down; 3D y-axis is flipped vs image so TL has -y).
 PLATE_POINTS = np.array([
-  [-PLATE_WIDTH/2, PLATE_HEIGHT/2, 0], # bottom left
-  [PLATE_WIDTH/2, PLATE_HEIGHT/2, 0], # bottom right
-  [PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # top right
-  [-PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # top left
-])
+  [-PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # TL
+  [ PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # TR
+  [-PLATE_WIDTH/2,  PLATE_HEIGHT/2, 0], # BL
+  [ PLATE_WIDTH/2,  PLATE_HEIGHT/2, 0], # BR
+], dtype=np.float32)
+
+IMG_W, IMG_H = 512, 256
 
 class PlateKF:
   def __init__(self, dt:float=1/100):
@@ -80,36 +80,35 @@ def run():
 
     if sub.updated["autoaim"]:
       if autoaim["valid"]:
-        plate_mu = autoaim["plate_mu"]
-        xc, yc = plate_mu[0], plate_mu[1]
-        xtl, ytl = plate_mu[2], plate_mu[3]
-        xtr, ytr = plate_mu[4], plate_mu[5]
-        xbl, ybl = plate_mu[6], plate_mu[7]
-        xbr, ybr = plate_mu[8], plate_mu[9]
+        # corners come from autoaim normalized to [0,1] of the (IMG_W, IMG_H) input frame,
+        # ordered TL, TR, BL, BR (8 floats)
+        corners_norm = autoaim["corners"]
+        corners_2d = np.array([
+          [corners_norm[2*i] * IMG_W, corners_norm[2*i + 1] * IMG_H]
+          for i in range(4)
+        ], dtype=np.float32)
 
-        image_points = np.array([
-          [xbl, ybl],
-          [xbr, ybr],
-          [xtr, ytr],
-          [xtl, ytl],
-        ], dtype=np.float32).reshape(-1, 1, 2)
-        ret, rvec, tvec = cv2.solvePnP(PLATE_POINTS, image_points, CAMERA_MATRIX, DIST_COEFFS)
+        # IPPE is the planar-PnP solver; the plate is coplanar so it's the right choice.
+        ok, rvec, tvec = cv2.solvePnP(PLATE_POINTS, corners_2d, CAMERA_MATRIX, DIST_COEFFS,
+                                      flags=cv2.SOLVEPNP_IPPE)
+        if not ok:
+          if autoaim_valid_debounce.debounce(True): kf.reset()
+          continue
 
-        if ret:
-          rot = R.from_rotvec(rvec.flatten()).as_euler("xyz")
-          pos = tvec.flatten()
+        pos = tvec.flatten()
+        rot = R.from_matrix(cv2.Rodrigues(rvec)[0]).as_euler("xyz")
 
-          pos, rot = kf.predict_and_correct(pos, rot)
+        pos, rot = kf.predict_and_correct(pos, rot)
+        dist = float(np.linalg.norm(pos))
+        rvec_filtered = R.from_euler("xyz", rot).as_rotvec()
 
-          dist = np.linalg.norm(pos)
-
-          pub.send("plate", {
-            "rot": rot,
-            "pos": pos,
-            "dist": dist,
-            "rvec": rvec.flatten().tolist(),
-            "tvec": tvec.flatten().tolist(),
-          })
+        pub.send("plate", {
+          "rot": rot,
+          "pos": pos,
+          "dist": dist,
+          "rvec": rvec_filtered.tolist(),
+          "tvec": list(pos),
+        })
 
       if autoaim_valid_debounce.debounce(not autoaim["valid"]):
         kf.reset()
