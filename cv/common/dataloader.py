@@ -1,4 +1,4 @@
-import random, os, pickle, time
+import random, os, pickle, time, atexit
 from multiprocessing import shared_memory
 from typing import Callable
 from dataclasses import dataclass
@@ -54,13 +54,12 @@ class Dataloader:
 
     szs = {name: (bs, *desc.shape) for name, desc in descs.items()}
 
-    inflight_shms = []
+    self._shms = []
     for i in range(8):
-      shms = {}
       for name, desc in descs.items():
         if os.path.exists(f"/dev/shm/dataloader_{name}_{i}"): os.unlink(f"/dev/shm/dataloader_{name}_{i}")
-        shms[name] = shared_memory.SharedMemory(name=f"dataloader_{name}_{i}", create=True, size=prod(szs[name]) * desc.dtype.itemsize)
-      inflight_shms.append(shms)
+        self._shms.append(shared_memory.SharedMemory(name=f"dataloader_{name}_{i}", create=True, size=prod(szs[name]) * desc.dtype.itemsize))
+    atexit.register(self.close)
 
     self.inflight = []
     for i in range(8):
@@ -75,6 +74,12 @@ class Dataloader:
     for _ in range(5):
       time.sleep(0.1)
       sync.send("dataloader_sync", True)
+
+  def close(self):
+    for shm in self._shms:
+      shm.close()
+      shm.unlink()
+    self._shms.clear()
 
   def _epoch(self):
     files = self.files_fn()
@@ -154,7 +159,7 @@ class DataloaderProc:
         name = ""
         try:
           for name, t in inflight[num].items():
-            t[idx].contiguous().realize().uop.base.realized.ensure_allocated().as_buffer(force_zero_copy=True)[:] = data[name]
+            t[idx].flatten().assign(data[name])
         except Exception as e:
           logger.error(f"failed to load {file}, {name}")
           raise e
