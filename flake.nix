@@ -82,76 +82,105 @@
     in
     {
       devShells = {
-        x86_64-linux.default = pkgs-x86_64-linux.mkShell {
-          packages =
-            let
-              python-packages =
-                p:
-                with p;
-                [
-                  albumentations
-                  pillow
-                  pyvips
-                  (tinygrad.override { rocmSupport = true; })
-                  wandb
-                  onnx
-                  onnxruntime
-                  torchvision
-                  transformers
-                  (p.buildPythonPackage rec {
-                    pname = "moondream";
-                    version = "0.0.6";
-                    pyproject = true;
-                    src = pkgs-x86_64-linux.fetchPypi {
-                      inherit pname version;
-                      hash = "sha256-uSN2dTCvmWkzDRCsTQeNIFZot4SCVm0Jo4lyKYjqaP4=";
-                    };
-                    pythonRelaxDeps = [
-                      "onnxruntime"
-                      "pillow"
-                      "tokenizers"
-                    ];
-                    nativeBuildInputs = with p; [ poetry-core ];
-                    propagatedBuildInputs = with p; [
-                      numpy
-                      onnx
-                      onnxruntime
-                      pillow
-                      tokenizers
-                      pyvips
-                      einops
-                    ];
-                    doCheck = false;
-                  })
-                  rerun-sdk
-                  gymnasium
-                  z3-solver
-                ]
-                ++ common-python-packages p;
-              python = pkgs-x86_64-linux.python312;
-            in
-            with pkgs-x86_64-linux;
-            [
-              rerun
-              (python.withPackages python-packages)
-              aravis
-              aravis.lib
-              gobject-introspection
-              llvmPackages_latest.clang-unwrapped
-              waypipe
-              sqlite-web
-              picocom
-              tmux
-              (pkgs.writeShellScriptBin "rerun-web" ''
-                #!/usr/bin/env bash
-                ${rerun}/bin/rerun --web-viewer
-              '')
-            ];
+        x86_64-linux.default =
+          let
+            python-packages =
+              p:
+              with p;
+              [
+                albumentations
+                pillow
+                pyvips
+                (tinygrad.override { rocmSupport = true; })
+                wandb
+                onnx
+                onnxruntime
+                torchvision
+                rerun-sdk
+                z3-solver
+              ]
+              ++ common-python-packages p;
+            python = pkgs-x86_64-linux.python314;
+            pythonEnv = python.withPackages python-packages;
+            # Wrapper that sets ambient capabilities before exec-ing python.
+            # Ambient caps propagate to all child processes (unlike file caps).
+            # The wrapper gets caps via setcap, raises them as ambient, then
+            # execs the real python (which must NOT have file caps, otherwise
+            # the kernel clears ambient caps).
+            pythonCapWrapper = pkgs-x86_64-linux.stdenv.mkDerivation {
+              name = "python-cap-wrapper";
+              dontUnpack = true;
+              buildInputs = [ pkgs-x86_64-linux.libcap ];
+              buildPhase = ''
+                cat > wrapper.c << 'EOF'
+                #include <sys/prctl.h>
+                #include <sys/capability.h>
+                #include <unistd.h>
+                #include <stdio.h>
+                int main(int argc, char *argv[]) {
+                  cap_value_t cap_list[] = {CAP_DAC_OVERRIDE, CAP_SYS_RAWIO, CAP_SYS_ADMIN, CAP_IPC_LOCK};
+                  int n = sizeof(cap_list) / sizeof(cap_list[0]);
+                  cap_t caps = cap_get_proc();
+                  if (!caps) { perror("cap_get_proc"); _exit(1); }
+                  if (cap_set_flag(caps, CAP_INHERITABLE, n, cap_list, CAP_SET) < 0) { perror("cap_set_flag"); _exit(1); }
+                  if (cap_set_proc(caps) < 0) { perror("cap_set_proc"); _exit(1); }
+                  cap_free(caps);
+                  for (int i = 0; i < n; i++)
+                    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap_list[i], 0, 0) < 0) { perror("prctl"); _exit(1); }
+                  execv("${python}/bin/python3", argv);
+                  perror("execv");
+                  return 1;
+                }
+                EOF
+                $CC wrapper.c -o python-cap-wrapper -lcap
+              '';
+              installPhase = ''
+                mkdir -p $out/bin
+                install -m 755 python-cap-wrapper $out/bin/python3
+                ln $out/bin/python3 $out/bin/python
+              '';
+            };
+          in
+          pkgs-x86_64-linux.mkShell {
+            packages =
+              with pkgs-x86_64-linux;
+              [
+                rerun
+                pythonEnv
+                aravis
+                aravis.lib
+                gobject-introspection
+                llvmPackages_latest.clang-unwrapped
+                waypipe
+                sqlite-web
+                picocom
+                tmux
+                (pkgs.writeShellScriptBin "rerun-web" ''
+                  #!/usr/bin/env bash
+                  ${rerun}/bin/rerun --web-viewer
+                '')
+              ];
 
-          shellHook = ''
-            export CC=${pkgs-x86_64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
-          '';
-        };
+            shellHook = ''
+              export CC=${pkgs-x86_64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
+
+              # Set up python environment from withPackages
+              export NIX_PYTHONPREFIX='${pythonEnv}'
+              export NIX_PYTHONEXECUTABLE='${pythonEnv}/bin/python3'
+              export NIX_PYTHONPATH='${pythonEnv}/${python.sitePackages}'
+
+              # Copy the capability wrapper and setcap it
+              _CAPS_DIR="$HOME/.cache/python-caps-$(echo '${pythonCapWrapper}' | sha256sum | cut -c1-16)"
+              if [ ! -f "$_CAPS_DIR/.ok" ]; then
+                rm -rf "$_CAPS_DIR"
+                mkdir -p "$_CAPS_DIR"
+                cp ${pythonCapWrapper}/bin/python3 "$_CAPS_DIR/python3"
+                ln -f "$_CAPS_DIR/python3" "$_CAPS_DIR/python"
+                sudo ${pkgs-x86_64-linux.libcap}/bin/setcap 'cap_dac_override,cap_sys_rawio,cap_sys_admin,cap_ipc_lock=ep' "$_CAPS_DIR/python3" && touch "$_CAPS_DIR/.ok"
+              fi
+              export PATH="$_CAPS_DIR:$PATH"
+            '';
+          };
         aarch64-linux.default = pkgs-aarch64-linux.mkShell {
           packages =
             let
@@ -173,7 +202,7 @@
                   )
                 ]
                 ++ common-python-packages p;
-              python = pkgs-aarch64-linux.python312;
+              python = pkgs-aarch64-linux.python314;
             in
             with pkgs-aarch64-linux;
             [
