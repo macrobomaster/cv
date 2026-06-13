@@ -56,14 +56,19 @@ def twohot(x:Tensor, bins:int, low:float, high:float) -> Tensor:
 
   return below.one_hot(bins) * w_below[..., None] + above.one_hot(bins) * w_above[..., None]
 
-def norm(x:Tensor, axis:int|None=None, eps:float=1e-6) -> Tensor:
-  return x * x.square().sum(axis, keepdim=True).add(eps).rsqrt()
+def norm(x:Tensor, axis:int|tuple[int,...]|None=None, keepdim:bool=False, eps:float=1e-5) -> Tensor:
+  return x.square().sum(axis, keepdim=keepdim).add(eps).sqrt()
 
-def rms_norm(x:Tensor, axis:int|None=-1, eps:float=1e-6) -> Tensor:
-  return x * x.square().mean(axis, keepdim=True).add(eps).rsqrt()
+def rms_norm(x:Tensor, axis:int|tuple[int,...]|None=-1, keepdim:bool=False, eps:float=1e-5) -> Tensor:
+  return x.square().mean(axis, keepdim=keepdim).add(eps).sqrt()
 
 def telu(x:Tensor) -> Tensor:
   return x * x.exp().tanh()
+
+def rms_pool(x:Tensor, eps:float=1e-6) -> Tensor:
+  rms = rms_norm(x, axis=(2, 3), keepdim=True, eps=eps)
+  x = rms / (rms.mean(axis=1, keepdim=True) + eps)
+  return x.reshape(x.shape[0], x.shape[1])
 
 def log_gaussian_pdf(y:Tensor, mu:Tensor, log_var:Tensor) -> Tensor:
   return -0.5 * log_var - 0.5 * math.log(2 * math.pi) - 0.5 * y.unsqueeze(1).sub(mu).square().div(log_var.exp())
