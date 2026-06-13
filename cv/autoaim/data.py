@@ -1,14 +1,11 @@
-import glob
-
 from tinygrad.helpers import getenv
 import albumentations as A
 import cv2
 import numpy as np
 
-from .common import get_annotation
-from .syndata import generate_sample
+from .syndata import generate_sample, generate_sequence
+from .common import T, IMG_H, IMG_W
 from ..common.dataloader import DataloaderProc
-from ..common import BASE_PATH
 
 OUTPUT_PIPELINE = A.Compose([
   A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
@@ -17,10 +14,9 @@ OUTPUT_PIPELINE = A.Compose([
     A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.3),
     A.RandomSunFlare(flare_roi=(0, 0, 1, 1), p=0.3),
   ], p=0.2),
-  A.OneOf([
-    A.Defocus(radius=(1, 5), p=0.1),
-    A.MotionBlur(blur_limit=(3, 7), p=0.5),
-  ], p=0.25),
+  # Strong scene-wide motion blur, applied directly (not inside a OneOf) so it actually fires often
+  A.MotionBlur(blur_limit=(5, 17), p=0.5),
+  A.Defocus(radius=(1, 5), p=0.05),
   A.OneOf([
     A.GaussNoise(std_range=(0.05, 0.2), p=0.5),
     A.ISONoise(p=0.5),
@@ -32,85 +28,52 @@ OUTPUT_PIPELINE = A.Compose([
   A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
 ])
 
+# Label format: [class_id, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y, has_class, has_corners] — 11 values
+# corners are normalized to [0, 1] of image dims (512 wide, 256 tall)
+
 def load_single_file(file) -> dict[str, bytes]:
-  has_color, has_number, has_plate = 0, 0, 0
   if file.startswith("fake:"):
-    img = np.zeros((256, 512, 3), dtype=np.uint8)
-    detected = 0
-    keypoints = [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]
-    color = 0
-    number = 0
+    img = np.zeros((IMG_H, IMG_W, 3), dtype=np.uint8)
+    class_id = 0
+    corners_8 = [0.0] * 8
   elif file.startswith("syn:"):
-    img, detected, keypoints, color, number = generate_sample(file)
-    has_color, has_number, has_plate = 1, 1, 1
-  elif file.startswith("path:"):
-    img_file = file[5:]
-    img = cv2.imread(img_file, cv2.IMREAD_UNCHANGED)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    anno = get_annotation(img_file)
-    if anno.detected:
-      detected = 1
-      keypoints = [(anno.x * img.shape[1], (1 - anno.y) * img.shape[0]), (0, 0), (0, 0), (0, 0), (0, 0)]
-      color = 0
-      number = 0
-    else:
-      detected = 0
-      keypoints = [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]
-      color = 0
-      number = 0
+    img, class_id, corners_8 = generate_sample(file)
   else:
     raise ValueError("unknown file type")
 
   output = OUTPUT_PIPELINE(image=img)
   img = output["image"]
-  xc, yc = keypoints[0]
-  if detected:
-    if xc < 0 or xc > img.shape[1] or yc < 0 or yc > img.shape[0]:
-      detected = 0
-  xtl, ytl = keypoints[1]
-  xtr, ytr = keypoints[2]
-  xbl, ybl = keypoints[3]
-  xbr, ybr = keypoints[4]
 
-  # scale keypoints to (-1,1) range
-  xc = xc / img.shape[1] * 2 - 1
-  yc = yc / img.shape[0] * 2 - 1
-  xtl = xtl / img.shape[1] * 2 - 1
-  ytl = ytl / img.shape[0] * 2 - 1
-  xtr = xtr / img.shape[1] * 2 - 1
-  ytr = ytr / img.shape[0] * 2 - 1
-  xbl = xbl / img.shape[1] * 2 - 1
-  ybl = ybl / img.shape[0] * 2 - 1
-  xbr = xbr / img.shape[1] * 2 - 1
-  ybr = ybr / img.shape[0] * 2 - 1
-
-  # gate number based on detection
-  if not detected:
-    number = 0
-
-  # gate color based on detection
-  if not detected:
-    color = 0
-
-  # set all keypoints to 0 if not detected
-  if not detected:
-    xc = yc = xtl = ytl = xtr = ytr = xbl = ybl = xbr = ybr = 0
-
-  # if not detected we don't have center or plate, but we do have color and number which are 0
-  if not detected:
-    has_plate = 0
-    has_color = 1
-    has_number = 1
-
+  has_class = 1.0
+  has_corners = 1.0 if class_id > 0 else 0.0
+  label = np.array([class_id] + corners_8 + [has_class, has_corners], dtype=np.float32)
   return {
     "x": img.tobytes(),
-    "y": np.array((detected, color, number, xc, yc, xtl, ytl, xtr, ytr, xbl, ybl, xbr, ybr, 1, has_color, has_number, has_plate), dtype=np.float32).tobytes(),
+    "y": label.tobytes(),
+  }
+
+def load_sequence_file(file) -> dict[str, bytes]:
+  if file.startswith("fake:"):
+    imgs = np.zeros((T, IMG_H, IMG_W, 3), dtype=np.uint8)
+    class_id = 0
+    corners_8 = [0.0] * 8
+  elif file.startswith("syn:"):
+    frame_list, class_id, corners_8 = generate_sequence(file, T=T)
+    imgs = np.stack(frame_list, axis=0)  # (T, IMG_H, IMG_W, 3)
+    for t in range(T):
+      imgs[t] = OUTPUT_PIPELINE(image=imgs[t])["image"]
+  else:
+    raise ValueError("unknown file type")
+
+  has_class = 1.0
+  has_corners = 1.0 if class_id > 0 else 0.0
+  label = np.array([class_id] + corners_8 + [has_class, has_corners], dtype=np.float32)
+  return {
+    "x": np.ascontiguousarray(imgs).tobytes(),
+    "y": label.tobytes(),
   }
 
 def get_train_files():
-  real_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
-  real_files = [f"path:{f}" for f in real_files]
-
   syn_files = [
     "syn:1_blank",
     "syn:3_blank",
@@ -130,36 +93,45 @@ def get_train_files():
     "syn:4_blue",
     "syn:5_blue",
     "syn:6_blue",
-  ] * 32000
+  ] * 3200
 
   fake_files = [
     "fake:"
-  ] * 32000
+  ] * 3200
 
   if getenv("FAKEFILES", 0):
     return fake_files
-  if getenv("REALFILES", 0):
-    return real_files
   if getenv("SYNFILES", 0):
     return syn_files
-  return syn_files
+  return syn_files + fake_files
 
 def run():
   cv2.setNumThreads(0)
   cv2.ocl.setUseOpenCL(False)
 
-  DataloaderProc(load_single_file).start()
+  DataloaderProc(load_sequence_file).start()
 
 if __name__ == "__main__":
   files = get_train_files()
   for file in files[::-1]:
-    data = load_single_file(file)
-    img = np.frombuffer(data["x"], dtype=np.uint8).copy()
-    img = img.reshape((256, 512, 3))
+    data = load_sequence_file(file)
+    imgs = np.frombuffer(data["x"], dtype=np.uint8).copy()
+    imgs = imgs.reshape((T, IMG_H, IMG_W, 3))
     anno = np.frombuffer(data["y"], dtype=np.float32)
-    print(anno)
-    cv2.circle(img, (int(((anno[2] + 1) / 2) * 512), int(((anno[3] + 1) / 2) * 256)), 5, (0, 255, 0), -1)
-    cv2.imshow("img", img)
-    key = cv2.waitKey(0)
+    class_id = int(anno[0])
+    corners = anno[1:9].reshape(4, 2)
+    print(f"class_id={class_id}, corners={corners.tolist()}, has_class={anno[9]}, has_corners={anno[10]}")
+    for t in range(T):
+      img = cv2.cvtColor(imgs[t], cv2.COLOR_RGB2BGR)
+      cv2.putText(img, f"t={t}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+      if t == T - 1 and class_id > 0:
+        for i, (cx, cy) in enumerate(corners):
+          px, py = int(cx * IMG_W), int(cy * IMG_H)
+          cv2.circle(img, (px, py), 4, (0, 255, 255), -1)
+          cv2.putText(img, str(i), (px + 4, py - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+      cv2.imshow("img", img)
+      key = cv2.waitKey(0)
+      if key == ord("q"):
+        break
     if key == ord("q"):
       break
