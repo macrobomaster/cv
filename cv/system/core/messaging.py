@@ -13,7 +13,7 @@ def reset_context():
 
 # deterministically generate a port number from the service name
 def get_port(service:str):
-  return 10000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 10000)
+  return 10000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 9000)
 
 class Pub:
   def __init__(self, services:list[str]):
@@ -27,7 +27,8 @@ class Pub:
 
   def send(self, service:str, data:Any):
     assert data is not None, "data cannot be None"
-    self.socks[service].send(cbor2.dumps(data))
+    assert service in self.socks, f"service {service} not in pub sockets"
+    self.socks[service].send(cbor2.dumps(data) if not service.startswith("_") else data)
 
 class AliveChecker:
   def __init__(self, count:int=1000):
@@ -99,7 +100,7 @@ class Sub:
   def _read_update(self, service:str):
     try: data = self.socks[service].recv(flags=zmq.NOBLOCK)
     except zmq.error.Again: return
-    self.data[service] = cbor2.loads(data)
+    self.data[service] = cbor2.loads(data) if not service.startswith("_") else data
     self.updated[service] = True
 
   def update(self, timeout:int|None=100):
@@ -137,12 +138,12 @@ class PushPull:
     self.pull_sock.bind(f"tcp://*:{get_port(self.pull_service)}")
 
   def push(self, data:Any):
-    self.push_sock.send(cbor2.dumps(data))
+    self.push_sock.send(cbor2.dumps(data) if not self.push_service.startswith("_") else data)
 
   def pull(self, block:bool=True) -> Any:
     try: data = self.pull_sock.recv(flags=0 if block else zmq.NOBLOCK)
     except zmq.error.Again: return None
-    return cbor2.loads(data)
+    return cbor2.loads(data) if not self.pull_service.startswith("_") else data
 
 class PullPush:
   def __init__(self, service:str, addr:str="127.0.0.1"):
@@ -159,7 +160,7 @@ class PullPush:
 
   def pull(self):
     data = self.pull_sock.recv()
-    return cbor2.loads(data)
+    return cbor2.loads(data) if not self.pull_service.startswith("_") else data
 
   def push(self, data:Any):
-    self.push_sock.send(cbor2.dumps(data))
+    self.push_sock.send(cbor2.dumps(data) if not self.push_service.startswith("_") else data)
