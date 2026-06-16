@@ -6,6 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
 
     tinygrad.url = "github:wozeparrot/tinygrad-nix";
+    tinygrad.inputs.nixpkgs.follows = "nixpkgs";
 
     jetpack-nixos.url = "github:anduril/jetpack-nixos";
     disko.url = "github:nix-community/disko/latest";
@@ -102,11 +103,6 @@
               ++ common-python-packages p;
             python = pkgs-x86_64-linux.python314;
             pythonEnv = python.withPackages python-packages;
-            # Wrapper that sets ambient capabilities before exec-ing python.
-            # Ambient caps propagate to all child processes (unlike file caps).
-            # The wrapper gets caps via setcap, raises them as ambient, then
-            # execs the real python (which must NOT have file caps, otherwise
-            # the kernel clears ambient caps).
             pythonCapWrapper = pkgs-x86_64-linux.stdenv.mkDerivation {
               name = "python-cap-wrapper";
               dontUnpack = true;
