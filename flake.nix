@@ -21,7 +21,7 @@
       ...
     }:
     let
-      inherit (nixpkgs) lib;
+      inherit (inputs.nixpkgs-jetson) lib;
 
       common_overlays = [
         inputs.tinygrad.overlays.default
@@ -49,7 +49,6 @@
           cudaSupport = true;
           cudaVersion = "12";
           cudaCapabilities = [
-            "7.2"
             "8.7"
           ];
         };
@@ -222,7 +221,7 @@
           modules = [
             {
               imports = [
-                "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
+                "${inputs.nixpkgs-jetson}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
                 inputs.jetpack-nixos.nixosModules.default
               ];
               nixpkgs = {
