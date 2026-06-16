@@ -1,5 +1,8 @@
+import time
+
 import cv2
 import numpy as np
+from tinygrad.helpers import getenv
 
 import gi
 gi.require_version("Aravis", "0.8")
@@ -19,29 +22,59 @@ def setup_aravis():
   dev = cam.get_device()
   dev.set_string_feature_value("UserSetSelector", "Default")
   dev.execute_command("UserSetLoad")
+  dev.set_string_feature_value("DeviceLinkThroughputLimitMode", "Off")
+  dev.set_string_feature_value("ADCBitDepth", "ADCBitDepth_12")
   cam.set_pixel_format_from_string("RGB8Packed")
-  # camera is 1440x1080 or 4:3, crop to be 2:1
-  cam.set_region(0, 0, 1440, 720)
-  cam.set_exposure_time(6000)
-  cam.set_gain(17)
+  dev.set_boolean_feature_value("SuperBayerEnable", True)
   cam.set_binning(2, 2)
-  cam.set_frame_rate(120)
+  bw, bh = 1440 // 2, 1080 // 2
+  ch = bw // 2
+  cam.set_region(0, (bh - ch) // 2, bw, ch)
+  dev.set_string_feature_value("ExposureAuto", "Off")
+  cam.set_exposure_time(3000)
+  dev.set_string_feature_value("GainAuto", "Off")
+  cam.set_gain(getenv("GAIN", 17.0))
+  dev.set_string_feature_value("BalanceWhiteAuto", "Once")
   dev.set_string_feature_value("AcquisitionMode", "Continuous")
-  cam.set_trigger("Software")
+  dev.set_string_feature_value("TriggerMode", "Off")
+  dev.set_boolean_feature_value("AcquisitionFrameRateEnable", False)
 
   strm = cam.create_stream()
+  payload = cam.get_payload()
+  for _ in range(8):
+    strm.push_buffer(Aravis.Buffer.new_allocate(payload))
   cam.start_acquisition()
 
-  cam.software_trigger()
-  payload = cam.get_payload()
-  strm.push_buffer(Aravis.Buffer.new_allocate(payload))
+  # converge wb
+  for _ in range(60):
+    strm.push_buffer(strm.pop_buffer())
+  ratios = {}
+  for ch in ("Red", "Green", "Blue"):
+    dev.set_string_feature_value("BalanceRatioSelector", ch)
+    try: ratios[ch] = dev.get_integer_feature_value("BalanceRatio")
+    except Exception: ratios[ch] = dev.get_float_feature_value("BalanceRatio")
+  print(f"white balance ratios (lock with BalanceWhiteAuto Off): {ratios}")
+  print(f"resulting frame rate: {dev.get_float_feature_value('ResultingFrameRate'):.1f} fps")
 
-  return cam, strm
+  ts_hz = dev.get_integer_feature_value("DeviceTimestampIncrement")
+  return cam, strm, dev, ts_hz, latch_timestamp_offset(dev, ts_hz)
 
-def get_aravis_frame(cam, strm):
-  cam.software_trigger()
+def latch_timestamp_offset(dev, ts_hz) -> int:
+  t0 = time.monotonic_ns()
+  dev.execute_command("DeviceTimestampLatch")
+  t1 = time.monotonic_ns()
+  dev_ns = dev.get_integer_feature_value("DeviceTimestamp") * 1_000_000_000 // ts_hz
+  return (t0 + t1) // 2 - dev_ns
+
+def get_aravis_frame(cam, strm, ts_hz, offset):
   buf = strm.pop_buffer()
-  img_data = buf.get_data()
-  img_raw = np.frombuffer(img_data, dtype=np.uint8).reshape(cam.get_region()[3], cam.get_region()[2], 3)
+  while (nb := strm.try_pop_buffer()) is not None:
+    strm.push_buffer(buf)
+    buf = nb
+  ct = (buf.get_timestamp() * 1_000_000_000 // ts_hz + offset) / 1e9
+  status = buf.get_status()
+  # copy before requeue: in free-run the camera may immediately refill this buffer
+  img_raw = np.frombuffer(buf.get_data(), dtype=np.uint8).reshape(cam.get_region()[3], cam.get_region()[2], 3).copy()
   strm.push_buffer(buf)
-  return img_raw
+  if status != Aravis.BufferStatus.SUCCESS: return None, 0.0
+  return img_raw, ct
