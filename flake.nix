@@ -45,6 +45,7 @@
         config = {
           allowUnfree = true;
           cudaSupport = true;
+          cudaVersion = "12";
           cudaCapabilities = [
             "7.2"
             "8.7"
