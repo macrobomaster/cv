@@ -10,10 +10,11 @@ if __name__ == "__main__":
   T = 4
   while True:
     num = random.choice([1, 2, 3, 4, 5, 6])
-    color = random.choice(["red", "blue"])
-    file = f"syn:{num}_{color}"
+    seed_color = random.choice(["red", "blue"])
+    file = f"syn:{num}_{seed_color}"
 
-    images, class_id, corners_8 = generate_sequence(file, T=T)
+    images, class_id, corners_8, target_color_id = generate_sequence(file, T=T)
+    target_color_name = "red" if target_color_id == 0 else "blue"
 
     detected, color_id, number = CLASS_DECODE_TABLE[class_id] if class_id < len(CLASS_DECODE_TABLE) else (0, 0, 0)
     # Denormalize corners back to pixel coords for drawing on the final frame
@@ -24,8 +25,12 @@ if __name__ == "__main__":
     for t, img in enumerate(images):
       frame = img.copy()
       cv2.putText(frame, f"t={t}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+      # Show target color (overlay color tint to make it pop)
+      tc_color = (0, 0, 255) if target_color_name == "red" else (255, 80, 80)
+      cv2.putText(frame, f"target={target_color_name}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, tc_color, 1)
+      cv2.putText(frame, f"seed={file.split(':')[1]}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
       if t == T - 1:
-        cv2.putText(frame, f"class={class_id} det={detected} col={color_id} num={number}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        cv2.putText(frame, f"class={class_id} det={detected} col={color_id} num={number}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
         if class_id > 0:
           for i, (px, py) in enumerate(corner_px):
             cv2.circle(frame, (px, py), 4, (0, 255, 255), -1)

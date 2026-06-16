@@ -28,16 +28,18 @@ OUTPUT_PIPELINE = A.Compose([
   A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
 ])
 
-# Label format: [class_id, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y, has_class, has_corners] — 11 values
-# corners are normalized to [0, 1] of image dims (512 wide, 256 tall)
+# Label format: [class_id, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y, has_class, has_corners, target_color] — 12 values
+# corners are normalized to image dims and may fall outside [0, 1] for partial plates;
+# target_color is 0=red or 1=blue (the color the bot is hunting at this sample).
 
 def load_single_file(file) -> dict[str, bytes]:
   if file.startswith("fake:"):
     img = np.zeros((IMG_H, IMG_W, 3), dtype=np.uint8)
     class_id = 0
     corners_8 = [0.0] * 8
+    target_color_id = 0
   elif file.startswith("syn:"):
-    img, class_id, corners_8 = generate_sample(file)
+    img, class_id, corners_8, target_color_id = generate_sample(file)
   else:
     raise ValueError("unknown file type")
 
@@ -46,7 +48,7 @@ def load_single_file(file) -> dict[str, bytes]:
 
   has_class = 1.0
   has_corners = 1.0 if class_id > 0 else 0.0
-  label = np.array([class_id] + corners_8 + [has_class, has_corners], dtype=np.float32)
+  label = np.array([class_id] + corners_8 + [has_class, has_corners, target_color_id], dtype=np.float32)
   return {
     "x": img.tobytes(),
     "y": label.tobytes(),
@@ -57,8 +59,9 @@ def load_sequence_file(file) -> dict[str, bytes]:
     imgs = np.zeros((T, IMG_H, IMG_W, 3), dtype=np.uint8)
     class_id = 0
     corners_8 = [0.0] * 8
+    target_color_id = 0
   elif file.startswith("syn:"):
-    frame_list, class_id, corners_8 = generate_sequence(file, T=T)
+    frame_list, class_id, corners_8, target_color_id = generate_sequence(file, T=T)
     imgs = np.stack(frame_list, axis=0)  # (T, IMG_H, IMG_W, 3)
     for t in range(T):
       imgs[t] = OUTPUT_PIPELINE(image=imgs[t])["image"]
@@ -67,7 +70,7 @@ def load_sequence_file(file) -> dict[str, bytes]:
 
   has_class = 1.0
   has_corners = 1.0 if class_id > 0 else 0.0
-  label = np.array([class_id] + corners_8 + [has_class, has_corners], dtype=np.float32)
+  label = np.array([class_id] + corners_8 + [has_class, has_corners, target_color_id], dtype=np.float32)
   return {
     "x": np.ascontiguousarray(imgs).tobytes(),
     "y": label.tobytes(),
@@ -93,11 +96,11 @@ def get_train_files():
     "syn:4_blue",
     "syn:5_blue",
     "syn:6_blue",
-  ] * 3200
+  ] * 32000
 
   fake_files = [
     "fake:"
-  ] * 3200
+  ] * 32000
 
   if getenv("FAKEFILES", 0):
     return fake_files
@@ -120,7 +123,8 @@ if __name__ == "__main__":
     anno = np.frombuffer(data["y"], dtype=np.float32)
     class_id = int(anno[0])
     corners = anno[1:9].reshape(4, 2)
-    print(f"class_id={class_id}, corners={corners.tolist()}, has_class={anno[9]}, has_corners={anno[10]}")
+    target_color = "red" if int(anno[11]) == 0 else "blue"
+    print(f"class_id={class_id}, corners={corners.tolist()}, has_class={anno[9]}, has_corners={anno[10]}, target={target_color}")
     for t in range(T):
       img = cv2.cvtColor(imgs[t], cv2.COLOR_RGB2BGR)
       cv2.putText(img, f"t={t}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)

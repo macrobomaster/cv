@@ -4,14 +4,16 @@ from pathlib import Path
 from collections import deque
 import csv
 
+import numpy as np
 from tinygrad.engine.jit import TinyJit
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
+from tinygrad.dtype import dtypes
 from tinygrad.helpers import tqdm, getenv
 
 from ..common import BASE_PATH
 
-# Input image dimensions used across the autoaim pipeline (model, data, syndata, camerad path).
+# input image dims
 IMG_H, IMG_W = 256, 512
 
 # Backbone reduces spatial dims by this factor: stem(/4 — DWT × stride-2 conv) × 3 stage downsamples(/8).
@@ -21,48 +23,61 @@ X3_H, X3_W = IMG_H // BACKBONE_STRIDE, IMG_W // BACKBONE_STRIDE
 N_X3_TOKENS = X3_H * X3_W
 N_FEAT_TOKENS = N_X3_TOKENS + 1  # +1 for the sideband token
 
+# Fine feature map (x2, one stage up from x3) — /16 stride. Corner queries cross-attend to this
+# finer map for localization; x3 at /32 (32px tokens) is too coarse to resolve small-plate corners.
+X2_STRIDE = 16
+X2_H, X2_W = IMG_H // X2_STRIDE, IMG_W // X2_STRIDE
+N_X2_TOKENS = X2_H * X2_W
+
 # Temporal window (number of frames fused at the stem). Configurable via env var so it stays consistent
 # across data loading, training, and inference (model/data/train/autoaimd all import from here).
 T = getenv("T", 1)
 
-MODEL_VERSION = 16
+# corner output valid range
+BIN_LO, BIN_HI = -0.5, 1.5
+
+MODEL_VERSION = 21
+
+# canonical camera
+CANONICAL_FX_FY = 650
+CANONICAL_CX, CANONICAL_CY = IMG_W / 2, IMG_H / 2
+CANONICAL_CAMERA_MATRIX = np.array([[CANONICAL_FX_FY, 0, CANONICAL_CX],
+                                    [0, CANONICAL_FX_FY, CANONICAL_CY],
+                                    [0, 0, 1]], dtype=np.float32)
+CANONICAL_DIST_COEFFS = np.zeros((1, 5), dtype=np.float32)
+
+# Ballistics — drag-free projectile model.
+MUZZLE_VELOCITY = 28.0   # m/s, effective. TODO: calibrate.
+GRAVITY = 9.81           # m/s^2
+
+# Pipeline latency budget for the aim/fire prediction. Seconds (rad/s where noted).
+DELTA_INPUT = 0.020      # s, UART → main-board command pickup. TODO: measure.
+DELTA_TRIGGER = 0.060    # s, feeder + flywheel pickup. TODO: measure.
+GIMBAL_TAU = 0.040       # s, gimbal first-order motor constant. TODO: fit.
+GIMBAL_OMEGA_MAX = 12.0  # rad/s, gimbal slew rate ceiling. TODO: fit.
+
+# Mount: camera frame → gimbal-end-effector frame (R applied to a column vector).
+R_MOUNT = np.eye(3)      # rotation. TODO: measure.
+T_MOUNT = np.zeros(3)    # translation, m. TODO: measure.
 
 @partial(TinyJit, prune=True)
-def pred_backbone(model, frames):
-  """frames: (1, T, H, W, 3) — T raw frames. Returns feat tokens (1, N_FEAT_TOKENS, D)."""
-  frames = frames.to(Device.DEFAULT)
-  return model.encode(frames).to("CPU")
+def pred(model, frames, frame, target_color):
+  frame = frame.to(Device.DEFAULT)
+  frames.assign(Tensor.cat(frames[1:], frame.unsqueeze(0))).realize()
 
-@partial(TinyJit, prune=True)
-def pred_decoder(model, feat_tokens):
-  """Feature tokens (1, N_FEAT_TOKENS, D) → output (1, 10):
-  [class_id, confidence, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y] with corners in [0, 1]."""
-  feat_tokens = feat_tokens.to(Device.DEFAULT)
-  return model.corner_predict(feat_tokens).to("CPU")
+  target_color = target_color.to(Device.DEFAULT)
+  tokens = model.encode(frames.unsqueeze(0))
+  return model.corner_predict(tokens, target_color).to("CPU")
 
 class TemporalInference:
-  """Stateful temporal inference: buffers the last T raw frames and fuses them at the stem
-  via Haar temporal DWT. One backbone pass per call (not T)."""
-  def __init__(self, backbone_fn, decoder_fn, model, T:int):
-    self.backbone_fn = backbone_fn
-    self.decoder_fn = decoder_fn
-    self.model = model
+  def __init__(self, model_fn, T:int, model=None):
+    self.model_fn, self.model = model_fn, model
     self.T = T
-    self.frame_buffer: deque = deque(maxlen=T)
+    self.frames = Tensor.zeros(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone()
 
-  def reset(self):
-    self.frame_buffer.clear()
-
-  def __call__(self, img) -> list:
-    """Process a single frame with temporal context. Returns model output as a list."""
-    self.frame_buffer.append(img)
-    # cold-start: pad with the oldest available frame until the buffer is full
-    while len(self.frame_buffer) < self.T:
-      self.frame_buffer.appendleft(self.frame_buffer[0])
-
-    frames = Tensor.stack(*list(self.frame_buffer), dim=0).unsqueeze(0)  # (1, T, H, W, 3)
-    feat_tokens = self.backbone_fn(self.model, frames)
-    return self.decoder_fn(self.model, feat_tokens).tolist()[0]
+  def __call__(self, img, target_color:int=0) -> list:
+    target_color_t = Tensor([target_color], dtype=dtypes.int32, device="PYTHON")
+    return self.model_fn(self.model, self.frames, img, target_color_t).tolist()[0]
 
 @dataclass
 class Annotation:

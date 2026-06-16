@@ -8,7 +8,7 @@ from tinygrad.helpers import GlobalCounters, getenv
 import cv2
 
 from .model import Model, CLASS_DECODE_TABLE
-from .common import pred_backbone, pred_decoder, TemporalInference, T, IMG_H, IMG_W
+from .common import pred, TemporalInference, T, IMG_H, IMG_W
 from ..common import BASE_PATH
 
 if __name__ == "__main__":
@@ -25,29 +25,35 @@ if __name__ == "__main__":
       if ".n" in key: continue
       param.replace(param.half()).realize()
 
-  infer = TemporalInference(pred_backbone, pred_decoder, model, T=T)
+  infer = TemporalInference(pred, T=T, model=model)
 
   # syndata sanity check — confirms the model works on its training distribution.
   # if these are wrong, it's an inference-path bug, not sim-to-real.
-  if getenv("SYNCHECK", 1):
+  if getenv("SYNCHECK", 0):
     from .syndata import generate_sample
     import numpy as _np
     print("=== syndata sanity check ===")
     for plate_name in ["1_red", "3_blue", "4_blue", "5_red", "1_blank", "5_blank"]:
-      syn_img, true_class, true_corners = generate_sample(f"syn:{plate_name}")
+      # Force target_color to match the seed plate's color (or red for blanks) so the model
+      # is always asked to find the plate that's actually in the scene.
+      seed_color = plate_name.split("_")[1]
+      target_color = seed_color if seed_color in ("red", "blue") else "red"
+      target_color_id = 0 if target_color == "red" else 1
+      syn_img, true_class, true_corners, _ = generate_sample(f"syn:{plate_name}", target_color=target_color)
       # bypass JIT for diagnostic: call model.backbone + tokenizer step-by-step to find where magnitude explodes
       img_t = Tensor(syn_img, device="NPY").to(Device.DEFAULT).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W, 3)
       x0_d, x1_d, x2_d, x3_d, sb_d = model.backbone(img_t)
-      feat_diag = model.feature_tokenizer(x3_d, sb_d)
-      print(f"  {plate_name}:")
+      feat_diag, fine_diag = model.feature_tokenizer(x2_d, x3_d, sb_d)
+      print(f"  {plate_name} (target={target_color}):")
       print(f"    x0: mean={x0_d.mean().item():.3f}, std={x0_d.std().item():.3f}, absmax={x0_d.abs().max().item():.3f}")
       print(f"    x1: mean={x1_d.mean().item():.3f}, std={x1_d.std().item():.3f}, absmax={x1_d.abs().max().item():.3f}")
       print(f"    x2: mean={x2_d.mean().item():.3f}, std={x2_d.std().item():.3f}, absmax={x2_d.abs().max().item():.3f}")
       print(f"    x3: mean={x3_d.mean().item():.3f}, std={x3_d.std().item():.3f}, absmax={x3_d.abs().max().item():.3f}")
       print(f"    sb: mean={sb_d.mean().item():.3f}, std={sb_d.std().item():.3f}, absmax={sb_d.abs().max().item():.3f}")
       print(f"    feat: mean={feat_diag.mean().item():.3f}, std={feat_diag.std().item():.3f}, absmax={feat_diag.abs().max().item():.3f}")
+      print(f"    fine: mean={fine_diag.mean().item():.3f}, std={fine_diag.std().item():.3f}, absmax={fine_diag.abs().max().item():.3f}")
       # also still run through the regular path for the class/corners output
-      out = infer(Tensor(syn_img, device="NPY"))
+      out = infer(Tensor(syn_img, device="NPY"), target_color=target_color_id)
       pred_class = int(out[0])
       pred_conf = float(out[1])
       true_pairs = [(true_corners[2*k], true_corners[2*k+1]) for k in range(4)]
@@ -57,8 +63,10 @@ if __name__ == "__main__":
       print(f"    cls true={true_class} pred={pred_class} conf={pred_conf:.3f} [{class_ok}]")
       print(f"    corners pred: {[(round(x, 3), round(y, 3)) for x, y in pred_pairs]}")
       print(f"    mean per-coord L1 err: {corner_err:.4f}")
-      infer.reset()
     print("=== end syndata sanity check ===")
+
+  # TARGET_COLOR=0 (red) or 1 (blue) — color the model is asked to hunt for the interactive loop
+  target_color_id = getenv("TARGET_COLOR", 1)
 
   preprocessed_train_files = glob.glob(str(BASE_PATH / "data" / "**" / "*.png"), recursive=True)
   i = 0
@@ -71,24 +79,10 @@ if __name__ == "__main__":
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     # predict — output is [class_id, confidence, c1x,c1y,...,c4x,c4y]
-    model_out = infer(Tensor(img, device="NPY"))
+    model_out = infer(Tensor(img, device="NPY"), target_color=target_color_id)
     class_id = int(model_out[0])
     confidence = model_out[1]
     corners = [(model_out[2 + 2*k], model_out[3 + 2*k]) for k in range(4)]  # 4 (x,y) pairs in [0,1]
-
-    # diagnostic: dump raw class softmax to see the actual distribution
-    if getenv("DIAG_CLS", 0):
-      import numpy as _np
-      frames_diag = Tensor.stack(*list(infer.frame_buffer), dim=0).unsqueeze(0).to(Device.DEFAULT)
-      feat_diag = model.encode(frames_diag)
-      class_logits_diag, _, _ = model.decoder(feat_diag)
-      probs_diag = class_logits_diag.softmax(-1).to("CPU").numpy()[0]
-      top = sorted(enumerate(probs_diag.tolist()), key=lambda kv: -kv[1])[:5]
-      ent = float(-(probs_diag * _np.log(probs_diag + 1e-12)).sum())
-      print(f"  file={file.rsplit('/',1)[-1]}")
-      print(f"    top-5: " + ", ".join(f"cls{k}={v:.3f}" for k, v in top))
-      print(f"    argmax={int(probs_diag.argmax())}, entropy={ent:.3f} (uniform={_np.log(17):.3f})")
-      print(f"    full dist: " + ", ".join(f"{p:.3f}" for p in probs_diag.tolist()))
 
     detected, color_id, number = CLASS_DECODE_TABLE[class_id]
     color_names = {0: "none", 1: "red", 2: "blue"}
@@ -113,10 +107,8 @@ if __name__ == "__main__":
     if key == ord("q"): break
     elif key == ord("a"):
       i -= 1
-      infer.reset()
     elif key == ord("f"):
       i += 100
-      infer.reset()
     else: i += 1
 
   cv2.destroyAllWindows()

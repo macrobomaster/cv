@@ -5,24 +5,10 @@ from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
 
 from ..common.tensor import pixel_unshuffle
-from ..common.nn import Attention, FFNBlock, FFN
+from ..common.nn import Attention, FFN, MLP, LayerScale, LayerScale2d
 from ..common.nn.fuse import FusedBlock
-from ..common.nn.norm import GRN, RMSNorm2d
-from .common import IMG_H, IMG_W, X3_H, X3_W, N_X3_TOKENS, N_FEAT_TOKENS, T
-
-class LayerScale:
-  """Per-channel learnable residual scaling. Init small (~1e-4) so initial residual contribution
-  is tiny — keeps residual stream bounded at init. From CaiT/DeiT III (Touvron et al. 2021).
-  Stored 1D so it routes to AdamW (not Muon) under any ndim>=2 split. Gamma kept in fp32 and
-  the residual add done in fp32 so small contributions survive when activations are bf16."""
-  def __init__(self, dim:int, init:float=1e-4, dims_2d:bool=False):
-    self.gamma = Tensor.ones(dim, dtype=dtypes.float32) * init
-    self.dims_2d = dims_2d
-
-  def __call__(self, x:Tensor, xx:Tensor, dropout:float=0.0) -> Tensor:
-    g = self.gamma.reshape(1, -1, 1, 1) if self.dims_2d else self.gamma
-    out = x.cast(dtypes.float32) + (xx.cast(dtypes.float32) * g).dropout(dropout)
-    return out.cast(x.dtype)
+from ..common.nn.norm import GRN, RMSNorm, RMSNorm2d
+from .common import IMG_H, IMG_W, N_X2_TOKENS, N_X3_TOKENS, N_FEAT_TOKENS, T, BIN_LO, BIN_HI
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=3):
@@ -40,18 +26,18 @@ class ConvBlock:
 
     self.tnorm = RMSNorm2d(dim)
     self.token_mixer = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim)
-    self.ls1 = LayerScale(dim, dims_2d=True)
+    self.ls1 = LayerScale2d(dim)
 
     self.cnorm = RMSNorm2d(dim)
     self.channel_mixer = ChannelMixer(dim)
-    self.ls2 = LayerScale(dim, dims_2d=True)
+    self.ls2 = LayerScale2d(dim)
 
   def __call__(self, x:Tensor) -> Tensor:
     xx = self.token_mixer(self.tnorm(x))
-    x = x + self.ls1(xx).dropout(self.dropout)
+    x = self.ls1(x, xx, self.dropout)
 
     xx = self.channel_mixer(self.cnorm(x))
-    x = x + self.ls2(xx).dropout(self.dropout)
+    x = self.ls2(x, xx, self.dropout)
 
     return x
 
@@ -62,16 +48,16 @@ class AttnBlock:
 
     self.cpe = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim)
 
-    self.tnorm = nn.RMSNorm(dim)
-    self.token_mixer = Attention(dim, dim // 4, heads=2, kv_heads=1, out="mod", dropout=dropout)
-    self.ls_attn_x = LayerScale(dim, dims_2d=True)
+    self.tnorm = RMSNorm(dim)
+    self.token_mixer = Attention(dim, dim // 4, heads=2, kv_heads=1, out="proj", dropout=dropout)
+    self.ls_attn_x = LayerScale2d(dim)
     self.ls_attn_sb = LayerScale(sideband_dim)
 
     self.cnorm = RMSNorm2d(dim)
     self.channel_mixer = ChannelMixer(dim)
-    self.ls_chm = LayerScale(dim, dims_2d=True)
+    self.ls_chm = LayerScale2d(dim)
 
-    self.sideband_channel_mixer = FFNBlock(sideband_dim, exp=2, norm=True, bias=False, dropout=dropout)
+    self.sideband_channel_mixer = FFN(sideband_dim, exp=2, norm=True, bias=False, dropout=dropout)
     self.ls_sbm = LayerScale(sideband_dim)
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
@@ -93,28 +79,27 @@ class AttnBlock:
     xx = xx.transpose(1, 2).reshape(b, c, h, w)
 
     # residuals
-    sb = sb + self.ls_attn_sb(sbsb.reshape(b, -1))
-    x = x + self.ls_attn_x(xx)
+    sb = self.ls_attn_sb(sb, sbsb.reshape(b, -1))
+    x = self.ls_attn_x(x, xx)
 
     # run channel mixer
     xx = self.channel_mixer(self.cnorm(x))
-    x = x + self.ls_chm(xx).dropout(self.dropout)
+    x = self.ls_chm(x, xx, self.dropout)
 
     # run sideband channel mixer
     sbsb = self.sideband_channel_mixer(sb)
-    sb = sb + self.ls_sbm(sbsb).dropout(self.dropout)
+    sb = self.ls_sbm(sb, sbsb, self.dropout)
 
     return x, sb
 
 class Downsample(FusedBlock):
   def __init__(self, cin:int, cout:int, shortcut:bool=True):
     self.cout, self.shortcut = cout, shortcut
-    # pre-norm at block input — one norm per block
     self.norm = RMSNorm2d(cin)
     self.pw = nn.Conv2d(cin, cout, 1, 1, 0, bias=True)
     self.dw3x3 = nn.Conv2d(cout, cout, 3, 2, 1, groups=cout, bias=True)
     self.dw7x7 = nn.Conv2d(cout, cout, 7, 2, 3, groups=cout, bias=True)
-    self.ls = LayerScale(cout, dims_2d=True)
+    self.ls = LayerScale2d(cout)
 
   def __call__(self, x:Tensor) -> Tensor:
     xx = self.norm(x)
@@ -124,13 +109,12 @@ class Downsample(FusedBlock):
     else:
       xx = self.conv(xx).gelu()
 
-    # shortcut uses raw x (not normed) — preserves residual stream scale
     if self.shortcut:
       x = pixel_unshuffle(x, 2)
       b, c, h, w = x.shape
       x = x.reshape(b, xx.shape[1], c // xx.shape[1], h, w)
       x = x.mean(2)
-      x = x + self.ls(xx)
+      x = self.ls(x, xx)
     else:
       x = xx
 
@@ -246,13 +230,13 @@ class Backbone:
     if stages[3][1] > 0: self.stage3[1] = AttnStage(cstage[2], cstage[3], stages[3][1], sideband_dim=sideband_dim, dropout=dropout)
 
   def __call__(self, img:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    if img.ndim == 4: img = img.unsqueeze(1)
+    if img.ndim == 4: img = img.unsqueeze(0)
     B, T, H, W, C = img.shape
 
     # per frame img normalization
-    img = img.cast(dtypes.default_float).permute(0, 1, 4, 2, 3).div(255).reshape(B * T, C, H, W)
+    img = img.cast(dtypes.float32).permute(0, 1, 4, 2, 3).div(255).reshape(B * T, C, H, W)
     mean, std = img.mean([1, 2, 3], keepdim=True), img.std([1, 2, 3], keepdim=True)
-    img = img.sub(mean).div(std.add(1e-6)).reshape(B, T, C, H, W)
+    img = img.sub(mean).div(std.add(1e-6)).cast(dtypes.default_float).reshape(B, T, C, H, W)
     frames = [c.squeeze(1) for c in img.chunk(T, dim=1)]
 
     x = self.stem(frames)
@@ -269,33 +253,49 @@ class Backbone:
 
 class FeatureTokenizer:
   def __init__(self, cstage:list[int], sideband_dim:int, dim:int):
-    self.norm_x3 = nn.RMSNorm(cstage[3])
-    self.norm_sb = nn.RMSNorm(sideband_dim)
+    self.norm_x2 = RMSNorm(cstage[2])
+    self.proj_x2 = nn.Linear(cstage[2], dim, bias=False)
+    self.x2_pos_emb = Tensor.randn(N_X2_TOKENS, dim) * 0.02
+
+    self.norm_x3 = RMSNorm(cstage[3])
     self.proj_x3 = nn.Linear(cstage[3], dim, bias=False)
-    self.proj_sb = nn.Linear(sideband_dim, dim, bias=False)
     self.x3_pos_emb = Tensor.randn(N_X3_TOKENS, dim) * 0.02
 
-  def __call__(self, x3:Tensor, sb:Tensor) -> Tensor:
+    self.norm_sb = RMSNorm(sideband_dim)
+    self.proj_sb = nn.Linear(sideband_dim, dim, bias=False)
+
+  def __call__(self, x2:Tensor, x3:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
+    fine_tokens = self.proj_x2(self.norm_x2(x2.flatten(2).transpose(1, 2))) + self.x2_pos_emb
+
     x3_tokens = self.proj_x3(self.norm_x3(x3.flatten(2).transpose(1, 2))) + self.x3_pos_emb
     sb_token = self.proj_sb(self.norm_sb(sb)).unsqueeze(1)
-    return Tensor.cat(x3_tokens, sb_token, dim=1)
+    feat_tokens = Tensor.cat(x3_tokens, sb_token, dim=1)
+
+    return feat_tokens, fine_tokens
 
 class DecoderBlock:
   def __init__(self, dim:int, heads:int=4, kv_heads:int=1, dropout:float=0.0):
-    self.attn_norm = nn.RMSNorm(dim)
-    self.attn = Attention(dim, dim, heads=heads, kv_heads=kv_heads, out="proj", dropout=dropout)
-    self.ls1 = LayerScale(dim)
-    self.ffn = FFNBlock(dim, exp=2, norm=True, bias=False, dropout=dropout)
-    self.ls2 = LayerScale(dim)
+    self.sa_norm = RMSNorm(dim)
+    self.self_attn = Attention(dim, dim, heads=heads, kv_heads=kv_heads, out="proj", dropout=dropout)
+    self.ls_sa = LayerScale(dim)
 
-  def __call__(self, x:Tensor) -> Tensor:
-    x = x + self.ls1(self.attn(self.attn_norm(x)))
-    x = x + self.ls2(self.ffn(x))
-    return x
+    self.ca_norm_q = RMSNorm(dim)
+    self.ca_norm_kv = RMSNorm(dim)
+    self.cross_attn = Attention(dim, dim, heads=heads, kv_heads=kv_heads, out="proj", dropout=dropout)
+    self.ls_ca = LayerScale(dim)
+
+    self.ffn = FFN(dim, exp=2, norm=True, bias=False, dropout=dropout)
+    self.ls_ffn = LayerScale(dim)
+
+  def __call__(self, q:Tensor, mem:Tensor) -> Tensor:
+    q = self.ls_sa(q, self.self_attn(self.sa_norm(q)))
+    q = self.ls_ca(q, self.cross_attn(self.ca_norm_q(q), self.ca_norm_kv(mem)))
+    q = self.ls_ffn(q, self.ffn(q))
+    return q
 
 NUM_CLASSES = 17
 N_CORNERS = 4
-N_BINS = 64
+N_BINS = 96
 
 class Decoder:
   def __init__(self, dim:int, n_layers:int=4, n_bins:int=N_BINS, dropout:float=0.0):
@@ -304,26 +304,33 @@ class Decoder:
     self.class_token = Tensor.randn(dim) * 0.02
     self.corner_tokens = Tensor.randn(N_CORNERS, dim) * 0.02
 
+    self.target_color_embed = nn.Embedding(2, dim)
+
     self.blocks = [DecoderBlock(dim, dropout=dropout) for _ in range(n_layers)]
-    self.ln_out = nn.RMSNorm(dim)
+    self.ln_out = RMSNorm(dim)
 
     self.class_proj = nn.Linear(dim, NUM_CLASSES, bias=False)
-    self.corner_mlp = FFN(dim, 2 * n_bins, dim, exp=2, blocks=2, norm=True, bias=False, dropout=dropout)
+    self.corner_mlp = MLP(dim, 2 * n_bins, 256, blocks=1)
 
-  def __call__(self, feat_tokens:Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    # feat_tokens: (B, N_FEAT_TOKENS, D)
+  def __call__(self, feat_tokens:Tensor, fine_tokens:Tensor, target_color:Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    # feat_tokens: (B, N_FEAT_TOKENS, D) — coarse /32 (+sb)
+    # fine_tokens: (B, N_X2_TOKENS, D) — fine /16
+    # target_color: (B,) int32 in {0, 1}
     B, _, D = feat_tokens.shape
 
     feat_tokens = feat_tokens + self.pos_emb.reshape(1, N_FEAT_TOKENS, D).expand(B, -1, -1)
+    mem = feat_tokens.cat(fine_tokens, dim=1)  # (B, N_FEAT+N_X2, D)
 
+    target_tok = self.target_color_embed(target_color).reshape(B, 1, D)  # (B, 1, D)
     class_tok = self.class_token.reshape(1, 1, D).expand(B, 1, D)
     corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)
-    x = feat_tokens.cat(class_tok, corner_toks, dim=1)
-    x = x.sequential(self.blocks)
-    x = self.ln_out(x)
+    q = target_tok.cat(class_tok, corner_toks, dim=1)  # (B, 2+N_CORNERS, D)
+    for block in self.blocks: q = block(q, mem)
+    q = self.ln_out(q)
 
-    class_tok = x[:, N_FEAT_TOKENS, :]                                                # (B, D)
-    corner_toks = x[:, N_FEAT_TOKENS + 1 : N_FEAT_TOKENS + 1 + N_CORNERS, :]           # (B, 4, D)
+    # query layout: [target(0), class(1), corner×N_CORNERS(2:)]
+    class_tok = q[:, 1, :]  # (B, D)
+    corner_toks = q[:, 2:2 + N_CORNERS, :]  # (B, 4, D)
 
     class_logits = self.class_proj(class_tok)    # (B, NUM_CLASSES)
     corner_dists = self.corner_mlp(corner_toks)  # (B, 4, 2*n_bins)
@@ -364,7 +371,7 @@ CLASS_WEIGHT = 1.0
 
 class Model:
   def __init__(self, dim:int=512, temporal_size:int=1, sideband_dim:int=512,
-               cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(2, 0), (2, 0), (6, 3), (0, 2)],
+               cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(2, 0), (2, 0), (6, 2), (0, 2)],
                dropout:float=0.0):
     self.temporal_size = temporal_size
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim,
@@ -372,74 +379,72 @@ class Model:
     self.feature_tokenizer = FeatureTokenizer(cstage, sideband_dim, dim)
     self.decoder = Decoder(dim, n_layers=4, dropout=dropout)
 
-  def encode(self, img:Tensor) -> Tensor:
-    """img: (B, T, H, W, 3) or (B, H, W, 3). Returns (B, N_FEAT_TOKENS, D) — temporal info
-    is fused at the stem via Haar DWT, so output has no remaining temporal dim."""
+  def encode(self, img:Tensor) -> tuple[Tensor, Tensor]:
     x0, x1, x2, x3, sb = self.backbone(img)
-    return self.feature_tokenizer(x3, sb)
+    return self.feature_tokenizer(x2, x3, sb)
 
   def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    # img: (B, T, IMG_H, IMG_W, 3) — training only.
+    # img: (B, T, IMG_H, IMG_W, 3)
     # Returns (total_loss, class_loss, l1_loss, dfl_loss).
-    assert Tensor.training, "Model.__call__ is training-only. Use encode() + corner_predict() for inference."
-    feat_tokens = self.encode(img)  # (B, N_FEAT_TOKENS, D)
-    return self.corner_loss(feat_tokens, y)
+    assert Tensor.training
+    tokens = self.encode(img)  # (feat_tokens, fine_tokens)
+    return self.corner_loss(tokens, y)
 
-  def corner_loss(self, feat_tokens:Tensor, y:Tensor) -> Tensor:
+  def corner_loss(self, tokens:tuple[Tensor, Tensor], y:Tensor) -> Tensor:
+    feat_tokens, fine_tokens = tokens
     B = feat_tokens.shape[0]
     N = self.decoder.n_bins
 
-    # y: [class_id, c1x,c1y,c2x,c2y,c3x,c3y,c4x,c4y, has_class, has_corners] — 11 values
+    # y: [class_id, c1x,c1y,c2x,c2y,c3x,c3y,c4x,c4y, has_class, has_corners, target_color]
     class_id = y[:, 0].cast(dtypes.int32)
-    corners = y[:, 1:9].reshape(B, N_CORNERS, 2)  # normalized [0, 1]
+    corners = y[:, 1:9].reshape(B, N_CORNERS, 2)  # normalized [BIN_LO, BIN_HI]
     has_class = y[:, 9]
     has_corners = y[:, 10]
+    target_color = y[:, 11].cast(dtypes.int32)
 
-    class_logits, dist_x, dist_y = self.decoder(feat_tokens)
+    class_logits, dist_x, dist_y = self.decoder(feat_tokens, fine_tokens, target_color)
 
-    ce = class_logits.cross_entropy(class_id, reduction="none")  # (B,)
+    # class loss
+    ce = class_logits.cast(dtypes.float32).cross_entropy(class_id, reduction="none")  # (B,)
     class_loss = (has_class * ce).sum() / has_class.sum().add(1e-6)
 
-    # Stack x/y distributions to (B, 4, 2, N) — N is the class/bin dim
-    dist_xy = Tensor.stack(dist_x, dist_y, dim=2)
+    dist_xy = Tensor.stack(dist_x, dist_y, dim=2).cast(dtypes.float32)
+    corners_f = corners.cast(dtypes.float32)
 
-    # L1 on expectation
-    bin_centers = Tensor.arange(N, dtype=dtypes.default_float) / (N - 1)
+    # l1 loss
+    bin_centers = BIN_LO + Tensor.arange(N, dtype=dtypes.float32) / (N - 1) * (BIN_HI - BIN_LO)
     expected = (dist_xy.softmax(-1) * bin_centers).sum(-1)  # (B, 4, 2)
-    l1 = (expected - corners).abs().mean(-1).mean(-1)  # (B,)
+    l1 = (expected - corners_f).abs().mean(-1).mean(-1)  # (B,)
     l1_loss = (has_corners * l1).sum() / has_corners.sum().add(1e-6)
 
-    # Distribution Focal Loss: target distribution splits mass between two flanking bins
-    c_scaled = (corners * (N - 1)).clamp(0, N - 1)
+    # dfl loss
+    c_scaled = ((corners_f - BIN_LO) / (BIN_HI - BIN_LO) * (N - 1)).clamp(0, N - 1)
     l_idx = c_scaled.floor().cast(dtypes.int32).clamp(0, N - 2)
-    w_r = c_scaled - l_idx.cast(dtypes.default_float)
-    target_dist = l_idx.one_hot(N).cast(dtypes.default_float) * (1.0 - w_r).unsqueeze(-1) \
-                + (l_idx + 1).one_hot(N).cast(dtypes.default_float) * w_r.unsqueeze(-1)  # (B, 4, 2, N)
-    # cross_entropy expects class dim at 1 — reshape (B,4,2,N) → (B*4*2, N)
+    w_r = c_scaled - l_idx.cast(dtypes.float32)
+    target_dist = l_idx.one_hot(N).cast(dtypes.float32) * (1.0 - w_r).unsqueeze(-1) + (l_idx + 1).one_hot(N).cast(dtypes.float32) * w_r.unsqueeze(-1)
     dfl = dist_xy.reshape(-1, N).cross_entropy(target_dist.reshape(-1, N), reduction="none").reshape(B, N_CORNERS, 2).mean(-1).mean(-1)
     dfl_loss = (has_corners * dfl).sum() / has_corners.sum().add(1e-6)
 
     total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss
     return total, class_loss, l1_loss, dfl_loss
 
-  def corner_predict(self, feat_tokens:Tensor) -> Tensor:
-    """Returns (B, 10): [class_id, confidence, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y]
-    with corners normalized to [0, 1]."""
+  def corner_predict(self, tokens:tuple[Tensor, Tensor], target_color:Tensor) -> Tensor:
+    feat_tokens, fine_tokens = tokens
     B = feat_tokens.shape[0]
     N = self.decoder.n_bins
 
-    class_logits, dist_x, dist_y = self.decoder(feat_tokens)
+    class_logits, dist_x, dist_y = self.decoder(feat_tokens, fine_tokens, target_color)
 
-    class_probs = class_logits.softmax(-1)
+    class_probs = class_logits.cast(dtypes.float32).softmax(-1)
     class_id = class_probs.argmax(-1, keepdim=True).cast(dtypes.default_float)
     class_conf = class_probs.max(-1, keepdim=True).cast(dtypes.default_float)
 
-    bin_centers = Tensor.arange(N, dtype=dtypes.default_float) / (N - 1)
-    px = dist_x.softmax(-1)
-    py = dist_y.softmax(-1)
+    bin_centers = BIN_LO + Tensor.arange(N, dtype=dtypes.float32) / (N - 1) * (BIN_HI - BIN_LO)
+    px = dist_x.cast(dtypes.float32).softmax(-1)
+    py = dist_y.cast(dtypes.float32).softmax(-1)
     cx = (px * bin_centers).sum(-1)  # (B, 4)
     cy = (py * bin_centers).sum(-1)  # (B, 4)
-    corners = Tensor.stack(cx, cy, dim=-1).reshape(B, N_CORNERS * 2)  # (B, 8)
+    corners = Tensor.stack(cx, cy, dim=-1).reshape(B, N_CORNERS * 2).cast(dtypes.default_float)  # (B, 8)
     return Tensor.cat(class_id, class_conf, corners, dim=-1)
 
   def fuse(self):
@@ -483,11 +488,11 @@ if __name__ == "__main__":
 
     with Context(DEBUG=getenv("DEBUG", 2)):
       x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
-      y = Tensor.randn(BS, 11).realize()
+      y = Tensor.randn(BS, 12).realize()
       GlobalCounters.reset()
       ret = run(x, y)
       x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
-      y = Tensor.randn(BS, 11).realize()
+      y = Tensor.randn(BS, 12).realize()
       GlobalCounters.reset()
       ret = run(x, y)
       print(ret)
@@ -497,18 +502,19 @@ if __name__ == "__main__":
       return model.encode(x)
 
     @partial(TinyJit, prune=True)
-    def run_decoder(feat_tokens:Tensor):
-      return model.corner_predict(feat_tokens)
+    def run_decoder(tokens:tuple[Tensor, Tensor], target_color:Tensor):
+      return model.corner_predict(tokens, target_color)
 
     with Context(DEBUG=getenv("DEBUG", 2)):
+      target_color = Tensor.zeros(BS, dtype=dtypes.int32).realize()
       x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
       GlobalCounters.reset()
-      feat = run_backbone(x)
-      ret = run_decoder(feat)
+      tokens = run_backbone(x)
+      ret = run_decoder(tokens, target_color)
       x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
       GlobalCounters.reset()
-      feat = run_backbone(x)
-      ret = run_decoder(feat)
+      tokens = run_backbone(x)
+      ret = run_decoder(tokens, target_color)
       print(ret)
 
   # full runs
@@ -522,7 +528,7 @@ if __name__ == "__main__":
       nret = run(x, y)
     else:
       feat = run_backbone(x)
-      nret = run_decoder(feat)
+      nret = run_decoder(feat, target_color)
     tms.append(time.perf_counter() - st)
 
   print("jit run successful")
