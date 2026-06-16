@@ -126,7 +126,7 @@ class Dataloader:
       if isinstance(device, str):
         ret.append(t.to(device))
       else:
-        ret.append(t.shard(device, axis=0))
+        ret.append(t.to(None).shard(device, axis=0))
     return *ret, c
 
 class DataloaderProc:
