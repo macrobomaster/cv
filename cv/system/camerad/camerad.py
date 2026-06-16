@@ -34,7 +34,12 @@ def run():
   if wc != -1:
     cap = cv2.VideoCapture(wc)
   else:
-    cam, strm, dev, ts_hz, offset = setup_aravis()
+    try:
+      cam, strm, dev, ts_hz, offset = setup_aravis()
+    except Exception as e:
+      logger.error("failed to setup, restarting camera")
+      subprocess.run(["usbreset", "MV-CS016-10UC"])
+      raise e
     undist_map1, undist_map2 = _build_undistort_maps(cam.get_region()[2])   # native frame width
 
   last_wd = time.monotonic()
