@@ -11,11 +11,13 @@ from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
-from ...autoaim.model import Model, CLASS_DECODE_TABLE, N_FEAT_TOKENS
-from ...autoaim.common import pred_backbone, pred_decoder, TemporalInference, MODEL_VERSION, IMG_H, IMG_W, T
+from ...autoaim.model import Model, CLASS_DECODE_TABLE
+from ...autoaim.common import pred, TemporalInference, MODEL_VERSION, IMG_H, IMG_W, T
 
 HALF = getenv("HALF", 0)
 BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
+FUSE = getenv("FUSE", 0)
+TARGET_COLOR = getenv("TARGET_COLOR", 1)
 
 def run():
   pub = messaging.Pub(["autoaim"])
@@ -25,49 +27,43 @@ def run():
   if getenv("HALF", 0) == 1:
     dtypes.default_float = dtypes.float16
 
-  # cache model jit — separate backbone and decoder
-  backbone_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_backbone_{Device.DEFAULT}"
-  decoder_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_decoder_{Device.DEFAULT}"
-  if kv_get("autoaim", backbone_key) is None:
+  # cache model jit
+  model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_{FUSE}_{Device.DEFAULT}"
+  if kv_get("autoaim", model_key) is None:
     logger.info("building cached model")
 
     model = Model(temporal_size=T)
     state_dict = safe_load(str(Path(__file__).parent.parent.parent.parent / "weights/model.safetensors"))
     load_state_dict(model, state_dict, verbose=False, strict=False)
-    model.fuse()
+    if FUSE: model.fuse()
     if HALF:
-      for key, param in get_state_dict(model).items():
-        if "norm" in key: continue
-        if ".n" in key: continue
+      for param in get_state_dict(model).values():
+        # only 2D+ weight matrices (conv/linear) go fp16 — that's where the compute is. every 1D param
+        # stays fp32: norms, LayerScale gammas (init 1e-4), GRN gamma/beta (fp32 by design), biases.
+        if param.ndim < 2: continue
         param.replace(param.half()).realize()
 
-    # warmup backbone jit (input is now T frames)
-    fake_input = Tensor.empty(1, T, IMG_H, IMG_W, 3, dtype=dtypes.uint8, device="PYTHON").realize()
+    # warmup jit
+    fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
+    fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
+    fake_target = Tensor([TARGET_COLOR], dtype=dtypes.int32, device="PYTHON").realize()
     for _ in range(3):
-      tokens = pred_backbone(model, fake_input)
-      tokens.tolist()
+      pred(model, fake_frames, fake_frame, fake_target)
 
-    # warmup decoder jit (no T multiplier — temporal is fused at stem)
-    fake_tokens = Tensor.empty(1, N_FEAT_TOKENS, 512, device="PYTHON").realize()
-    for _ in range(3):
-      pred_decoder(model, fake_tokens).tolist()
+    kv_put("autoaim", model_key, pickle.dumps(pred))
 
-    kv_put("autoaim", backbone_key, pickle.dumps(pred_backbone))
-    kv_put("autoaim", decoder_key, pickle.dumps(pred_decoder))
-
-    # Request restart after building cached model
     logger.info("cached model built, requesting restart")
     kv_put("restart", "autoaimd", True)
-    return  # Exit to allow supervisor to restart us
+    return
 
   # load model
-  logger.info(f"loading cached {backbone_key}")
-  model_backbone: Callable[[Any, Tensor], Tensor] = pickle.loads(kv_get("autoaim", backbone_key))
-  model_decoder: Callable[[Any, Tensor], Tensor] = pickle.loads(kv_get("autoaim", decoder_key))
+  logger.info(f"loading cached {model_key}")
+  model_fn: Callable[[Any, Tensor, Tensor], Tensor] = pickle.loads(kv_get("autoaim", model_key))
 
   color_names = {0: "none", 1: "red", 2: "blue"}
 
-  infer = TemporalInference(model_backbone, model_decoder, None, T=T)
+  infer = TemporalInference(model_fn, T=T)
+  fid = 0
 
   while True:
     sub.update(0)
@@ -78,10 +74,10 @@ def run():
 
     if sub.updated["camera_feed"]:
       frame = camera_feed["frame"]
-      framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON").reshape(256, 512, 3)
+      framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON")
       ft = time.monotonic()
 
-      model_out = infer(framet)
+      model_out = infer(framet, target_color=TARGET_COLOR)
       mt = time.monotonic()
 
       class_id = int(model_out[0])
@@ -93,6 +89,7 @@ def run():
 
       valid = detected == 1 and confidence > 0.6
 
+      fid += 1
       pub.send("autoaim", {
         "valid": valid,
         "class_id": class_id,
@@ -101,4 +98,7 @@ def run():
         "color": color_name,
         "number": number,
         "corners": corners,
+        "t_capture": camera_feed["ct"],
+        "fid": fid,
+        "infer_ms": (mt - ft) * 1e3,
       })
