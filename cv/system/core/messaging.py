@@ -13,14 +13,15 @@ def reset_context():
 
 # deterministically generate a port number from the service name
 def get_port(service:str):
-  return 10000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 9000)
+  return 9000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 9000)
 
 class Pub:
-  def __init__(self, services:list[str]):
+  def __init__(self, services:list[str], conflate:bool=True):
     self.socks = {}
     for service in services:
       sock = context.socket(zmq.PUB)
-      sock.set(zmq.CONFLATE, 1)
+      if conflate:
+        sock.set(zmq.CONFLATE, 1)
       sock.set(zmq.LINGER, 0)
       sock.bind(f"tcp://*:{get_port(service)}")
       self.socks[service] = sock
@@ -71,15 +72,17 @@ class AliveChecker:
     return False
 
 class Sub:
-  def __init__(self, services:list[str], poll:str|None=None, addr:str="127.0.0.1"):
+  def __init__(self, services:list[str], poll:str|None=None, addr:str="127.0.0.1", conflate:bool=True):
     self.services = set(services)
     self.polled_services = set([poll]) if poll else self.services
     self.non_polled_services = self.services - self.polled_services
+    self.conflate = conflate
 
     self.socks = {}
     for service in services:
       sock = context.socket(zmq.SUB)
-      sock.set(zmq.CONFLATE, 1)
+      if conflate:
+        sock.set(zmq.CONFLATE, 1)
       sock.set(zmq.LINGER, 0)
       sock.connect(f"tcp://{addr}:{get_port(service)}")
       sock.subscribe(b"")
@@ -102,6 +105,15 @@ class Sub:
     except zmq.error.Again: return
     self.data[service] = cbor2.loads(data) if not service.startswith("_") else data
     self.updated[service] = True
+
+  def drain(self, service:str, max_msgs:int=10000) -> list:
+    # Pull every queued message for `service`. Non-conflated subs accumulate; conflated returns ≤1.
+    msgs = []
+    for _ in range(max_msgs):
+      try: data = self.socks[service].recv(flags=zmq.NOBLOCK)
+      except zmq.error.Again: break
+      msgs.append(cbor2.loads(data) if not service.startswith("_") else data)
+    return msgs
 
   def update(self, timeout:int|None=100):
     self.updated = {service: False for service in self.services}
