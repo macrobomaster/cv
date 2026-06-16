@@ -36,7 +36,7 @@ T = getenv("T", 1)
 # corner output valid range
 BIN_LO, BIN_HI = -0.5, 1.5
 
-MODEL_VERSION = 21
+MODEL_VERSION = 23
 
 # canonical camera
 CANONICAL_FX_FY = 650
@@ -62,12 +62,12 @@ T_MOUNT = np.zeros(3)    # translation, m. TODO: measure.
 
 @partial(TinyJit, prune=True)
 def pred(model, frames, frame, target_color):
-  frame = frame.to(Device.DEFAULT)
+  frame = frame.to(Device.DEFAULT).reshape(256, 512, 3)
   frames.assign(Tensor.cat(frames[1:], frame.unsqueeze(0))).realize()
 
   target_color = target_color.to(Device.DEFAULT)
   tokens = model.encode(frames.unsqueeze(0))
-  return model.corner_predict(tokens, target_color).to("CPU")
+  return model.corner_predict(tokens, target_color).float().to("CPU")
 
 class TemporalInference:
   def __init__(self, model_fn, T:int, model=None):
