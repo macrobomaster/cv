@@ -1,12 +1,13 @@
-import os, signal, time, traceback, importlib
-from multiprocessing import Process
+import os, signal, time, traceback, importlib, multiprocessing
 from typing import Callable
+
+_mp_ctx = multiprocessing.get_context("spawn")
 
 from setproctitle import setproctitle
 from tinygrad.helpers import colored
 
 from .logging import logger
-from .keyvalue import kv_get, kv_getall, kv_clear, kv_put
+from .keyvalue import kv_get, kv_getall, kv_clear, kv_put, kv_reset, kv_checkpoint
 from . import messaging
 
 class SupervisedProcess:
@@ -14,7 +15,7 @@ class SupervisedProcess:
   module: str
   should_run: Callable[[dict], bool]
 
-  proc: Process | None = None
+  proc: multiprocessing.Process | None = None
   shutting_down: bool = False
 
   def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True, watchdog_dt:float=-1):
@@ -30,6 +31,7 @@ class SupervisedProcess:
       logger.bind(name)
 
       messaging.reset_context()
+      kv_reset()
 
       setproctitle(name)
 
@@ -52,7 +54,8 @@ class SupervisedProcess:
       return
 
     logger.info(f"starting {self.module} as {self.name}")
-    self.proc = Process(name="MainProcess", target=self._start, args=(self.name, self.module))
+    if self.watchdog_dt > 0: kv_put("watchdog", self.name, time.monotonic())
+    self.proc = _mp_ctx.Process(name="MainProcess", target=self._start, args=(self.name, self.module))
     self.proc.start()
     self.shutting_down = False
 
@@ -122,6 +125,7 @@ class Supervisor:
     kv_clear("global")
     kv_clear("watchdog")
     kv_clear("restart")
+    kv_checkpoint()
 
   def run(self):
     logger.bind("supervisor")
