@@ -7,3 +7,5 @@ __pycache__/
 
 sys/
 base/
+
+weights/camera_calib.npz
