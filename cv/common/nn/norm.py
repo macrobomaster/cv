@@ -1,9 +1,6 @@
-from tinygrad import nn
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
 from tinygrad.helpers import make_tuple, prod
-
-from cv.common.tensor import norm
 
 class BatchNorm:
   def __init__(self, sz:int, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
@@ -81,20 +78,32 @@ class LayerNorm:
     assert self.weight is not None and self.bias is not None
     return x * self.weight + self.bias
 
-class RMSNorm2d(nn.RMSNorm):
+class RMSNorm:
+  def __init__(self, dim:int, eps:float=1e-6, elementwise_affine:bool=True):
+    self.dim, self.eps = dim, eps
+    self.weight: Tensor|None = Tensor.ones(dim) if elementwise_affine else None
+
+  def __call__(self, x:Tensor) -> Tensor:
+    sq_sum = x.square().sum(-1, keepdim=True, dtype=dtypes.float32)
+    rms = (sq_sum.div(self.dim) + self.eps).rsqrt().cast(x.dtype)
+    x = x * rms
+    return x if self.weight is None else x * self.weight
+
+class RMSNorm2d(RMSNorm):
   def __call__(self, x: Tensor) -> Tensor: return super().__call__(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
 class GRN:
   """
-  Global Response Normalization. gamma/beta stored 1D so they route to AdamW (not Muon)
-  under any ndim>=2 optimizer split; reshape at call time for broadcast against (B, C, H, W).
+  Global Response Normalization.
   """
   def __init__(self, dim:int, eps:float=1e-6):
     self.eps = eps
-    self.gamma = Tensor.zeros(dim)
-    self.beta = Tensor.zeros(dim)
+    self.gamma = Tensor.zeros(dim, dtype=dtypes.float32)
+    self.beta = Tensor.zeros(dim, dtype=dtypes.float32)
 
   def __call__(self, x:Tensor) -> Tensor:
-    gx = norm(x, axis=(2, 3), keepdim=True, eps=self.eps)
-    nx = gx / (gx.mean(axis=1, keepdim=True) + self.eps)
-    return self.gamma.reshape(1, -1, 1, 1) * (x * nx) + self.beta.reshape(1, -1, 1, 1) + x
+    gx = x.square().sum((2, 3), keepdim=True, dtype=dtypes.float32).add(self.eps).sqrt()
+    nx = (gx / (gx.mean(axis=1, keepdim=True) + self.eps)).cast(x.dtype)
+    gamma = self.gamma.cast(x.dtype).reshape(1, -1, 1, 1)
+    beta = self.beta.cast(x.dtype).reshape(1, -1, 1, 1)
+    return gamma * (x * nx) + beta + x
