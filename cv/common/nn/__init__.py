@@ -1,7 +1,21 @@
 from typing import Literal
 
 from tinygrad.tensor import Tensor
+from tinygrad.dtype import dtypes
 from tinygrad import nn
+
+from .norm import RMSNorm
+
+class LayerScale:
+  def __init__(self, dim:int, init:float=1e-4):
+    self.gamma = Tensor.ones(dim, dtype=dtypes.float32) * init
+
+  def __call__(self, x:Tensor, xx:Tensor, dropout:float=0.0) -> Tensor:
+    return x + (xx * self.gamma.cast(x.dtype)).dropout(dropout)
+
+class LayerScale2d(LayerScale):
+  def __call__(self, x:Tensor, xx:Tensor, dropout:float=0.0) -> Tensor:
+    return x + (xx * self.gamma.cast(x.dtype).reshape(1, -1, 1, 1)).dropout(dropout)
 
 class Attention:
   """
@@ -19,8 +33,8 @@ class Attention:
     self.q = nn.Linear(dim, qk_dim, bias=False)
     self.kv = nn.Linear(dim, self.kv_heads * (self.head_dim + self.value_dim), bias=False)
 
-    self.q_norm = nn.RMSNorm(self.head_dim)
-    self.k_norm = nn.RMSNorm(self.head_dim)
+    self.q_norm = RMSNorm(self.head_dim)
+    self.k_norm = RMSNorm(self.head_dim)
 
     self.out = out
     match out:
@@ -62,12 +76,12 @@ class Attention:
         return self.proj(attn.hardsigmoid() * self.gate(x).hardsigmoid())
       case _: return attn
 
-class FFNBlock:
+class FFN:
   def __init__(self, cin:int, cout:int=0, exp:int=2, norm:bool=True, bias:bool=True, dropout:float=0.0):
     if cout == 0: cout = cin
     self.cin, self.cout, self.exp = cin, cout, exp
     self.dropout = dropout
-    if norm: self.norm = nn.RMSNorm(cin)
+    if norm: self.norm = RMSNorm(cin)
     self.up = nn.Linear(cin, cout * exp, bias=bias)
     self.gate = nn.Linear(cin, cout * exp, bias=bias)
     self.down = nn.Linear(cout * exp, cout, bias=bias)
@@ -78,16 +92,15 @@ class FFNBlock:
     x = self.down(x)
     return x.dropout(self.dropout)
 
-class FFN:
-  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, exp:int=2, blocks:int=1, norm:bool=True, bias:bool=True, dropout:float=0.0):
-    self.blocks = [FFNBlock(in_dim, mid_dim, exp, norm, bias, dropout)]
-    self.blocks += [FFNBlock(mid_dim, mid_dim, exp, norm, bias, dropout) for _ in range(blocks - 1)]
+class MLP:
+  def __init__(self, in_dim:int, out_dim:int, mid_dim:int, blocks:int=1, bias:bool=False):
+    self.proj_in = nn.Linear(in_dim, mid_dim, bias=bias)
+    self.layers = [nn.Linear(mid_dim, mid_dim, bias=bias) for _ in range(blocks)]
+    self.ls = [LayerScale(mid_dim) for _ in range(blocks)]
     self.out = nn.Linear(mid_dim, out_dim, bias=bias)
 
   def __call__(self, x:Tensor) -> Tensor:
-    for block in self.blocks:
-      if block.cin == block.cout:
-        x = x + block(x)
-      else:
-        x = block(x)
+    x = self.proj_in(x).gelu()
+    for lin, ls in zip(self.layers, self.ls):
+      x = ls(x, lin(x).gelu())
     return self.out(x)
