@@ -3,12 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs-jetson.url = "github:nixos/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
 
     tinygrad.url = "github:wozeparrot/tinygrad-nix";
     tinygrad.inputs.nixpkgs.follows = "nixpkgs";
 
     jetpack-nixos.url = "github:anduril/jetpack-nixos";
+    jetpack-nixos.inputs.nixpkgs.follows = "nixpkgs-jetson";
     disko.url = "github:nix-community/disko/latest";
   };
 
@@ -40,7 +42,7 @@
           })
         ] ++ common_overlays;
       });
-      pkgs-aarch64-linux = import nixpkgs ({
+      pkgs-aarch64-linux = import inputs.nixpkgs-jetson ({
         system = "aarch64-linux";
         config = {
           allowUnfree = true;
@@ -188,13 +190,10 @@
                   (
                     (tinygrad.override {
                       cudaSupport = true;
-                      torch = null;
-                    }).overrideAttrs
+                    }).overridePythonAttrs
                     (_: {
                       doCheck = false;
-                      pytestCheckPhase = ''
-                        echo "Skipping tests"
-                      '';
+                      nativeCheckInputs = [ ];
                     })
                   )
                 ]
