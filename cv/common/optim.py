@@ -105,6 +105,25 @@ class TurboAdaMuon(Optimizer):
       ret.append((self.lr * self.lr * self.wd * t.detach() * wd_mask + self.lr * update).cast(t.dtype))
     return ret, self.m + self.v
 
+def MasterWeights(params:list[Tensor], inner_cls, lr=0.001, **inner_kwargs):
+  if all(p.dtype == dtypes.float32 for p in params if p.is_param):
+    return inner_cls(params, lr=lr, **inner_kwargs)
+  return _MasterWeights(params, inner_cls, lr=lr, **inner_kwargs)
+
+class _MasterWeights(Optimizer):
+  def __init__(self, params:list[Tensor], inner_cls, lr=0.001, **inner_kwargs):
+    super().__init__(params, lr)
+    self.master = [p.cast(dtypes.float32).contiguous() for p in self.params]
+    self.inner = inner_cls(self.master, lr=lr, **inner_kwargs)
+    self.inner.lr = self.lr
+
+  def schedule_step(self) -> list[Tensor]:
+    fp32_grads = [p.grad.cast(dtypes.float32) for p in self.params]
+    updates, extra = self.inner._step(self.master, fp32_grads)
+    for mst, u in zip(self.master, updates): mst.assign(self.inner._apply_update(mst, u))
+    for p, mst in zip(self.params, self.master): p.assign(mst.cast(p.dtype))
+    return extra + list(self.master) + list(self.params) + self.buffers
+
 class GrokfastEMA:
   def __init__(self, params:list[Tensor], momentum, factor):
     self.params, self.momentum, self.factor = dedup([x for x in params if x.is_param]), momentum, factor
