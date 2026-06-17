@@ -7,25 +7,32 @@ from .syndata import generate_sample, generate_sequence
 from .common import T, IMG_H, IMG_W
 from ..common.dataloader import DataloaderProc
 
-OUTPUT_PIPELINE = A.Compose([
+# Augmentation is split by temporal scope. SEQ_PIPELINE holds scene/sensor properties that stay
+# stable across a short clip (white balance, exposure, color, shadows, focus, resolution) — its
+# params are sampled once and applied identically to every frame via additional_targets, so the
+# sequence doesn't flicker frame-to-frame. FRAME_PIPELINE holds effects that genuinely differ each
+# frame (motion blur, sensor noise) and is applied independently per frame.
+SEQ_PIPELINE = A.Compose([
   A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
   A.HueSaturationValue(hue_shift_limit=0, sat_shift_limit=(-20, 20), val_shift_limit=0, p=0.5),
   A.OneOf([
     A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.3),
     A.RandomSunFlare(flare_roi=(0, 0, 1, 1), p=0.3),
   ], p=0.2),
-  # Strong scene-wide motion blur, applied directly (not inside a OneOf) so it actually fires often
-  A.MotionBlur(blur_limit=(5, 17), p=0.5),
   A.Defocus(radius=(1, 5), p=0.05),
-  A.OneOf([
-    A.GaussNoise(std_range=(0.05, 0.2), p=0.5),
-    A.ISONoise(p=0.5),
-  ], p=0.25),
   A.OneOf([
     A.PlanckianJitter(mode="cied"),
     A.PlanckianJitter(),
   ], p=0.5),
   A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
+], additional_targets={f"image{t}": "image" for t in range(1, T)})
+FRAME_PIPELINE = A.Compose([
+  # Strong scene-wide motion blur, applied directly (not inside a OneOf) so it actually fires often
+  A.MotionBlur(blur_limit=(5, 17), p=0.5),
+  A.OneOf([
+    A.GaussNoise(std_range=(0.05, 0.2), p=0.5),
+    A.ISONoise(p=0.5),
+  ], p=0.25),
 ])
 
 # Label format: [class_id, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y, has_class, has_corners, target_color] — 12 values
@@ -43,8 +50,8 @@ def load_single_file(file) -> dict[str, bytes]:
   else:
     raise ValueError("unknown file type")
 
-  output = OUTPUT_PIPELINE(image=img)
-  img = output["image"]
+  img = SEQ_PIPELINE(image=img)["image"]
+  img = FRAME_PIPELINE(image=img)["image"]
 
   has_class = 1.0
   has_corners = 1.0 if class_id > 0 else 0.0
@@ -63,8 +70,12 @@ def load_sequence_file(file) -> dict[str, bytes]:
   elif file.startswith("syn:"):
     frame_list, class_id, corners_8, target_color_id = generate_sequence(file, T=T)
     imgs = np.stack(frame_list, axis=0)  # (T, IMG_H, IMG_W, 3)
-    for t in range(T):
-      imgs[t] = OUTPUT_PIPELINE(image=imgs[t])["image"]
+    # Sequence-consistent aug: one param sample applied identically to every frame, then per-frame
+    # motion/noise on top.
+    seq_out = SEQ_PIPELINE(image=imgs[0], **{f"image{t}": imgs[t] for t in range(1, T)})
+    imgs[0] = seq_out["image"]
+    for t in range(1, T): imgs[t] = seq_out[f"image{t}"]
+    for t in range(T): imgs[t] = FRAME_PIPELINE(image=imgs[t])["image"]
   else:
     raise ValueError("unknown file type")
 

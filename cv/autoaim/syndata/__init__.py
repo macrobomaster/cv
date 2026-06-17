@@ -1,4 +1,4 @@
-import glob, random, json, math
+import glob, os, random, json, math
 
 import cv2
 import albumentations as A
@@ -40,12 +40,12 @@ def generate_procedural_background(h=IMG_H, w=IMG_W):
   return img
 
 # --- Highlight desaturation (sensor clipping sim) ---
-def apply_highlight_desat(img, p=0.5):
+def apply_highlight_desat(img, p=0.5, thresh=None, desat_factor=None):
   if random.random() > p:
     return img
   hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.float32)
-  thresh = random.uniform(150, 220)
-  desat_factor = random.uniform(0.2, 0.6)
+  if thresh is None: thresh = random.uniform(150, 220)
+  if desat_factor is None: desat_factor = random.uniform(0.2, 0.6)
   v = hsv[:, :, 2]
   mask = v > thresh
   if mask.any():
@@ -416,7 +416,7 @@ def _sample_plate_dynamics():
   return {
     "cx": random.uniform(-400, 400),
     "cy": random.uniform(-200, 200),
-    "cz": math.exp(random.uniform(math.log(200), math.log(2000))),
+    "cz": math.exp(random.uniform(math.log(200), math.log(6000))),
     "r":  random.uniform(150, 250),
     "theta_final": random.uniform(0, 360),
     "omega": random.uniform(-15, 15),
@@ -490,7 +490,11 @@ def generate_sequence(file, T=4, target_color:str|None=None):
 
   fx = _sample_focal()
   bg_base = _make_background()
-  bg_hue_aug = A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=30, val_shift_limit=20, p=0.7)
+  # Background hue/sat/val shift is a scene/white-balance property — sample once and bake into the
+  # shared background so it stays consistent across the T frames instead of flickering per frame.
+  bg_base = A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=30, val_shift_limit=20, p=0.7)(image=bg_base)["image"]
+  # Highlight clipping is a sensor property — decide on/off and its threshold once per sequence.
+  desat_params = (random.uniform(150, 220), random.uniform(0.2, 0.6)) if random.random() < 0.5 else None
 
   # seq_type applies to the seed (first) plate. Distractors always use continuous motion.
   if T >= 2:
@@ -549,7 +553,6 @@ def generate_sequence(file, T=4, target_color:str|None=None):
 
   for t in range(T):
     img = bg_base.copy()
-    img = bg_hue_aug(image=img)["image"]
 
     for plate_idx, info in enumerate(plate_infos):
       if t in no_plate_frames_per_plate[plate_idx]:
@@ -581,7 +584,8 @@ def generate_sequence(file, T=4, target_color:str|None=None):
       else:
         prev_centers[plate_idx] = None
 
-    img = apply_highlight_desat(img)
+    if desat_params is not None:
+      img = apply_highlight_desat(img, p=1.0, thresh=desat_params[0], desat_factor=desat_params[1])
     img = per_frame_aug(image=img)["image"]
     images.append(img)
 
