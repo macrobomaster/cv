@@ -62,7 +62,7 @@ T_MOUNT = np.zeros(3)    # translation, m. TODO: measure.
 
 @partial(TinyJit, prune=True)
 def pred(model, frames, frame, target_color):
-  frame = frame.to(Device.DEFAULT).reshape(256, 512, 3)
+  frame = frame.to(Device.DEFAULT).reshape(IMG_H, IMG_W, 3)
   frames.assign(Tensor.cat(frames[1:], frame.unsqueeze(0))).realize()
 
   target_color = target_color.to(Device.DEFAULT)
