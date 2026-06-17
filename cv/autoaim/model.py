@@ -296,6 +296,12 @@ class DecoderBlock:
 NUM_CLASSES = 17
 N_CORNERS = 4
 N_BINS = 96
+# D-FINE offset refinement: bins are non-uniform offsets W(n) (as a fraction of the anchor box
+# FDR-lite: each decoder layer adds a residual to the corner-distribution logits (coarse-to-fine),
+# decoded as the expectation over fixed absolute bins in [BIN_LO, BIN_HI] — a stationary target
+# (unlike the anchor-scaled-offset variant, whose moving reference destabilized training).
+def bin_centers(n_bins:int) -> Tensor:
+  return BIN_LO + Tensor.arange(n_bins, dtype=dtypes.float32) / (n_bins - 1) * (BIN_HI - BIN_LO)
 
 class Decoder:
   def __init__(self, dim:int, n_layers:int=4, n_bins:int=N_BINS, dropout:float=0.0):
@@ -310,12 +316,11 @@ class Decoder:
     self.ln_out = RMSNorm(dim)
 
     self.class_proj = nn.Linear(dim, NUM_CLASSES, bias=False)
-    self.corner_mlp = MLP(dim, 2 * n_bins, 256, blocks=1)
+    self.corner_mlp = MLP(dim, 2 * n_bins, 256, blocks=1)  # shared residual head over absolute bins
 
-  def __call__(self, feat_tokens:Tensor, fine_tokens:Tensor, target_color:Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    # feat_tokens: (B, N_FEAT_TOKENS, D) — coarse /32 (+sb)
-    # fine_tokens: (B, N_X2_TOKENS, D) — fine /16
-    # target_color: (B,) int32 in {0, 1}
+  def __call__(self, feat_tokens:Tensor, fine_tokens:Tensor, target_color:Tensor) -> tuple[Tensor, list]:
+    # feat_tokens: (B, N_FEAT_TOKENS, D) — coarse /32 (+sb); fine_tokens: (B, N_X2_TOKENS, D) — fine /16
+    # target_color: (B,) int32. Returns (class_logits, [cum_logits per layer]) — accumulated corner logits.
     B, _, D = feat_tokens.shape
 
     feat_tokens = feat_tokens + self.pos_emb.reshape(1, N_FEAT_TOKENS, D).expand(B, -1, -1)
@@ -325,18 +330,18 @@ class Decoder:
     class_tok = self.class_token.reshape(1, 1, D).expand(B, 1, D)
     corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)
     q = target_tok.cat(class_tok, corner_toks, dim=1)  # (B, 2+N_CORNERS, D)
-    for block in self.blocks: q = block(q, mem)
-    q = self.ln_out(q)
 
-    # query layout: [target(0), class(1), corner×N_CORNERS(2:)]
-    class_tok = q[:, 1, :]  # (B, D)
-    corner_toks = q[:, 2:2 + N_CORNERS, :]  # (B, 4, D)
+    # each layer adds a residual to the corner logits (coarse-to-fine). query layout: [target, class, corners]
+    cum, cum_layers, qn = None, [], None
+    for block in self.blocks:
+      q = block(q, mem)
+      qn = self.ln_out(q)
+      ct = qn[:, 2:2 + N_CORNERS, :]  # (B, 4, D)
+      cum = self.corner_mlp(ct) if cum is None else cum + self.corner_mlp(ct)
+      cum_layers.append(cum)
 
-    class_logits = self.class_proj(class_tok)    # (B, NUM_CLASSES)
-    corner_dists = self.corner_mlp(corner_toks)  # (B, 4, 2*n_bins)
-    dist_x = corner_dists[:, :, :self.n_bins]    # (B, 4, n_bins)
-    dist_y = corner_dists[:, :, self.n_bins:]    # (B, 4, n_bins)
-    return class_logits, dist_x, dist_y
+    class_logits = self.class_proj(qn[:, 1, :])  # (B, NUM_CLASSES)
+    return class_logits, cum_layers
 
 # Unified class encoding:
 # 0: no plate
@@ -368,6 +373,7 @@ CLASS_DECODE_TABLE = [
 DFL_WEIGHT = 0.25
 L1_WEIGHT = 1.0
 CLASS_WEIGHT = 1.0
+GOLSD_WEIGHT = 0.125  # GO-LSD self-distillation (final layer → earlier), ~0.5× DFL
 
 class Model:
   def __init__(self, dim:int=512, temporal_size:int=1, sideband_dim:int=512,
@@ -383,9 +389,9 @@ class Model:
     x0, x1, x2, x3, sb = self.backbone(img)
     return self.feature_tokenizer(x2, x3, sb)
 
-  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     # img: (B, T, IMG_H, IMG_W, 3)
-    # Returns (total_loss, class_loss, l1_loss, dfl_loss).
+    # Returns (total_loss, class_loss, l1_loss, dfl_loss, lsd_loss).
     assert Tensor.training
     tokens = self.encode(img)  # (feat_tokens, fine_tokens)
     return self.corner_loss(tokens, y)
@@ -397,54 +403,66 @@ class Model:
 
     # y: [class_id, c1x,c1y,c2x,c2y,c3x,c3y,c4x,c4y, has_class, has_corners, target_color]
     class_id = y[:, 0].cast(dtypes.int32)
-    corners = y[:, 1:9].reshape(B, N_CORNERS, 2)  # normalized [BIN_LO, BIN_HI]
+    corners_f = y[:, 1:9].reshape(B, N_CORNERS, 2).cast(dtypes.float32)  # gt, [BIN_LO, BIN_HI]
     has_class = y[:, 9]
     has_corners = y[:, 10]
     target_color = y[:, 11].cast(dtypes.int32)
 
-    class_logits, dist_x, dist_y = self.decoder(feat_tokens, fine_tokens, target_color)
+    class_logits, cum_layers = self.decoder(feat_tokens, fine_tokens, target_color)
 
     # class loss
     ce = class_logits.cast(dtypes.float32).cross_entropy(class_id, reduction="none")  # (B,)
     class_loss = (has_class * ce).sum() / has_class.sum().add(1e-6)
 
-    dist_xy = Tensor.stack(dist_x, dist_y, dim=2).cast(dtypes.float32)
-    corners_f = corners.cast(dtypes.float32)
+    denom = has_corners.sum().add(1e-6)
+    centers = bin_centers(N)
 
-    # l1 loss
-    bin_centers = BIN_LO + Tensor.arange(N, dtype=dtypes.float32) / (N - 1) * (BIN_HI - BIN_LO)
-    expected = (dist_xy.softmax(-1) * bin_centers).sum(-1)  # (B, 4, 2)
-    l1 = (expected - corners_f).abs().mean(-1).mean(-1)  # (B,)
-    l1_loss = (has_corners * l1).sum() / has_corners.sum().add(1e-6)
-
-    # dfl loss
-    c_scaled = ((corners_f - BIN_LO) / (BIN_HI - BIN_LO) * (N - 1)).clamp(0, N - 1)
+    # DFL target over absolute bins (stationary): split mass between the two bins flanking the GT.
+    c_scaled = ((corners_f - BIN_LO) / (BIN_HI - BIN_LO) * (N - 1)).clamp(0, N - 1)  # (B, 4, 2)
     l_idx = c_scaled.floor().cast(dtypes.int32).clamp(0, N - 2)
     w_r = c_scaled - l_idx.cast(dtypes.float32)
-    target_dist = l_idx.one_hot(N).cast(dtypes.float32) * (1.0 - w_r).unsqueeze(-1) + (l_idx + 1).one_hot(N).cast(dtypes.float32) * w_r.unsqueeze(-1)
-    dfl = dist_xy.reshape(-1, N).cross_entropy(target_dist.reshape(-1, N), reduction="none").reshape(B, N_CORNERS, 2).mean(-1).mean(-1)
-    dfl_loss = (has_corners * dfl).sum() / has_corners.sum().add(1e-6)
+    target_dist = l_idx.one_hot(N).cast(dtypes.float32) * (1.0 - w_r).unsqueeze(-1) \
+                + (l_idx + 1).one_hot(N).cast(dtypes.float32) * w_r.unsqueeze(-1)  # (B, 4, 2, N)
 
-    total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss
-    return total, class_loss, l1_loss, dfl_loss
+    # per-layer deep supervision (later layers weighted more)
+    weights = [i + 1 for i in range(len(cum_layers))]
+    wsum = float(sum(weights))
+    l1_loss, dfl_loss = 0.0, 0.0
+    for i, cum in enumerate(cum_layers):
+      logits = cum.reshape(B, N_CORNERS, 2, N).cast(dtypes.float32)
+      expected = (logits.softmax(-1) * centers).sum(-1)  # (B, 4, 2)
+      l1_i = (expected - corners_f).abs().mean(-1).mean(-1)  # (B,)
+      dfl_i = logits.reshape(-1, N).cross_entropy(target_dist.reshape(-1, N), reduction="none").reshape(B, N_CORNERS, 2).mean(-1).mean(-1)
+      l1_loss += (weights[i] / wsum) * (has_corners * l1_i).sum() / denom
+      dfl_loss += (weights[i] / wsum) * (has_corners * dfl_i).sum() / denom
+
+    # GO-LSD: distill the final (best-localized) layer's distribution into the earlier ones via
+    # KL (= CE to the detached teacher), so earlier layers sharpen toward the final localization.
+    teacher = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1).detach()
+    lsd_loss = 0.0
+    for i in range(len(cum_layers) - 1):
+      student = cum_layers[i].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32)
+      lsd_i = student.reshape(-1, N).cross_entropy(teacher.reshape(-1, N), reduction="none").reshape(B, N_CORNERS, 2).mean(-1).mean(-1)
+      lsd_loss += (has_corners * lsd_i).sum() / denom
+    lsd_loss = lsd_loss / max(1, len(cum_layers) - 1)
+
+    total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss + GOLSD_WEIGHT * lsd_loss
+    return total, class_loss, l1_loss, dfl_loss, lsd_loss
 
   def corner_predict(self, tokens:tuple[Tensor, Tensor], target_color:Tensor) -> Tensor:
     feat_tokens, fine_tokens = tokens
     B = feat_tokens.shape[0]
     N = self.decoder.n_bins
 
-    class_logits, dist_x, dist_y = self.decoder(feat_tokens, fine_tokens, target_color)
+    class_logits, cum_layers = self.decoder(feat_tokens, fine_tokens, target_color)
 
     class_probs = class_logits.cast(dtypes.float32).softmax(-1)
     class_id = class_probs.argmax(-1, keepdim=True).cast(dtypes.default_float)
     class_conf = class_probs.max(-1, keepdim=True).cast(dtypes.default_float)
 
-    bin_centers = BIN_LO + Tensor.arange(N, dtype=dtypes.float32) / (N - 1) * (BIN_HI - BIN_LO)
-    px = dist_x.cast(dtypes.float32).softmax(-1)
-    py = dist_y.cast(dtypes.float32).softmax(-1)
-    cx = (px * bin_centers).sum(-1)  # (B, 4)
-    cy = (py * bin_centers).sum(-1)  # (B, 4)
-    corners = Tensor.stack(cx, cy, dim=-1).reshape(B, N_CORNERS * 2).cast(dtypes.default_float)  # (B, 8)
+    # final corners = expectation over absolute bins of the final accumulated distribution
+    dist = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1)
+    corners = (dist * bin_centers(N)).sum(-1).reshape(B, N_CORNERS * 2).cast(dtypes.default_float)
     return Tensor.cat(class_id, class_conf, corners, dim=-1)
 
   def fuse(self):
@@ -467,68 +485,33 @@ class Model:
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
   from tinygrad.helpers import GlobalCounters, getenv, Context
-  from tinygrad.engine.jit import TinyJit
-  from functools import partial
+  from .common import pred
   import time
 
-  BS = 1
   if getenv("HALF"):
     dtypes.default_float = dtypes.float16
-  if train := getenv("TRAIN"):
-    Tensor.training = True
-    BS = 64
 
   model = Model(temporal_size=T)
   if getenv("FUSE"): model.fuse()
 
-  if train:
-    @TinyJit
-    def run(x:Tensor, y:Tensor):
-      return model(x, y)
-
-    with Context(DEBUG=getenv("DEBUG", 2)):
-      x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
-      y = Tensor.randn(BS, 12).realize()
+  with Context(DEBUG=getenv("DEBUG", 2)):
+    for _ in range(3):
+      fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
+      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
+      fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
       GlobalCounters.reset()
-      ret = run(x, y)
-      x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
-      y = Tensor.randn(BS, 12).realize()
-      GlobalCounters.reset()
-      ret = run(x, y)
-      print(ret)
-  else:
-    @partial(TinyJit, prune=True)
-    def run_backbone(x:Tensor):
-      return model.encode(x)
-
-    @partial(TinyJit, prune=True)
-    def run_decoder(tokens:tuple[Tensor, Tensor], target_color:Tensor):
-      return model.corner_predict(tokens, target_color)
-
-    with Context(DEBUG=getenv("DEBUG", 2)):
-      target_color = Tensor.zeros(BS, dtype=dtypes.int32).realize()
-      x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
-      GlobalCounters.reset()
-      tokens = run_backbone(x)
-      ret = run_decoder(tokens, target_color)
-      x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
-      GlobalCounters.reset()
-      tokens = run_backbone(x)
-      ret = run_decoder(tokens, target_color)
+      ret = pred(model, fake_frames, fake_frame, fake_target)
       print(ret)
 
   # full runs
   tms = []
   for _ in range(15):
-    x = Tensor.randn(BS, T, IMG_H, IMG_W, 3).realize()
-    y = Tensor.randn(BS, 11).realize()
+    fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
+    fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
+    fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
     GlobalCounters.reset()
     st = time.perf_counter()
-    if train:
-      nret = run(x, y)
-    else:
-      feat = run_backbone(x)
-      nret = run_decoder(feat, target_color)
+    ret = pred(model, fake_frames, fake_frame, fake_target)
     tms.append(time.perf_counter() - st)
 
   print("jit run successful")
@@ -538,15 +521,15 @@ if __name__ == "__main__":
 
   print(f"average time: {sum(tms) / len(tms):.4f} seconds")
   print(f"average latency: {(sum(tms) / len(tms)) * 1000:.2f} ms")
-  print(f"average fps: {BS / (sum(tms) / len(tms)):.2f} fps")
+  print(f"average fps: {1 / (sum(tms) / len(tms)):.2f} fps")
 
   print(f"fastest time: {min(tms):.4f} seconds")
   print(f"fastest latency: {min(tms) * 1000:.2f} ms")
-  print(f"fastest fps: {BS / min(tms):.2f} fps")
+  print(f"fastest fps: {1 / min(tms):.2f} fps")
 
   print(f"slowest time: {max(tms):.4f} seconds")
   print(f"slowest latency: {max(tms) * 1000:.2f} ms")
-  print(f"slowest fps: {BS / max(tms):.2f} fps")
+  print(f"slowest fps: {1 / max(tms):.2f} fps")
 
   print(f"model size: {sum(p.numel() * p.dtype.itemsize for p in get_parameters(model)) / 1024**2:.2f} MB")
 
