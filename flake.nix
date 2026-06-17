@@ -194,12 +194,13 @@
                       doCheck = false;
                       nativeCheckInputs = [ ];
                       # orin NVRTC (cuda 12, aarch64) rejects the union-based tg_bitcast when a
-                      # union member is __half ("disallowed member function"); bitcast via memcpy.
+                      # union member is __half ("disallowed member function"), and has no
+                      # __builtin_memcpy; bitcast via a pointer reinterpret instead.
                       postPatch = (old.postPatch or "") + ''
                         substituteInPlace tinygrad/renderer/cstyle.py \
                           --replace-fail \
                             "union U { F f; T t; }; U u; u.f = v; return u.t;" \
-                            "T t; __builtin_memcpy(&t, &v, sizeof(T)); return t;"
+                            "return *(T*)(&v);"
                       '';
                     })
                   )
