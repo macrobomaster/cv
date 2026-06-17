@@ -197,7 +197,7 @@
                   )
                 ]
                 ++ common-python-packages p;
-              python = pkgs-aarch64-linux.python314;
+              python = pkgs-aarch64-linux.python313;
             in
             with pkgs-aarch64-linux;
             [
