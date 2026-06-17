@@ -60,9 +60,19 @@
                 opencv4 = python-prev.opencv4.override {
                   enableCuda = false;
                 };
-                tinygrad = python-prev.tinygrad.override {
+                tinygrad = (python-prev.tinygrad.override {
                   cudaPackages = final.nvidia-jetpack.cudaPackages;
-                };
+                }).overridePythonAttrs (old: {
+                  # orin NVRTC (cuda 12, aarch64) rejects the union-based tg_bitcast
+                  # when a union member is __half ("disallowed member function"). bitcast
+                  # via memcpy instead, which has no union-member restriction.
+                  postPatch = (old.postPatch or "") + ''
+                    substituteInPlace tinygrad/renderer/cstyle.py \
+                      --replace-fail \
+                        "union U { F f; T t; }; U u; u.f = v; return u.t;" \
+                        "T t; __builtin_memcpy(&t, &v, sizeof(T)); return t;"
+                  '';
+                });
               })
             ];
           })
