@@ -417,14 +417,13 @@ class Model:
     denom = has_corners.sum().add(1e-6)
     centers = bin_centers(N)
 
-    # DFL target over absolute bins (stationary): split mass between the two bins flanking the GT.
+    # dfl loss
     c_scaled = ((corners_f - BIN_LO) / (BIN_HI - BIN_LO) * (N - 1)).clamp(0, N - 1)  # (B, 4, 2)
     l_idx = c_scaled.floor().cast(dtypes.int32).clamp(0, N - 2)
     w_r = c_scaled - l_idx.cast(dtypes.float32)
-    target_dist = l_idx.one_hot(N).cast(dtypes.float32) * (1.0 - w_r).unsqueeze(-1) \
-                + (l_idx + 1).one_hot(N).cast(dtypes.float32) * w_r.unsqueeze(-1)  # (B, 4, 2, N)
+    target_dist = l_idx.one_hot(N).cast(dtypes.float32) * (1.0 - w_r).unsqueeze(-1) + (l_idx + 1).one_hot(N).cast(dtypes.float32) * w_r.unsqueeze(-1)
 
-    # per-layer deep supervision (later layers weighted more)
+    # deep supervision
     weights = [i + 1 for i in range(len(cum_layers))]
     wsum = float(sum(weights))
     l1_loss, dfl_loss = 0.0, 0.0
@@ -436,8 +435,7 @@ class Model:
       l1_loss += (weights[i] / wsum) * (has_corners * l1_i).sum() / denom
       dfl_loss += (weights[i] / wsum) * (has_corners * dfl_i).sum() / denom
 
-    # GO-LSD: distill the final (best-localized) layer's distribution into the earlier ones via
-    # KL (= CE to the detached teacher), so earlier layers sharpen toward the final localization.
+    # go-lsd self-distillation loss
     teacher = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1).detach()
     lsd_loss = 0.0
     for i in range(len(cum_layers) - 1):
@@ -460,10 +458,17 @@ class Model:
     class_id = class_probs.argmax(-1, keepdim=True).cast(dtypes.default_float)
     class_conf = class_probs.max(-1, keepdim=True).cast(dtypes.default_float)
 
-    # final corners = expectation over absolute bins of the final accumulated distribution
-    dist = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1)
-    corners = (dist * bin_centers(N)).sum(-1).reshape(B, N_CORNERS * 2).cast(dtypes.default_float)
-    return Tensor.cat(class_id, class_conf, corners, dim=-1)
+    centers = bin_centers(N)
+    dist = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1)  # (B,4,2,N)
+    mean = (dist * centers).sum(-1)  # (B,4,2)
+    cdf = dist.cumsum(-1)
+    def _quant(q:float) -> Tensor:
+      idx = (cdf < q).sum(-1).clip(0, N - 1).cast(dtypes.int32)  # (B,4,2)
+      return (idx.one_hot(N).cast(dtypes.float32) * centers).sum(-1)
+    corners = mean.reshape(B, N_CORNERS * 2).cast(dtypes.default_float)
+    q_lo = _quant(0.159).reshape(B, N_CORNERS * 2).cast(dtypes.default_float)
+    q_hi = _quant(0.841).reshape(B, N_CORNERS * 2).cast(dtypes.default_float)
+    return Tensor.cat(class_id, class_conf, corners, q_lo, q_hi, dim=-1)
 
   def fuse(self):
     def _find_fused_blocks(m, prefix=""):

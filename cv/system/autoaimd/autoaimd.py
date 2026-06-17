@@ -38,8 +38,6 @@ def run():
     if FUSE: model.fuse()
     if HALF:
       for param in get_state_dict(model).values():
-        # only 2D+ weight matrices (conv/linear) go fp16 — that's where the compute is. every 1D param
-        # stays fp32: norms, LayerScale gammas (init 1e-4), GRN gamma/beta (fp32 by design), biases.
         if param.ndim < 2: continue
         param.replace(param.half()).realize()
 
@@ -82,7 +80,9 @@ def run():
 
       class_id = int(model_out[0])
       confidence = model_out[1]
-      corners = list(model_out[2:10])  # 4 corners in [0, 1] image-normalized coords, TL/TR/BL/BR
+      corners = list(model_out[2:10])
+      corner_lo = list(model_out[10:18])
+      corner_hi = list(model_out[18:26])
 
       detected, color_id, number = CLASS_DECODE_TABLE[class_id]
       color_name = color_names.get(color_id, "blank")
@@ -98,6 +98,8 @@ def run():
         "color": color_name,
         "number": number,
         "corners": corners,
+        "corner_lo": corner_lo,
+        "corner_hi": corner_hi,
         "t_capture": camera_feed["ct"],
         "fid": fid,
         "infer_ms": (mt - ft) * 1e3,
