@@ -296,10 +296,6 @@ class DecoderBlock:
 NUM_CLASSES = 17
 N_CORNERS = 4
 N_BINS = 96
-# D-FINE offset refinement: bins are non-uniform offsets W(n) (as a fraction of the anchor box
-# FDR-lite: each decoder layer adds a residual to the corner-distribution logits (coarse-to-fine),
-# decoded as the expectation over fixed absolute bins in [BIN_LO, BIN_HI] — a stationary target
-# (unlike the anchor-scaled-offset variant, whose moving reference destabilized training).
 def bin_centers(n_bins:int) -> Tensor:
   return BIN_LO + Tensor.arange(n_bins, dtype=dtypes.float32) / (n_bins - 1) * (BIN_HI - BIN_LO)
 
@@ -316,11 +312,11 @@ class Decoder:
     self.ln_out = RMSNorm(dim)
 
     self.class_proj = nn.Linear(dim, NUM_CLASSES, bias=False)
-    self.corner_mlp = MLP(dim, 2 * n_bins, 256, blocks=1)  # shared residual head over absolute bins
+    self.corner_mlp = MLP(dim, 2 * n_bins, dim // 2, blocks=1)  # shared residual head over absolute bins
 
   def __call__(self, feat_tokens:Tensor, fine_tokens:Tensor, target_color:Tensor) -> tuple[Tensor, list]:
-    # feat_tokens: (B, N_FEAT_TOKENS, D) — coarse /32 (+sb); fine_tokens: (B, N_X2_TOKENS, D) — fine /16
-    # target_color: (B,) int32. Returns (class_logits, [cum_logits per layer]) — accumulated corner logits.
+    # feat_tokens: (B, N_FEAT_TOKENS, D) - coarse /32 (+sb); fine_tokens: (B, N_X2_TOKENS, D) - fine /16
+    # target_color: (B,) int32. Returns (class_logits, [cum_logits per layer]) - accumulated corner logits.
     B, _, D = feat_tokens.shape
 
     feat_tokens = feat_tokens + self.pos_emb.reshape(1, N_FEAT_TOKENS, D).expand(B, -1, -1)
@@ -331,7 +327,7 @@ class Decoder:
     corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)
     q = target_tok.cat(class_tok, corner_toks, dim=1)  # (B, 2+N_CORNERS, D)
 
-    # each layer adds a residual to the corner logits (coarse-to-fine). query layout: [target, class, corners]
+    # fdr like thingy
     cum, cum_layers, qn = None, [], None
     for block in self.blocks:
       q = block(q, mem)
@@ -373,7 +369,7 @@ CLASS_DECODE_TABLE = [
 DFL_WEIGHT = 0.25
 L1_WEIGHT = 1.0
 CLASS_WEIGHT = 1.0
-GOLSD_WEIGHT = 0.125  # GO-LSD self-distillation (final layer → earlier), ~0.5× DFL
+GOLSD_WEIGHT = 0.125
 
 class Model:
   def __init__(self, dim:int=512, temporal_size:int=1, sideband_dim:int=512,
