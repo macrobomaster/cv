@@ -31,7 +31,7 @@ def setup_aravis():
   ch = bw // 2
   cam.set_region(0, (bh - ch) // 2, bw, ch)
   dev.set_string_feature_value("ExposureAuto", "Off")
-  cam.set_exposure_time(3000)
+  cam.set_exposure_time(6000)
   dev.set_string_feature_value("GainAuto", "Off")
   cam.set_gain(getenv("GAIN", 17.0))
   dev.set_string_feature_value("BalanceWhiteAuto", "Once")
