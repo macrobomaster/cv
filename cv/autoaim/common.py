@@ -27,10 +27,10 @@ T = getenv("T", 1)
 # corner output valid range
 BIN_LO, BIN_HI = -0.5, 1.5
 
-MODEL_VERSION = 28
+MODEL_VERSION = 33
 
 # canonical camera
-CANONICAL_FX_FY = 650
+CANONICAL_FX_FY = 1010
 CANONICAL_CX, CANONICAL_CY = IMG_W / 2, IMG_H / 2
 CANONICAL_CAMERA_MATRIX = np.array([[CANONICAL_FX_FY, 0, CANONICAL_CX],
                                     [0, CANONICAL_FX_FY, CANONICAL_CY],
@@ -54,9 +54,12 @@ R_MOUNT = np.array([[0,  0,  1],
 T_MOUNT = np.array([0, 0, 0], dtype=np.float64)
 
 @partial(TinyJit, prune=True)
-def pred(model, frames, frame, target_color):
-  frame = frame.to(Device.DEFAULT).reshape(IMG_H, IMG_W, 3)
-  frames.assign(Tensor.cat(frames[1:], frame.unsqueeze(0))).realize()
+def pred(model, frame, target_color, frames:Tensor|None=None):
+  if frames is None:
+    frames = frame.to(Device.DEFAULT).reshape(1, IMG_H, IMG_W, 3)
+  else:
+    frame = frame.to(Device.DEFAULT).reshape(IMG_H, IMG_W, 3)
+    frames.assign(Tensor.cat(frames[1:], frame.unsqueeze(0))).realize()
 
   target_color = target_color.to(Device.DEFAULT)
   tokens = model.encode(frames.unsqueeze(0))
@@ -66,8 +69,17 @@ class TemporalInference:
   def __init__(self, model_fn, T:int, model=None):
     self.model_fn, self.model = model_fn, model
     self.T = T
-    self.frames = Tensor.zeros(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone()
+    if self.T != 1:
+      self.frames = Tensor.zeros(self.T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone()
 
   def __call__(self, img, target_color:int=0) -> list:
     target_color_t = Tensor([target_color], dtype=dtypes.int32, device="PYTHON")
-    return self.model_fn(self.model, self.frames, img, target_color_t).tolist()[0]
+    return self.model_fn(self.model, img, target_color_t, frames=self.frames if self.T != 1 else None).tolist()[0]
+
+  def warmup(self):
+    fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
+    fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
+    fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
+    for _ in range(3):
+      self.model_fn(self.model, fake_frame, fake_target, frames=fake_frames if self.T != 1 else None)
+    return self.model_fn
