@@ -8,6 +8,7 @@ from ..common.tensor import pixel_unshuffle
 from ..common.nn import Attention, FFN, MLP, LayerScale, LayerScale2d
 from ..common.nn.fuse import FusedBlock
 from ..common.nn.norm import GRN, RMSNorm, RMSNorm2d
+from ..common.losses import mal_loss
 from .common import IMG_H, IMG_W, N_X2_TOKENS, N_X3_TOKENS, N_FEAT_TOKENS, T, BIN_LO, BIN_HI
 
 class ChannelMixer:
@@ -387,6 +388,9 @@ DFL_WEIGHT = 0.25
 L1_WEIGHT = 1.0
 CLASS_WEIGHT = 1.0
 GOLSD_WEIGHT = 0.125
+QUALITY_TAU = 0.4
+MAL_GAMMA = 2
+MIN_PLATE_SCALE = 0.02
 
 class Model:
   def __init__(self, dim:int=384, temporal_size:int=1, sideband_dim:int=512,
@@ -423,30 +427,36 @@ class Model:
 
     class_logits, cum_layers = self.decoder(feat_tokens, fine_tokens, target_color)
 
-    # class loss
-    ce = class_logits.cast(dtypes.float32).cross_entropy(class_id, reduction="none")  # (B,)
-    class_loss = (has_class * ce).sum() / has_class.sum().add(1e-6)
-
     denom = has_corners.sum().add(1e-6)
     centers = bin_centers(N)
 
-    # dfl loss
+    # plate scale
+    plate_scale = (corners_f.max(1) - corners_f.min(1)).pow(2).sum(-1).sqrt().maximum(MIN_PLATE_SCALE)  # (B,)
+
+    # dfl target (two-hot over bins)
     c_scaled = ((corners_f - BIN_LO) / (BIN_HI - BIN_LO) * (N - 1)).clamp(0, N - 1)  # (B, 4, 2)
     l_idx = c_scaled.floor().cast(dtypes.int32).clamp(0, N - 2)
     w_r = c_scaled - l_idx.cast(dtypes.float32)
     target_dist = l_idx.one_hot(N).cast(dtypes.float32) * (1.0 - w_r).unsqueeze(-1) + (l_idx + 1).one_hot(N).cast(dtypes.float32) * w_r.unsqueeze(-1)
 
-    # deep supervision
+    # deep supervision, l1 scale normalized
     weights = [i + 1 for i in range(len(cum_layers))]
     wsum = float(sum(weights))
-    l1_loss, dfl_loss = 0.0, 0.0
+    l1_loss, dfl_loss, expected = 0.0, 0.0, None
     for i, cum in enumerate(cum_layers):
       logits = cum.reshape(B, N_CORNERS, 2, N).cast(dtypes.float32)
       expected = (logits.softmax(-1) * centers).sum(-1)  # (B, 4, 2)
-      l1_i = (expected - corners_f).abs().mean(-1).mean(-1)  # (B,)
+      l1_i = (expected - corners_f).abs().mean(-1).mean(-1) / plate_scale  # (B,)
       dfl_i = logits.reshape(-1, N).cross_entropy(target_dist.reshape(-1, N), reduction="none").reshape(B, N_CORNERS, 2).mean(-1).mean(-1)
       l1_loss += (weights[i] / wsum) * (has_corners * l1_i).sum() / denom
       dfl_loss += (weights[i] / wsum) * (has_corners * dfl_i).sum() / denom
+
+    # class loss
+    rel_err = (expected - corners_f).abs().mean(-1).mean(-1) / plate_scale  # (B,), final layer
+    quality = has_corners * (-rel_err / QUALITY_TAU).exp() + (1 - has_corners)  # (B,)
+    y_onehot = class_id.one_hot(NUM_CLASSES).cast(dtypes.float32)
+    mal = mal_loss(class_logits.cast(dtypes.float32), y_onehot, quality.reshape(B, 1), gamma=MAL_GAMMA)  # (B,)
+    class_loss = (has_class * mal).sum() / has_class.sum().add(1e-6)
 
     # go-lsd self-distillation loss
     teacher = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1).detach()
@@ -467,7 +477,7 @@ class Model:
 
     class_logits, cum_layers = self.decoder(feat_tokens, fine_tokens, target_color)
 
-    class_probs = class_logits.cast(dtypes.float32).softmax(-1)
+    class_probs = class_logits.cast(dtypes.float32).sigmoid()  # one-vs-all; max = quality-aware confidence
     class_id = class_probs.argmax(-1, keepdim=True).cast(dtypes.default_float)
     class_conf = class_probs.max(-1, keepdim=True).cast(dtypes.default_float)
 
