@@ -16,7 +16,7 @@ from ..common.optim import CLAMB, TrapezoidalWarmupLR, MasterWeights
 from .common import BASE_PATH
 from .model import Model
 from .data import get_train_files
-from .common import T
+from .common import T, IMG_H, IMG_W
 
 GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
 BS = 128 * len(GPUS)
@@ -47,7 +47,7 @@ def run():
     })
 
   dataloader = Dataloader({
-    "x": BatchDesc(shape=(T, 256, 512, 3), dtype=dtypes.uint8),
+    "x": BatchDesc(shape=(T, IMG_H, IMG_W, 3), dtype=dtypes.uint8),
     "y": BatchDesc(shape=(12,), dtype=dtypes.float32),
   }, bs=BS, files_fn=get_train_files)
 
