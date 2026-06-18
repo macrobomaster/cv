@@ -1,6 +1,5 @@
 import time
 
-import cv2
 import numpy as np
 from tinygrad.helpers import getenv
 
@@ -66,15 +65,24 @@ def latch_timestamp_offset(dev, ts_hz) -> int:
   dev_ns = dev.get_integer_feature_value("DeviceTimestamp") * 1_000_000_000 // ts_hz
   return (t0 + t1) // 2 - dev_ns
 
-def get_aravis_frame(cam, strm, ts_hz, offset):
+def get_aravis_frame_view(cam, strm, ts_hz, offset):
   buf = strm.pop_buffer()
   while (nb := strm.try_pop_buffer()) is not None:
     strm.push_buffer(buf)
     buf = nb
   ct = (buf.get_timestamp() * 1_000_000_000 // ts_hz + offset) / 1e9
   status = buf.get_status()
-  # copy before requeue: in free-run the camera may immediately refill this buffer
-  img_raw = np.frombuffer(buf.get_data(), dtype=np.uint8).reshape(cam.get_region()[3], cam.get_region()[2], 3).copy()
-  strm.push_buffer(buf)
-  if status != Aravis.BufferStatus.SUCCESS: return None, 0.0
-  return img_raw, ct
+  if status != Aravis.BufferStatus.SUCCESS:
+    strm.push_buffer(buf)
+    return None, 0.0, None
+  img_raw = np.frombuffer(buf.get_data(), dtype=np.uint8).reshape(cam.get_region()[3], cam.get_region()[2], 3)
+  return img_raw, ct, buf
+
+def get_aravis_frame(cam, strm, ts_hz, offset):
+  img_raw, ct, buf = get_aravis_frame_view(cam, strm, ts_hz, offset)
+  if img_raw is None: return None, 0.0
+  try:
+    # copy before requeue: in free-run the camera may immediately refill this buffer
+    return img_raw.copy(), ct
+  finally:
+    strm.push_buffer(buf)
