@@ -20,12 +20,42 @@ class ChannelMixer:
   def __call__(self, x:Tensor) -> Tensor:
     return self.down(self.grn(self.up(x).gelu()))
 
+class ConvTokenMixer(FusedBlock):
+  def __init__(self, dim:int, stride:int=1):
+    self.dim, self.stride = dim, stride
+    self.dw3x3 = nn.Conv2d(dim, dim, 3, stride, 1, groups=dim)
+    self.dw7x7 = nn.Conv2d(dim, dim, 7, stride, 3, groups=dim)
+
+  def __call__(self, x:Tensor) -> Tensor:
+    if not self.fused:
+      return self.dw3x3(x) + self.dw7x7(x)
+    else:
+      return self.conv(x)
+
+  def fuse(self) -> bool:
+    if not (was_fused := super().fuse()):
+      dw7x7_w = self.dw7x7.weight
+      dw3x3_w = self.dw3x3.weight.pad((2, 2, 2, 2))
+      w = dw3x3_w + dw7x7_w
+
+      dw7x7_b = self.dw7x7.bias
+      dw3x3_b = self.dw3x3.bias
+      b = dw3x3_b + dw7x7_b
+
+      self.conv = nn.Conv2d(self.dim, self.dim, 7, self.stride, 3, groups=self.dim)
+      self.conv.weight.replace(w)
+      self.conv.bias.replace(b)
+
+      del self.dw3x3
+      del self.dw7x7
+    return was_fused
+
 class ConvBlock:
   def __init__(self, dim:int, dropout:float=0.0):
     self.dropout = dropout
 
     self.tnorm = RMSNorm2d(dim)
-    self.token_mixer = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim)
+    self.token_mixer = ConvTokenMixer(dim)
     self.ls1 = LayerScale2d(dim)
 
     self.cnorm = RMSNorm2d(dim)
@@ -42,13 +72,17 @@ class ConvBlock:
     return x
 
 class AttnBlock:
-  def __init__(self, dim:int, sideband_dim:int, dropout:float=0.0):
+  def __init__(self, dim:int, sideband_dim:int, sr_ratio:int=1, dropout:float=0.0):
     self.dropout = dropout
     self.sideband, self.sideband_dim = sideband_dim // dim, sideband_dim
+    self.sr_ratio = sr_ratio
 
     self.cpe = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim)
 
     self.tnorm = RMSNorm(dim)
+    if sr_ratio > 1:
+      self.sr = nn.Conv2d(dim, dim, sr_ratio, sr_ratio, groups=dim, bias=False)
+      self.kvnorm = RMSNorm(dim)
     self.token_mixer = Attention(dim, dim // 4, heads=2, kv_heads=1, out="proj", dropout=dropout)
     self.ls_attn_x = LayerScale2d(dim)
     self.ls_attn_sb = LayerScale(sideband_dim)
@@ -67,12 +101,17 @@ class AttnBlock:
     xx = self.cpe(x)
     x = x + xx
 
-    # concat sideband to tokens
-    xx = x.flatten(2).transpose(1, 2)
-    xx = xx.cat(sb.reshape(b, self.sideband, c), dim=1)
+    # query tokens: full-res spatial + sideband
+    q = x.flatten(2).transpose(1, 2)
+    q = self.tnorm(q.cat(sb.reshape(b, self.sideband, c), dim=1))
 
-    # run token mixer
-    xx = self.token_mixer(self.tnorm(xx))
+    # run token mixer (spatial-reduced K/V cross-attn when sr_ratio > 1, else self-attn)
+    if self.sr_ratio > 1:
+      kv = self.sr(x).flatten(2).transpose(1, 2)
+      kv = self.kvnorm(kv.cat(sb.reshape(b, self.sideband, c), dim=1))
+      xx = self.token_mixer(q, kv)
+    else:
+      xx = self.token_mixer(q)
 
     # split tokens and sideband
     xx, sbsb = xx.split([h * w, self.sideband], dim=1)
@@ -92,22 +131,18 @@ class AttnBlock:
 
     return x, sb
 
-class Downsample(FusedBlock):
+class Downsample:
   def __init__(self, cin:int, cout:int, shortcut:bool=True):
     self.cout, self.shortcut = cout, shortcut
     self.norm = RMSNorm2d(cin)
-    self.pw = nn.Conv2d(cin, cout, 1, 1, 0, bias=True)
-    self.dw3x3 = nn.Conv2d(cout, cout, 3, 2, 1, groups=cout, bias=True)
-    self.dw7x7 = nn.Conv2d(cout, cout, 7, 2, 3, groups=cout, bias=True)
+    self.pw = nn.Conv2d(cin, cout, 1, 1, 0)
+    self.token_mixer = ConvTokenMixer(cout, stride=2)
     self.ls = LayerScale2d(cout)
 
   def __call__(self, x:Tensor) -> Tensor:
     xx = self.norm(x)
     xx = self.pw(xx).gelu()
-    if not self.fused:
-      xx = (self.dw3x3(xx) + self.dw7x7(xx)).gelu()
-    else:
-      xx = self.conv(xx).gelu()
+    xx = self.token_mixer(xx).gelu()
 
     if self.shortcut:
       x = pixel_unshuffle(x, 2)
@@ -120,24 +155,6 @@ class Downsample(FusedBlock):
 
     return x
 
-  def fuse(self) -> bool:
-    if not (was_fused := super().fuse()):
-      dw7x7_w = self.dw7x7.weight
-      dw3x3_w = self.dw3x3.weight.pad((2, 2, 2, 2))
-      w = dw3x3_w + dw7x7_w
-
-      dw7x7_b = self.dw7x7.bias
-      dw3x3_b = self.dw3x3.bias
-      b = dw3x3_b + dw7x7_b
-
-      self.conv = nn.Conv2d(self.cout, self.cout, 7, 2, 3, groups=self.cout, bias=True)
-      self.conv.weight.replace(w)
-      self.conv.bias.replace(b)
-
-      del self.dw3x3
-      del self.dw7x7
-    return was_fused
-
 class ConvStage:
   def __init__(self, cin:int, cout:int, num_blocks:int, dropout:float=0.0):
     if cin != cout: self.downsample = Downsample(cin, cout)
@@ -149,9 +166,9 @@ class ConvStage:
     return x.sequential(self.blocks), sb
 
 class AttnStage:
-  def __init__(self, cin:int, cout:int, num_blocks:int, sideband_dim:int, dropout:float=0.0):
+  def __init__(self, cin:int, cout:int, num_blocks:int, sideband_dim:int, sr_ratio:int=1, dropout:float=0.0):
     if cin != cout: self.downsample = Downsample(cin, cout)
-    self.blocks = [AttnBlock(cout, sideband_dim, dropout=dropout) for _ in range(num_blocks)]
+    self.blocks = [AttnBlock(cout, sideband_dim, sr_ratio=sr_ratio, dropout=dropout) for _ in range(num_blocks)]
 
   def __call__(self, x:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
     if hasattr(self, "downsample"):
@@ -166,7 +183,7 @@ class Stem:
     assert temporal_size in (1, 2, 4, 8), "temporal_size must be one of 1, 2, 4, or 8"
     self.patch_size = patch_size
     self.temporal_size = temporal_size
-    self.conv = nn.Conv2d(temporal_size * cin * patch_size * patch_size, cout, 5, 2, 2, bias=True)
+    self.conv = nn.Conv2d(temporal_size * cin * patch_size * patch_size, cout, 5, 2, 2)
     self.norm = RMSNorm2d(cout)
 
   def __call__(self, frames:list[Tensor]) -> Tensor:
@@ -210,7 +227,7 @@ class Stem:
 
 class Backbone:
   def __init__(self, cin:int, cstage:list[int], stages:list[tuple[int, int]], sideband_dim:int,
-               patch_size:int=2, temporal_size:int=1, dropout:float=0.0):
+               sr_ratios:list[int]=[1, 1, 1, 1], patch_size:int=2, temporal_size:int=1, dropout:float=0.0):
     self.temporal_size = temporal_size
     self.stem = Stem(cin, cstage[0], patch_size=patch_size, temporal_size=temporal_size)
 
@@ -218,16 +235,16 @@ class Backbone:
 
     self.stage0 = [lambda x,sb:(x,sb), lambda x,sb:(x,sb)]
     if stages[0][0] > 0: self.stage0[0] = ConvStage(cstage[0], cstage[0], stages[0][0], dropout=dropout)
-    if stages[0][1] > 0: self.stage0[1] = AttnStage(cstage[0], cstage[0], stages[0][1], sideband_dim=sideband_dim, dropout=dropout)
+    if stages[0][1] > 0: self.stage0[1] = AttnStage(cstage[0], cstage[0], stages[0][1], sideband_dim=sideband_dim, sr_ratio=sr_ratios[0], dropout=dropout)
     self.stage1 = [lambda x,sb:(x,sb), lambda x,sb:(x,sb)]
     if stages[1][0] > 0: self.stage1[0] = ConvStage(cstage[0], cstage[1], stages[1][0], dropout=dropout)
-    if stages[1][1] > 0: self.stage1[1] = AttnStage(cstage[1], cstage[1], stages[1][1], sideband_dim=sideband_dim, dropout=dropout)
+    if stages[1][1] > 0: self.stage1[1] = AttnStage(cstage[1], cstage[1], stages[1][1], sideband_dim=sideband_dim, sr_ratio=sr_ratios[1], dropout=dropout)
     self.stage2 = [lambda x,sb:(x,sb), lambda x,sb:(x,sb)]
     if stages[2][0] > 0: self.stage2[0] = ConvStage(cstage[1], cstage[2], stages[2][0], dropout=dropout)
-    if stages[2][1] > 0: self.stage2[1] = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, dropout=dropout)
+    if stages[2][1] > 0: self.stage2[1] = AttnStage(cstage[2], cstage[2], stages[2][1], sideband_dim=sideband_dim, sr_ratio=sr_ratios[2], dropout=dropout)
     self.stage3 = [lambda x,sb:(x,sb), lambda x,sb:(x,sb)]
     if stages[3][0] > 0: self.stage3[0] = ConvStage(cstage[2], cstage[3], stages[3][0], dropout=dropout)
-    if stages[3][1] > 0: self.stage3[1] = AttnStage(cstage[2], cstage[3], stages[3][1], sideband_dim=sideband_dim, dropout=dropout)
+    if stages[3][1] > 0: self.stage3[1] = AttnStage(cstage[2], cstage[3], stages[3][1], sideband_dim=sideband_dim, sr_ratio=sr_ratios[3], dropout=dropout)
 
   def __call__(self, img:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     if img.ndim == 4: img = img.unsqueeze(0)
@@ -372,12 +389,12 @@ CLASS_WEIGHT = 1.0
 GOLSD_WEIGHT = 0.125
 
 class Model:
-  def __init__(self, dim:int=512, temporal_size:int=1, sideband_dim:int=512,
-               cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(2, 0), (2, 0), (6, 2), (0, 2)],
-               dropout:float=0.0):
+  def __init__(self, dim:int=384, temporal_size:int=1, sideband_dim:int=512,
+               cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(2, 0), (2, 0), (9, 0), (0, 3)],
+               sr_ratios:list[int]=[1, 1, 2, 1], dropout:float=0.0):
     self.temporal_size = temporal_size
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim,
-                             temporal_size=temporal_size, dropout=dropout)
+                             sr_ratios=sr_ratios, temporal_size=temporal_size, dropout=dropout)
     self.feature_tokenizer = FeatureTokenizer(cstage, sideband_dim, dim)
     self.decoder = Decoder(dim, n_layers=4, dropout=dropout)
 
