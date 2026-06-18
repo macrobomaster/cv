@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Callable, Any
-import pickle, time
+import pickle, time, math
 
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
@@ -11,13 +11,16 @@ from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
-from ...autoaim.model import Model, CLASS_DECODE_TABLE
+from ...autoaim.model import Model, CLASS_DECODE_TABLE, QUALITY_TAU, MAL_GAMMA
 from ...autoaim.common import pred, TemporalInference, MODEL_VERSION, IMG_H, IMG_W, T
 
 HALF = getenv("HALF", 0)
 BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
 FUSE = getenv("FUSE", 0)
 TARGET_COLOR = getenv("TARGET_COLOR", 1)
+
+VALID_REL_ERR = 0.10
+VALID_CONF_THRESH = math.exp(-MAL_GAMMA * VALID_REL_ERR / QUALITY_TAU)
 
 def run():
   pub = messaging.Pub(["autoaim"])
@@ -42,13 +45,8 @@ def run():
         param.replace(param.half()).realize()
 
     # warmup jit
-    fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
-    fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
-    fake_target = Tensor([TARGET_COLOR], dtype=dtypes.int32, device="PYTHON").realize()
-    for _ in range(3):
-      pred(model, fake_frames, fake_frame, fake_target)
-
-    kv_put("autoaim", model_key, pickle.dumps(pred))
+    infer = TemporalInference(pred, T=T, model=model)
+    kv_put("autoaim", model_key, pickle.dumps(infer.warmup()))
 
     logger.info("cached model built, requesting restart")
     kv_put("restart", "autoaimd", True)
@@ -87,7 +85,7 @@ def run():
       detected, color_id, number = CLASS_DECODE_TABLE[class_id]
       color_name = color_names.get(color_id, "blank")
 
-      valid = detected == 1 and confidence > 0.6
+      valid = detected == 1 and confidence > VALID_CONF_THRESH
 
       fid += 1
       pub.send("autoaim", {
