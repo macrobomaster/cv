@@ -7,8 +7,10 @@ from tinygrad.device import Device
 from tinygrad.dtype import dtypes
 from tinygrad.helpers import getenv
 
+from ..common import BASE_PATH
+
 # input image dims
-IMG_H, IMG_W = 256, 512
+IMG_H, IMG_W = 384, 768
 
 BACKBONE_STRIDE = 32
 X3_H, X3_W = IMG_H // BACKBONE_STRIDE, IMG_W // BACKBONE_STRIDE
