@@ -5,8 +5,58 @@ import serial
 
 from ..core import messaging
 from ..core.logging import logger
-from ..core.keyvalue import kv_get, kv_put
+from ..core.keyvalue import kv_put
 from .protocol import Protocol, Command, State
+
+# Firmware sign conventions, the single adapter layer between our frame and the main board.
+# Two INDEPENDENT axes of sign:
+#   GIMBAL_*_SIGN  — INBOUND IMU angle/rate → our convention. Sets de-rotation + feedback sign.
+#                    Verify open-loop: aim at a fixed plate, hand-tilt the gimbal, watch visual.py
+#                    scalars/target_y — it must stay CONSTANT. If it tracks the gimbal, flip.
+#   AIM_*_SIGN     — OUTBOUND aim_error → which way the main board physically drives the gimbal.
+#                    If the closed loop DRIFTS/runs away (vs locking on), flip this. Flipping the
+#                    feedback (GIMBAL_*) only mirrors the drift direction; flipping AIM_* stops it.
+GIMBAL_PITCH_SIGN = -1
+GIMBAL_YAW_SIGN = 1
+AIM_PITCH_SIGN = -1
+AIM_YAW_SIGN = 1
+
+COMM_RATES_HZ = {
+  "gimbal_state": 200.0,
+  "aim_error": 50.0,
+  "shoot": 20.0,
+  "chassis_velocity": 50.0,
+  "spinning": 10.0,
+  "game_running": 1.0,
+  "team_color": 0.2,
+  "robot_type": 0.2,
+}
+COMMS_RATE_WINDOW = 1.0
+
+def due(next_comm_at, comm):
+  t = time.monotonic()
+  if t < next_comm_at[comm]:
+    return False
+  next_comm_at[comm] = t + 1 / COMM_RATES_HZ[comm]
+  return True
+
+def fresh(sub, service):
+  return sub.alive[service] or sub.updated[service]
+
+def comm_msg(protocol, comm_counts, comm, command, *args):
+  comm_counts[comm] += 1
+  return protocol.msg(command, *args)
+
+def publish_comm_rates(pub, comm_counts, comm_rates, last_rate_at):
+  t = time.monotonic()
+  dt = t - last_rate_at
+  if dt < COMMS_RATE_WINDOW:
+    return last_rate_at
+  for comm in comm_rates:
+    comm_rates[comm] = comm_counts[comm] / dt
+    comm_counts[comm] = 0
+  pub.send("comms_rates", {"t": t, "rates": comm_rates.copy()})
+  return t
 
 def run():
   kv_put("watchdog", "commsd", time.monotonic())
@@ -16,64 +66,79 @@ def run():
   else:
     device = "/dev/ttyUSB0"
   logger.info(f"using device {device}")
-  port = serial.Serial(device, 115200, timeout=1)
+  port = serial.Serial(device, 921600, timeout=1)
   protocol = Protocol(port)
 
-  pub = messaging.Pub(["game_running", "team_color", "robot_type", "raw_accel", "pitch_angle"])
+  pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates"])
+  gimbal_pub = messaging.Pub(["gimbal_state"], conflate=False)
   sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "spinning"])
+  next_comm_at = {comm: 0.0 for comm in COMM_RATES_HZ}
+  comm_counts = {comm: 0 for comm in COMM_RATES_HZ}
+  comm_rates = {comm: 0.0 for comm in COMM_RATES_HZ}
+  last_rate_at = time.monotonic()
 
   while True:
     kv_put("watchdog", "commsd", time.monotonic())
 
-    sub.update()
+    sub.update(timeout=1)
+
+    if due(next_comm_at, "gimbal_state"):
+      gs = comm_msg(protocol, comm_counts, "gimbal_state", Command.GIMBAL_STATE)
+      if gs is not None:
+        pitch_angle, yaw_angle, pitch_rate, yaw_rate = gs
+        gimbal_pub.send("gimbal_state", {
+          "t_stamp": time.monotonic(),
+          "yaw_gi": GIMBAL_YAW_SIGN * yaw_angle,
+          "yaw_rate_gi": GIMBAL_YAW_SIGN * yaw_rate,
+          "pitch_gi": GIMBAL_PITCH_SIGN * pitch_angle,
+          "pitch_rate_gi": GIMBAL_PITCH_SIGN * pitch_rate,
+        })
 
     aim_error = sub["aim_error"]
     shoot = sub["shoot"]
     chassis_velocity = sub["chassis_velocity"]
 
-    if aim_error is not None:
-      if sub.updated["aim_error"]:
-        x = aim_error["x"]
-        y = aim_error["y"]
-        protocol.msg(Command.AIM_ERROR, x, y)
-      if not sub.alive["aim_error"]:
-        protocol.msg(Command.AIM_ERROR, 0.0, 0.0)
+    if aim_error is not None and due(next_comm_at, "aim_error"):
+      if fresh(sub, "aim_error"):
+        x = AIM_YAW_SIGN * aim_error["x"]
+        y = AIM_PITCH_SIGN * aim_error["y"]
+        comm_msg(protocol, comm_counts, "aim_error", Command.AIM_ERROR, x, y)
+      else:
+        comm_msg(protocol, comm_counts, "aim_error", Command.AIM_ERROR, 0.0, 0.0)
 
-    if shoot is not None:
-      if sub.updated["shoot"]:
-        protocol.msg(Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
-      if not sub.alive["shoot"]:
-        protocol.msg(Command.CONTROL_SHOOT, 0x00)
+    if shoot is not None and due(next_comm_at, "shoot"):
+      if fresh(sub, "shoot"):
+        comm_msg(protocol, comm_counts, "shoot", Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
+      else:
+        comm_msg(protocol, comm_counts, "shoot", Command.CONTROL_SHOOT, 0x00)
 
-    if chassis_velocity is not None:
-      if sub.updated["chassis_velocity"]:
+    if chassis_velocity is not None and due(next_comm_at, "chassis_velocity"):
+      if fresh(sub, "chassis_velocity"):
         x = chassis_velocity["x"]
         z = chassis_velocity["z"]
-        protocol.msg(Command.MOVE_ROBOT, x, z)
-      if not sub.alive["chassis_velocity"]:
-        protocol.msg(Command.MOVE_ROBOT, 0.0, 0.0)
+        comm_msg(protocol, comm_counts, "chassis_velocity", Command.MOVE_ROBOT, x, z)
+      else:
+        comm_msg(protocol, comm_counts, "chassis_velocity", Command.MOVE_ROBOT, 0.0, 0.0)
 
-    if sub.alive["spinning"]:
-      protocol.msg(Command.CONTROL_SPINNING, 0x00)
-    else:
-      protocol.msg(Command.CONTROL_SPINNING, 0xff)
+    if due(next_comm_at, "spinning"):
+      if fresh(sub, "spinning"):
+        comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0x00)
+      else:
+        comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0xff)
 
-    # game_running = protocol.msg(Command.CHECK_STATE, State.GAME_RUNNING.value)
-    # if game_running is not None:
-    #   pub.send("game_running", True if game_running[1] == 0x00 else False)
-    #
-    # team_color = protocol.msg(Command.CHECK_STATE, State.TEAM_COLOR.value)
-    # if team_color is not None:
-    #   pub.send("team_color", "red" if team_color[1] == 0x00 else "blue")
-    #
-    # robot_type = protocol.msg(Command.CHECK_STATE, State.ROBOT_TYPE.value)
-    # if robot_type is not None:
-    #   pub.send("robot_type", "sentry" if robot_type[1] == 0x00 else "standard")
-    #
-    # raw_accel = protocol.msg(Command.RAW_ACCEL, 0x00)
-    # if raw_accel is not None:
-    #   pub.send("raw_accel", raw_accel)
-    #
-    # pitch_angle = protocol.msg(Command.PITCH_ANGLE, 0x00)
-    # if pitch_angle is not None:
-    #   pub.send("pitch_angle", pitch_angle)
+    if due(next_comm_at, "game_running"):
+      game_running = comm_msg(protocol, comm_counts, "game_running", Command.CHECK_STATE, State.GAME_RUNNING.value)
+      if game_running is not None:
+        pub.send("game_running", True if game_running[1] == 0x00 else False)
+
+    if due(next_comm_at, "team_color"):
+      team_color = comm_msg(protocol, comm_counts, "team_color", Command.CHECK_STATE, State.TEAM_COLOR.value)
+      if team_color is not None:
+        pub.send("team_color", "red" if team_color[1] == 0x00 else "blue")
+
+    if due(next_comm_at, "robot_type"):
+      robot_type = comm_msg(protocol, comm_counts, "robot_type", Command.CHECK_STATE, State.ROBOT_TYPE.value)
+      if robot_type is not None:
+        pub.send("robot_type", "sentry" if robot_type[1] == 0x00 else "standard")
+
+    last_rate_at = publish_comm_rates(pub, comm_counts, comm_rates, last_rate_at)
