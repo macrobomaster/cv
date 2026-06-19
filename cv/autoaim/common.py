@@ -71,10 +71,12 @@ class TemporalInference:
     self.T = T
     if self.T != 1:
       self.frames = Tensor.zeros(self.T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone()
+    else:
+      self.frames = None
 
   def __call__(self, img, target_color:int=0) -> list:
     target_color_t = Tensor([target_color], dtype=dtypes.int32, device="PYTHON")
-    return self.model_fn(self.model, img, target_color_t, frames=self.frames if self.T != 1 else None).tolist()[0]
+    return self.model_fn(self.model, img, target_color_t, frames=self.frames).tolist()[0]
 
   def warmup(self):
     for _ in range(3):
