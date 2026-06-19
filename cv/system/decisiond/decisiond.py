@@ -249,7 +249,7 @@ def _latest_gimbal(gimbal_sub:messaging.Sub) -> Optional[tuple[float, float]]:
   msgs = gimbal_sub.drain("gimbal_state")
   if not msgs: return None
   last = msgs[-1]
-  return last["yaw_gi"], last["pitch_enc"]
+  return last["yaw_gi"], last["pitch_gi"]
 
 def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
@@ -257,9 +257,9 @@ def run():
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
 
   trigger = TriggerGate()
-  chassis = ChassisController()
+  # chassis = ChassisController()
 
-  yaw_gi_now, pitch_enc_now = 0.0, 0.0
+  yaw_gi_now, pitch_gi_now = 0.0, 0.0
   d_theta_prev = 0.0
   fk = FrequencyKeeper(200)
   warned_no_gimbal = False
@@ -274,7 +274,7 @@ def run():
         logger.warning("decisiond: no gimbal_state samples; using zero gimbal pose")
         warned_no_gimbal = True
     else:
-      yaw_gi_now, pitch_enc_now = gp
+      yaw_gi_now, pitch_gi_now = gp
 
     plate = sub["plate"]
     if plate is None: continue
@@ -302,7 +302,7 @@ def run():
     yaw_gi_cmd, pitch_cmd, t_arrival, target_at_arrival = sol
 
     yaw_err = wrap_pi(yaw_gi_cmd - yaw_gi_now)
-    pitch_err = pitch_cmd - pitch_enc_now
+    pitch_err = pitch_cmd - pitch_gi_now
     d_theta_prev = math.hypot(yaw_err, pitch_err)
 
     fire = trigger.evaluate(plate, yaw_err, pitch_err, t_arrival, t_now)
@@ -310,4 +310,4 @@ def run():
     pub.send("aim_error", {"x": yaw_err, "y": pitch_err})
     pub.send("aim_angle", {"x": math.degrees(yaw_gi_cmd), "y": math.degrees(pitch_cmd)})
     pub.send("shoot", fire)
-    pub.send("chassis_velocity", chassis.step(plate))
+    # pub.send("chassis_velocity", chassis.step(plate))
