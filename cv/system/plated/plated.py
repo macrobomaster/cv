@@ -9,27 +9,20 @@ import cv2
 
 from ..core import messaging
 from ..core.logging import logger
-from ...autoaim.common import R_MOUNT, T_MOUNT, CANONICAL_CAMERA_MATRIX, CANONICAL_DIST_COEFFS
+from ...autoaim.common import R_MOUNT, T_MOUNT, CANONICAL_CAMERA_MATRIX, CANONICAL_DIST_COEFFS, IMG_H, IMG_W
 
-# REAL camera calibration (checkerboard). Consumed ONLY by camerad to build the real→canonical
-# warp — NOT by PnP here. Corners arriving from autoaim are already in canonical pinhole space, so
-# PnP below uses CANONICAL_CAMERA_MATRIX with zero distortion.
-# Auto-loaded from weights/camera_calib.npz when present (written by cv/tools/calibrate.py); the
-# hardcoded values are the fallback for an un-calibrated checkout.
-_DEFAULT_REAL_CAMERA_MATRIX = np.array([[831.90808403,   0.        , 208.91197384],
-                                        [  0.        , 828.7959212 ,  45.63069367],
-                                        [  0.        ,   0.        ,   1.        ]], dtype=np.float32)
-_DEFAULT_REAL_DIST_COEFFS = np.array([[-0.1703448 ,  0.59690183,  0.00502021, -0.00725316, -1.45582172]], dtype=np.float32)
-
+# loaded camera calibration for warp
 def _load_real_calib():
   path = Path(__file__).parent.parent.parent.parent / "weights" / "camera_calib.npz"
   if path.exists():
     data = np.load(path)
     logger.info(f"loaded real camera calibration from {path}")
-    return data["mtx"].astype(np.float32), data["dist"].astype(np.float32)
-  return _DEFAULT_REAL_CAMERA_MATRIX, _DEFAULT_REAL_DIST_COEFFS
+    calib_w = int(data["image_size"][0]) if "image_size" in data.files else 512
+    return data["mtx"].astype(np.float32), data["dist"].astype(np.float32), calib_w
+  logger.warning("no weights/camera_calib.npz!")
+  return CANONICAL_CAMERA_MATRIX.copy(), CANONICAL_DIST_COEFFS.copy(), IMG_W
 
-REAL_CAMERA_MATRIX, REAL_DIST_COEFFS = _load_real_calib()
+REAL_CAMERA_MATRIX, REAL_DIST_COEFFS, REAL_CALIB_W = _load_real_calib()
 PLATE_WIDTH, PLATE_HEIGHT = 0.095, 0.104
 # Corner order matches autoaim's syndata keypoint order: TL, TR, BL, BR (image-space convention,
 # y-down; 3D y-axis is flipped vs image so TL has -y).
@@ -40,9 +33,7 @@ PLATE_POINTS = np.array([
   [ PLATE_WIDTH/2,  PLATE_HEIGHT/2, 0], # BR
 ], dtype=np.float32)
 
-IMG_W, IMG_H = 512, 256
-
-# --- Plated v2 tuning constants ---
+# --- plated tuning constants ---
 
 GIMBAL_DEQUE_MAX = 200          # ~1s at 200Hz; lets us tolerate large t_capture lag
 GIMBAL_STALE_GAP = 0.030        # s — if no bracket sample within this, flag stale
@@ -102,7 +93,7 @@ class GimbalBuffer:
     self.samples: deque = deque(maxlen=GIMBAL_DEQUE_MAX)
 
   def push(self, msg:dict):
-    self.samples.append((msg["t_stamp"], msg["yaw_gi"], msg["pitch_enc"]))
+    self.samples.append((msg["t_stamp"], msg["yaw_gi"], msg["pitch_gi"]))
 
   def interpolate(self, t:float) -> Optional[tuple[float, float, bool]]:
     if not self.samples: return None
@@ -433,6 +424,7 @@ class PlatedState:
     self.last_meta: Optional[tuple] = None
     self.handoff_until_t = 0.0
     self.consecutive_jumps = 0
+    self.last_meas: Optional[np.ndarray] = None   # most recent raw PnP measurement (pre-EKF), for viz
 
   def _retarget(self, pos_gi:np.ndarray, t:float):
     self.ekf.reset(pos_gi, t)
@@ -442,6 +434,7 @@ class PlatedState:
     self.consecutive_jumps = 0
 
   def push_measurement(self, t_capture:float, pos_gi:np.ndarray, meta:tuple, R_meas:np.ndarray):
+    self.last_meas = pos_gi   # raw measurement this frame (before any accept/reject/filter)
     if not self.ekf.initialized:
       self._retarget(pos_gi, t_capture)
       self.classifier.push(t_capture, True, pos_gi)
@@ -497,6 +490,7 @@ class PlatedState:
       "pos_gi": pos.tolist(),
       "vel_gi": vel.tolist(),
       "cov_pos": cov.tolist(),
+      "pos_meas": self.last_meas.tolist() if self.last_meas is not None else None,
       "class": cls,
       "spin": spin,
       "target_id": self.target_id,
@@ -574,15 +568,15 @@ def run():
     gp = gimbal_buf.interpolate(t_capture)
     if gp is None:
       # No gimbal_state at all — degraded mode: assume zero pose, inflate cov.
-      yaw_gi_cap, pitch_enc_cap, stale = 0.0, 0.0, True
+      yaw_gi_cap, pitch_gi_cap, stale = 0.0, 0.0, True
       if not warned_no_gimbal:
         logger.warning("plated: no gimbal_state samples; running in degraded mode")
         warned_no_gimbal = True
     else:
-      yaw_gi_cap, pitch_enc_cap, stale = gp
+      yaw_gi_cap, pitch_gi_cap, stale = gp
 
     # rotate position and the PnP covariance from camera frame into the gimbal-inertial frame
-    rot = R_yaw(yaw_gi_cap) @ R_pitch(pitch_enc_cap) @ R_MOUNT
+    rot = R_yaw(yaw_gi_cap) @ R_pitch(pitch_gi_cap) @ R_MOUNT
     pos_gi = rot @ pos_cam + T_MOUNT
     R_meas = rot @ R_cam @ rot.T * (MEAS_NOISE_STALE_MULT if stale else 1.0)
 
