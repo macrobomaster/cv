@@ -524,22 +524,22 @@ if __name__ == "__main__":
 
   with Context(DEBUG=getenv("DEBUG", 2)):
     for _ in range(3):
-      fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
+      if T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
       fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
       fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
       GlobalCounters.reset()
-      ret = pred(model, fake_frames, fake_frame, fake_target)
+      ret = pred(model, fake_frame, fake_target, frames=fake_frames if T != 1 else None)
       print(ret)
 
   # full runs
   tms = []
   for _ in range(15):
-    fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
+    if T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
     fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
     fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
     GlobalCounters.reset()
     st = time.perf_counter()
-    ret = pred(model, fake_frames, fake_frame, fake_target)
+    ret = pred(model, fake_frame, fake_target, frames=fake_frames if T != 1 else None)
     tms.append(time.perf_counter() - st)
 
   print("jit run successful")
