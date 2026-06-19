@@ -22,9 +22,10 @@ import cv2
 import numpy as np
 
 from ..system.core import messaging
+from ..autoaim.common import IMG_H, IMG_W
 
 # Must match camerad's pre-warp resize target.
-CALIB_W, CALIB_H = 512, 256
+CALIB_W, CALIB_H = IMG_W, IMG_H
 SUBPIX_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 FIND_FLAGS = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_FAST_CHECK
 COVER_COLS, COVER_ROWS = 8, 4   # frame-coverage grid; distortion needs corners near the edges
