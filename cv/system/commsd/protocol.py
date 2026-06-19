@@ -70,12 +70,11 @@ class Protocol:
         self.port.write(request_frame)
 
         response_tag = self._read(1, "response tag")
-        response_length_data = self._read(1, "response length")
-        response_length = struct.unpack("B", response_length_data)[0]
+        response_length = struct.calcsize(RESPONSE_FORMATS[command])
         response_data = self._read(response_length, "response value")
         response_crc_data = self._read(1, "response crc")
         response_crc = struct.unpack("B", response_crc_data)[0]
-        response_frame = response_tag + response_length_data + response_data
+        response_frame = response_tag + response_data
         expected_crc = crc8(response_frame)
         if response_crc != expected_crc:
           logger.warning(
@@ -89,14 +88,6 @@ class Protocol:
             f"protocol response tag mismatch command={command_str(command)} args={args} "
             f"request={hex_bytes(request_frame)} expected=0x{command.value:02x} "
             f"got=0x{response_tag[0]:02x} frame={hex_bytes(response_frame + response_crc_data)}"
-          )
-          return None
-        expected_length = struct.calcsize(RESPONSE_FORMATS[command])
-        if response_length != expected_length:
-          logger.warning(
-            f"protocol response length mismatch command={command_str(command)} args={args} "
-            f"request={hex_bytes(request_frame)} expected={expected_length} "
-            f"got={response_length} frame={hex_bytes(response_frame + response_crc_data)}"
           )
           return None
         return struct.unpack(RESPONSE_FORMATS[command], response_data)
@@ -118,8 +109,7 @@ class Protocol:
       raise ValueError(f"Invalid command: {command}")
     value = struct.pack(COMMAND_FORMATS[command], *args)
     tag = bytes([command.value])
-    length = struct.pack("B", len(value))
-    frame = tag + length + value
+    frame = tag + value
     return frame + bytes([crc8(frame)])
 
   def _read(self, length, stage):
