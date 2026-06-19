@@ -42,7 +42,9 @@ def run():
     if HALF:
       for param in get_state_dict(model).values():
         if param.ndim < 2: continue
-        param.replace(param.half()).realize()
+        param.replace(param.half())
+
+    Tensor.realize(*get_state_dict(model).values())
 
     # warmup jit
     infer = TemporalInference(pred, T=T, model=model)
@@ -54,6 +56,7 @@ def run():
 
   # load model
   logger.info(f"loading cached {model_key}")
+  logger.info(f"autoaimd backend={Device.DEFAULT} HALF={HALF} FUSE={FUSE} BEAM={BEAM} T={T}")
   model_fn: Callable[[Any, Tensor, Tensor], Tensor] = pickle.loads(kv_get("autoaim", model_key))
 
   color_names = {0: "none", 1: "red", 2: "blue"}
