@@ -80,8 +80,8 @@ class TemporalInference:
 
   def warmup(self):
     for _ in range(3):
-      if self.T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
-      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
+      if self.T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone().realize()
+      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").clone().realize()
       fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
       self.model_fn(self.model, fake_frame, fake_target, frames=fake_frames if self.T != 1 else None)
     return self.model_fn
