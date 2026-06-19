@@ -8,19 +8,6 @@ from ..core.logging import logger
 from ..core.keyvalue import kv_put
 from .protocol import Protocol, Command, State
 
-# Firmware sign conventions, the single adapter layer between our frame and the main board.
-# Two INDEPENDENT axes of sign:
-#   GIMBAL_*_SIGN  — INBOUND IMU angle/rate → our convention. Sets de-rotation + feedback sign.
-#                    Verify open-loop: aim at a fixed plate, hand-tilt the gimbal, watch visual.py
-#                    scalars/target_y — it must stay CONSTANT. If it tracks the gimbal, flip.
-#   AIM_*_SIGN     — OUTBOUND aim_error → which way the main board physically drives the gimbal.
-#                    If the closed loop DRIFTS/runs away (vs locking on), flip this. Flipping the
-#                    feedback (GIMBAL_*) only mirrors the drift direction; flipping AIM_* stops it.
-GIMBAL_PITCH_SIGN = -1
-GIMBAL_YAW_SIGN = 1
-AIM_PITCH_SIGN = -1
-AIM_YAW_SIGN = 1
-
 COMM_RATES_HZ = {
   "gimbal_state": 200.0,
   "aim_error": 50.0,
@@ -88,10 +75,10 @@ def run():
         pitch_angle, yaw_angle, pitch_rate, yaw_rate = gs
         gimbal_pub.send("gimbal_state", {
           "t_stamp": time.monotonic(),
-          "yaw_gi": GIMBAL_YAW_SIGN * yaw_angle,
-          "yaw_rate_gi": GIMBAL_YAW_SIGN * yaw_rate,
-          "pitch_gi": GIMBAL_PITCH_SIGN * pitch_angle,
-          "pitch_rate_gi": GIMBAL_PITCH_SIGN * pitch_rate,
+          "yaw_gi": yaw_angle,
+          "yaw_rate_gi": yaw_rate,
+          "pitch_gi": pitch_angle * -1,
+          "pitch_rate_gi": pitch_rate * -1,
         })
 
     aim_error = sub["aim_error"]
@@ -100,8 +87,8 @@ def run():
 
     if aim_error is not None and due(next_comm_at, "aim_error"):
       if fresh(sub, "aim_error"):
-        x = AIM_YAW_SIGN * aim_error["x"]
-        y = AIM_PITCH_SIGN * aim_error["y"]
+        x = aim_error["x"]
+        y = aim_error["y"] * -1
         comm_msg(protocol, comm_counts, "aim_error", Command.AIM_ERROR, x, y)
       else:
         comm_msg(protocol, comm_counts, "aim_error", Command.AIM_ERROR, 0.0, 0.0)
