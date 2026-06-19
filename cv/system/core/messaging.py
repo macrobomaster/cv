@@ -7,13 +7,14 @@ import cbor2
 import xxhash
 
 context = zmq.Context()
+
 def reset_context():
   global context
   context = zmq.Context()
 
 # deterministically generate a port number from the service name
 def get_port(service:str):
-  return 9000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 9000)
+  return 10000 + xxhash.xxh32(service.encode()).intdigest() % (65535 - 10000)
 
 class Pub:
   def __init__(self, services:list[str], conflate:bool=True):
@@ -29,7 +30,10 @@ class Pub:
   def send(self, service:str, data:Any):
     assert data is not None, "data cannot be None"
     assert service in self.socks, f"service {service} not in pub sockets"
-    self.socks[service].send(cbor2.dumps(data) if not service.startswith("_") else data)
+    if not service.startswith("_"):
+      self.socks[service].send(cbor2.dumps(data), copy=False)
+    else:
+      self.socks[service].send(data)
 
 class AliveChecker:
   def __init__(self, count:int=1000):
