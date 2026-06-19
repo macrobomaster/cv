@@ -77,9 +77,9 @@ class TemporalInference:
     return self.model_fn(self.model, img, target_color_t, frames=self.frames if self.T != 1 else None).tolist()[0]
 
   def warmup(self):
-    if self.T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
-    fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
-    fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
     for _ in range(3):
+      if self.T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).realize()
+      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").realize()
+      fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
       self.model_fn(self.model, fake_frame, fake_target, frames=fake_frames if self.T != 1 else None)
     return self.model_fn
