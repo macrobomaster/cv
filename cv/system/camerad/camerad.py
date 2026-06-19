@@ -6,22 +6,26 @@ from tinygrad.helpers import getenv
 
 from ..core import messaging
 from ..core.logging import logger
-from ..core.keyvalue import kv_get, kv_put
+from ..core.keyvalue import kv_put
 from ...common.image import resize_crop
-from ...common.camera import setup_aravis, get_aravis_frame, latch_timestamp_offset
-from ..plated.plated import REAL_CAMERA_MATRIX, REAL_DIST_COEFFS
+from ...common.camera import setup_aravis, get_aravis_frame_view, latch_timestamp_offset
+from ..plated.plated import REAL_CAMERA_MATRIX, REAL_DIST_COEFFS, REAL_CALIB_W
 from ...autoaim.common import CANONICAL_CAMERA_MATRIX, IMG_H, IMG_W
 
 CAPTURE_MID_EXPOSURE = 6000 / 2000000
+OPENCV_THREADS = getenv("OPENCV_THREADS", 1)
 
-def _build_undistort_maps(src_w):
+def _build_undistort_maps(src_w, src_h):
   K = REAL_CAMERA_MATRIX.copy()
-  K[:2] *= src_w / 512
+  K[:2] *= src_w / REAL_CALIB_W
   map1, map2 = cv2.initUndistortRectifyMap(K, REAL_DIST_COEFFS, None, CANONICAL_CAMERA_MATRIX, (IMG_W, IMG_H), cv2.CV_32FC1)
-  return map1, map2
+  map1 = (src_w - 1) - map1
+  map2 = (src_h - 1) - map2
+  return cv2.convertMaps(map1, map2, cv2.CV_16SC2)
 
 def run():
   gc.disable()
+  cv2.setNumThreads(OPENCV_THREADS)
   kv_put("watchdog", "camerad", time.monotonic())
 
   pub = messaging.Pub(["camera_feed"])
@@ -40,7 +44,9 @@ def run():
       logger.error("failed to setup, restarting camera")
       subprocess.run(["usbreset", "MV-CS016-10UC"])
       raise e
-    undist_map1, undist_map2 = _build_undistort_maps(cam.get_region()[2])   # native frame width
+    _, _, src_w, src_h = cam.get_region()
+    undist_map1, undist_map2 = _build_undistort_maps(src_w, src_h)
+    undist_frame = np.empty((IMG_H, IMG_W, 3), dtype=np.uint8)
 
   last_wd = time.monotonic()
   fid = 0
@@ -67,15 +73,18 @@ def run():
       t_get = t_done = time.monotonic()
     else:
       try:
-        frame, t_cap = get_aravis_frame(cam, strm, ts_hz, offset)
-        t_get = time.monotonic()
-        if frame is None: continue
-        ct = t_cap + CAPTURE_MID_EXPOSURE
-        frame = cv2.rotate(frame, cv2.ROTATE_180)
-        if raw_pub is not None:
-          raw_pub.send("camera_feed_raw", {"ct": ct, "frame": cv2.resize(frame, (IMG_W, IMG_H)).tobytes()})
-        frame = cv2.remap(frame, undist_map1, undist_map2, cv2.INTER_LINEAR)
-        t_done = time.monotonic()
+        frame, t_cap, buf = get_aravis_frame_view(cam, strm, ts_hz, offset)
+        try:
+          t_get = time.monotonic()
+          if frame is None: continue
+          ct = t_cap + CAPTURE_MID_EXPOSURE
+          if raw_pub is not None:
+            raw = cv2.rotate(frame, cv2.ROTATE_180)
+            raw_pub.send("camera_feed_raw", {"ct": ct, "frame": cv2.resize(raw, (IMG_W, IMG_H)).tobytes()})
+          frame = cv2.remap(frame, undist_map1, undist_map2, cv2.INTER_LINEAR, dst=undist_frame)
+          t_done = time.monotonic()
+        finally:
+          if buf is not None: strm.push_buffer(buf)
       except Exception as e:
         logger.error("failed to get frame, restarting camera")
         subprocess.run(["usbreset", "MV-CS016-10UC"])
