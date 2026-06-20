@@ -24,7 +24,11 @@ def due(next_comm_at, comm):
   t = time.monotonic()
   if t < next_comm_at[comm]:
     return False
-  next_comm_at[comm] = t + 1 / COMM_RATES_HZ[comm]
+  # schedule from the previous deadline so the cadence doesn't drift with loop overhead
+  next_comm_at[comm] += 1 / COMM_RATES_HZ[comm]
+  # if we fell more than a period behind, resync instead of bursting to catch up
+  if next_comm_at[comm] < t:
+    next_comm_at[comm] = t + 1 / COMM_RATES_HZ[comm]
   return True
 
 def fresh(sub, service):
@@ -63,11 +67,16 @@ def run():
   comm_counts = {comm: 0 for comm in COMM_RATES_HZ}
   comm_rates = {comm: 0.0 for comm in COMM_RATES_HZ}
   last_rate_at = time.monotonic()
+  last_wd = time.monotonic()
 
   while True:
-    kv_put("watchdog", "commsd", time.monotonic())
+    if time.monotonic() - last_wd > 1:
+      kv_put("watchdog", "commsd", time.monotonic())
+      last_wd = time.monotonic()
 
-    sub.update(timeout=1)
+    # block until the soonest comm is due, waking early on subscriber traffic
+    timeout_ms = max(0, int((min(next_comm_at.values()) - time.monotonic()) * 1000))
+    sub.update(timeout=timeout_ms)
 
     if due(next_comm_at, "gimbal_state"):
       gs = comm_msg(protocol, comm_counts, "gimbal_state", Command.GIMBAL_STATE)
