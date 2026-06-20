@@ -9,7 +9,8 @@ import cv2
 
 from ..core import messaging
 from ..core.logging import logger
-from ...autoaim.common import R_MOUNT, T_MOUNT, CANONICAL_CAMERA_MATRIX, CANONICAL_DIST_COEFFS, IMG_H, IMG_W
+from ...autoaim.common import (R_MOUNT, T_MOUNT, CANONICAL_CAMERA_MATRIX, CANONICAL_DIST_COEFFS,
+                               IMG_H, IMG_W, plate_screw_points)
 
 # loaded camera calibration for warp
 def _load_real_calib():
@@ -23,15 +24,13 @@ def _load_real_calib():
   return CANONICAL_CAMERA_MATRIX.copy(), CANONICAL_DIST_COEFFS.copy(), IMG_W
 
 REAL_CAMERA_MATRIX, REAL_DIST_COEFFS, REAL_CALIB_W = _load_real_calib()
-PLATE_WIDTH, PLATE_HEIGHT = 0.095, 0.104
-# Corner order matches autoaim's syndata keypoint order: TL, TR, BL, BR (image-space convention,
-# y-down; 3D y-axis is flipped vs image so TL has -y).
-PLATE_POINTS = np.array([
-  [-PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # TL
-  [ PLATE_WIDTH/2, -PLATE_HEIGHT/2, 0], # TR
-  [-PLATE_WIDTH/2,  PLATE_HEIGHT/2, 0], # BL
-  [ PLATE_WIDTH/2,  PLATE_HEIGHT/2, 0], # BR
-], dtype=np.float32)
+# PnP object points are the screw-hole rectangle, switched by armor number (small vs large/hero) via
+# plate_screw_points() — same geometry syndata trains on. Cached per number (only 2 distinct).
+_PLATE_POINTS_CACHE: dict = {}
+def plate_points(number:int) -> np.ndarray:
+  if number not in _PLATE_POINTS_CACHE:
+    _PLATE_POINTS_CACHE[number] = plate_screw_points(number)
+  return _PLATE_POINTS_CACHE[number]
 
 # --- plated tuning constants ---
 
@@ -498,20 +497,21 @@ class PlatedState:
 
 # --- Daemon entry point ---
 
-def _pnp(corners_2d:np.ndarray) -> Optional[np.ndarray]:
-  ok, _, tvec = cv2.solvePnP(PLATE_POINTS, corners_2d, CANONICAL_CAMERA_MATRIX,
+def _pnp(corners_2d:np.ndarray, obj_points:np.ndarray) -> Optional[np.ndarray]:
+  ok, _, tvec = cv2.solvePnP(obj_points, corners_2d, CANONICAL_CAMERA_MATRIX,
                              CANONICAL_DIST_COEFFS, flags=cv2.SOLVEPNP_IPPE)
   return tvec.flatten() if ok else None
 
 _SCALE_PX = np.array([IMG_W, IMG_H], dtype=np.float32)
 
-def _pnp_pos_cov(corners:list, c_lo:Optional[list], c_hi:Optional[list]) -> tuple[Optional[np.ndarray], np.ndarray]:
+def _pnp_pos_cov(corners:list, c_lo:Optional[list], c_hi:Optional[list], number:int) -> tuple[Optional[np.ndarray], np.ndarray]:
   """Position from the mean corners; covariance by propagating the per-corner DFL quantiles through
   PnP as DETERMINISTIC sigma points: set each coord to its q_lo / q_hi (others at the mean), PnP
   each, accumulate cov = ¼ Σ (y_hi − y_lo)(y_hi − y_lo)ᵀ. Deterministic → stable R; base floor added.
   Returns (pos_cam, cov_cam); cov falls back to the base floor if quantiles are missing."""
+  obj = plate_points(number)
   mean = np.array(corners, dtype=np.float32).reshape(4, 2) * _SCALE_PX
-  pos = _pnp(mean)
+  pos = _pnp(mean, obj)
   if pos is None or c_lo is None or c_hi is None:
     return pos, np.eye(3) * MEAS_NOISE_BASE
   lo = np.array(c_lo, dtype=np.float32).reshape(4, 2) * _SCALE_PX
@@ -521,7 +521,7 @@ def _pnp_pos_cov(corners:list, c_lo:Optional[list], c_hi:Optional[list]) -> tupl
     for c in range(2):
       pl = mean.copy(); pl[r, c] = lo[r, c]
       ph = mean.copy(); ph[r, c] = hi[r, c]
-      yl, yh = _pnp(pl), _pnp(ph)
+      yl, yh = _pnp(pl, obj), _pnp(ph, obj)
       if yl is None or yh is None: continue
       d = yh - yl
       cov += 0.25 * np.outer(d, d)
@@ -558,7 +558,8 @@ def run():
       if out is not None: pub.send("plate", out)
       continue
 
-    pos_cam, R_cam = _pnp_pos_cov(autoaim["corners"], autoaim.get("corner_lo"), autoaim.get("corner_hi"))
+    pos_cam, R_cam = _pnp_pos_cov(autoaim["corners"], autoaim.get("corner_lo"), autoaim.get("corner_hi"),
+                                  autoaim["number"])
     if pos_cam is None:
       state.push_invalid(t_capture)
       out = state.publish(time.monotonic())
@@ -575,9 +576,11 @@ def run():
     else:
       yaw_gi_cap, pitch_gi_cap, stale = gp
 
-    # rotate position and the PnP covariance from camera frame into the gimbal-inertial frame
-    rot = R_yaw(yaw_gi_cap) @ R_pitch(pitch_gi_cap) @ R_MOUNT
-    pos_gi = rot @ pos_cam + T_MOUNT
+    # camera→gimbal-inertial. T_MOUNT is the camera optical center in the gimbal-end-effector frame,
+    # so it rotates WITH the gimbal: pos_gi = G·(R_MOUNT·pos_cam + T_MOUNT). (No-op while T_MOUNT=0.)
+    G = R_yaw(yaw_gi_cap) @ R_pitch(pitch_gi_cap)
+    rot = G @ R_MOUNT
+    pos_gi = G @ (R_MOUNT @ pos_cam + T_MOUNT)
     R_meas = rot @ R_cam @ rot.T * (MEAS_NOISE_STALE_MULT if stale else 1.0)
 
     state.push_measurement(t_capture, pos_gi, meta, R_meas)

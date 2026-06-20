@@ -5,7 +5,8 @@ import albumentations as A
 import numpy as np
 
 from ...common import BASE_PATH
-from ..common import IMG_H, IMG_W, BIN_LO, BIN_HI, CANONICAL_CX, CANONICAL_CY, CANONICAL_FX_FY
+from ..common import (IMG_H, IMG_W, BIN_LO, BIN_HI, CANONICAL_CX, CANONICAL_CY, CANONICAL_FX_FY,
+                      SCREW_DIMS_SMALL, SCREW_DIMS_LARGE)
 from ...system.core.logging import logger
 
 # --- Procedural background generation ---
@@ -101,8 +102,12 @@ def _make_canonical_camera(fx=None):
                   [0, 0, 1]], dtype=np.float32)
   return cam, np.zeros((1, 5), dtype=np.float32)
 
-PLATE_WIDTH_SMALL, PLATE_HEIGHT_SMALL = 135, 125  # small armor (numbers 2-6), mm
-PLATE_WIDTH_LARGE, PLATE_HEIGHT_LARGE = 230, 127  # large armor (number 1 / hero), mm
+# Screw-hole rectangle (the keypoints), mm — from the shared source of truth in autoaim.common so
+# the training geometry can't drift from plated's PnP. The homography warps the texture AND the
+# keypoints together, so what these control is the screw-quad ASPECT RATIO the model learns (absolute
+# scale is washed out by the z-randomization). Must match plate_screw_dims() in plated's PnP.
+PLATE_WIDTH_SMALL, PLATE_HEIGHT_SMALL = SCREW_DIMS_SMALL[0]*1000, SCREW_DIMS_SMALL[1]*1000  # numbers 2-7
+PLATE_WIDTH_LARGE, PLATE_HEIGHT_LARGE = SCREW_DIMS_LARGE[0]*1000, SCREW_DIMS_LARGE[1]*1000  # number 1 / hero
 
 def plate_dims(number:int) -> tuple[float, float]:
   return (PLATE_WIDTH_LARGE, PLATE_HEIGHT_LARGE) if number == 1 else (PLATE_WIDTH_SMALL, PLATE_HEIGHT_SMALL)

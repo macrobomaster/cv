@@ -37,6 +37,16 @@ CANONICAL_CAMERA_MATRIX = np.array([[CANONICAL_FX_FY, 0, CANONICAL_CX],
                                     [0, 0, 1]], dtype=np.float32)
 CANONICAL_DIST_COEFFS = np.zeros((1, 5), dtype=np.float32)
 
+SCREW_DIMS_SMALL = (0.095, 0.10437)
+SCREW_DIMS_LARGE = (0.20875, 0.08562)
+
+def plate_screw_dims(number:int) -> tuple[float, float]:
+  return SCREW_DIMS_LARGE if number == 1 else SCREW_DIMS_SMALL
+
+def plate_screw_points(number:int) -> np.ndarray:
+  w, h = plate_screw_dims(number)
+  return np.array([[-w/2, -h/2, 0], [w/2, -h/2, 0], [-w/2, h/2, 0], [w/2, h/2, 0]], dtype=np.float32)
+
 # ballistics model
 MUZZLE_VELOCITY = 28.0   # m/s
 GRAVITY = 9.81           # m/s^2
