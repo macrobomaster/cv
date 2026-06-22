@@ -180,12 +180,12 @@ class AttnStage:
     return x, sb
 
 class Stem:
-  def __init__(self, cin:int, cout:int, patch_size:int=2, temporal_size:int=1):
+  def __init__(self, cin:int, cout:int, patch_size:int=2, temporal_size:int=1, kernel_size:int=3):
     assert patch_size in (1, 2, 4, 8), "patch_size must be one of 1, 2, 4, or 8"
     assert temporal_size in (1, 2, 4, 8), "temporal_size must be one of 1, 2, 4, or 8"
     self.patch_size = patch_size
     self.temporal_size = temporal_size
-    self.conv = nn.Conv2d(temporal_size * cin * patch_size * patch_size, cout, 5, 2, 2)
+    self.conv = nn.Conv2d(temporal_size * cin * patch_size * patch_size, cout, kernel_size, 2, kernel_size//2)
     self.norm = RMSNorm2d(cout)
 
   def __call__(self, frames:list[Tensor]) -> Tensor:
@@ -315,16 +315,15 @@ class DecoderBlock:
     self.ls_sa = LayerScale(dim)
 
     self.ca_norm_q = RMSNorm(dim)
-    self.ca_norm_kv = RMSNorm(dim)
-    self.cross_attn = Attention(dim, dim, heads=heads, kv_heads=kv_heads, out="proj", dropout=dropout)
+    self.cross_attn = Attention(dim, dim, heads=heads, kv_heads=kv_heads, out="proj", kv=False, dropout=dropout)
     self.ls_ca = LayerScale(dim)
 
     self.ffn = FFN(dim, exp=2, norm=True, bias=False, dropout=dropout)
     self.ls_ffn = LayerScale(dim)
 
-  def __call__(self, q:Tensor, mem:Tensor) -> Tensor:
+  def __call__(self, q:Tensor, kv:tuple[Tensor, Tensor]) -> Tensor:
     q = self.ls_sa(q, self.self_attn(self.sa_norm(q)))
-    q = self.ls_ca(q, self.cross_attn(self.ca_norm_q(q), self.ca_norm_kv(mem)))
+    q = self.ls_ca(q, self.cross_attn(self.ca_norm_q(q), kv))
     q = self.ls_ffn(q, self.ffn(q))
     return q
 
@@ -335,14 +334,17 @@ def bin_centers(n_bins:int) -> Tensor:
   return BIN_LO + Tensor.arange(n_bins, dtype=dtypes.float32) / (n_bins - 1) * (BIN_HI - BIN_LO)
 
 class Decoder:
-  def __init__(self, dim:int, n_layers:int=4, n_bins:int=N_BINS, dropout:float=0.0):
+  def __init__(self, dim:int, n_layers:int=4, n_bins:int=N_BINS, heads:int=4, kv_heads:int=1, dropout:float=0.0):
     self.n_bins = n_bins
     self.class_token = Tensor.randn(dim) * 0.02
     self.corner_tokens = Tensor.randn(N_CORNERS, dim) * 0.02
 
     self.target_color_embed = nn.Embedding(2, dim)
 
-    self.blocks = [DecoderBlock(dim, dropout=dropout) for _ in range(n_layers)]
+    self.ca_norm_kv = RMSNorm(dim)
+    self.kv_proj = Attention(dim, dim, heads=heads, kv_heads=kv_heads, q=False)
+
+    self.blocks = [DecoderBlock(dim, heads=heads, kv_heads=kv_heads, dropout=dropout) for _ in range(n_layers)]
     self.ln_out = RMSNorm(dim)
 
     self.class_proj = nn.Linear(dim, NUM_CLASSES, bias=False)
@@ -353,6 +355,8 @@ class Decoder:
     # target_color: (B,) int32. Returns (class_logits, [cum_logits per layer]) - accumulated corner logits.
     B, _, D = mem.shape
 
+    kv = self.kv_proj.kv_cache(self.ca_norm_kv(mem))
+
     target_tok = self.target_color_embed(target_color).reshape(B, 1, D)  # (B, 1, D)
     class_tok = self.class_token.reshape(1, 1, D).expand(B, 1, D)
     corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)
@@ -361,7 +365,7 @@ class Decoder:
     # fdr like thingy
     cum, cum_layers, qn = None, [], None
     for block in self.blocks:
-      q = block(q, mem)
+      q = block(q, kv)
       qn = self.ln_out(q)
       ct = qn[:, 2:2 + N_CORNERS, :]  # (B, 4, D)
       cum = self.corner_mlp(ct) if cum is None else cum + self.corner_mlp(ct)
