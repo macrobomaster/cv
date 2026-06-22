@@ -21,11 +21,11 @@ from .common import T, IMG_H, IMG_W
 GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
 BS = 128 * len(GPUS)
 WARMUP_STEPS = 100
-WARMPUP_LR = 1e-7
-ADAMW_START_LR = 3e-4 * math.sqrt(BS / 256)
-ADAMW_END_LR = 1e-5
-MUON_START_LR = 3e-3 * math.sqrt(BS / 256)
-MUON_END_LR = 1e-4
+WARMPUP_LR = 1e-6
+ADAMW_START_LR = 1e-3 * math.sqrt(BS / 256)
+ADAMW_END_LR = 1e-4
+MUON_START_LR = 1e-2 * math.sqrt(BS / 256)
+MUON_END_LR = 1e-3
 EPOCHS = 100
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
@@ -55,7 +55,7 @@ def run():
   state_dict = get_state_dict(model)
   for _, x in state_dict.items(): x.to_(GPUS)
 
-  _NODECAY_KW = ("norm", "gamma", "beta", "bias", "ls", "corner_tokens", "pos_emb", "embed")
+  _NODECAY_KW = ("norm", "gamma", "beta", "bias", "ls", "corner_tokens", "pos_emb", "embed", "level")
   _DECAY_PATHS = ("backbone.stem.conv", "decoder.class_proj", "decoder.corner_mlp.out")
   def _classify(name, p):
     if p.ndim < 2 or any(k in name for k in _NODECAY_KW): return "nodecay"
@@ -101,9 +101,9 @@ def run():
 
   @TinyJit
   def train_step(x, y):
-    total, class_l, l1_l, dfl_l, lsd_l = model(x, y)
+    total, class_l, l1_l, dfl_l, lsd_l, geom_l = model(x, y)
     total.backward()
-    loss_cpu = Tensor.stack(total, class_l, l1_l, dfl_l, lsd_l).float().to("CPU")
+    loss_cpu = Tensor.stack(total, class_l, l1_l, dfl_l, lsd_l, geom_l).float().to("CPU")
     return loss_cpu.realize(*grads)
 
   @TinyJit
@@ -140,14 +140,14 @@ def run():
       except StopIteration: next_d = None
       dt = time.perf_counter()
 
-      total_loss, class_loss, l1_loss, dfl_loss, lsd_loss = loss.tolist()
+      total_loss, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss = loss.tolist()
       muon_lr, adamw_lr, grad_norm, = map(lambda x: x.item(), ret)
       at = time.perf_counter()
 
       logger.info(
         f"{epoch:3} {i:5}/{STEPS_PER_EPOCH} {((at - st)) * 1000.0:7.2f} ms step, "
         f"{(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms data, {(at - dt) * 1000.0:7.2f} ms accel, "
-        f"{total_loss:9.4f} loss (cls {class_loss:.4f} | l1 {l1_loss:.4f} | dfl {dfl_loss:.4f} | lsd {lsd_loss:.4f}), "
+        f"{total_loss:9.4f} loss (cls {class_loss:.4f} | l1 {l1_loss:.4f} | dfl {dfl_loss:.4f} | lsd {lsd_loss:.4f} | geom {geom_loss:.4f}), "
         f"{grad_norm:9.4f} grad_norm, {muon_lr:.6f} muon_lr, {adamw_lr:.6f} adamw_lr, "
         f"{GlobalCounters.mem_used / 1e9:7.2f} GB used, {GlobalCounters.mem_used * 1e-9 / (at - st):9.2f} GB/s, "
         f"{GlobalCounters.global_ops * 1e-9 / (at - st):9.2f} GFLOPS"
@@ -157,7 +157,7 @@ def run():
         wandb.log({
           "epoch": epoch + (i + 1) / STEPS_PER_EPOCH,
           "step_time": at - st, "python_time": pt - st, "data_time": dt - pt, "accel_time": at - dt,
-          "loss": total_loss, "class_loss": class_loss, "l1_loss": l1_loss, "dfl_loss": dfl_loss, "lsd_loss": lsd_loss,
+          "loss": total_loss, "class_loss": class_loss, "l1_loss": l1_loss, "dfl_loss": dfl_loss, "lsd_loss": lsd_loss, "geom_loss": geom_loss,
           "grad_norm": grad_norm, "muon_lr": muon_lr, "adamw_lr": adamw_lr,
           "gb": GlobalCounters.mem_used / 1e9, "gbps": GlobalCounters.mem_used * 1e-9 / (at - st),
           "gflops": GlobalCounters.global_ops * 1e-9 / (at - st)

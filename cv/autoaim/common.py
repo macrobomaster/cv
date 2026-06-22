@@ -15,7 +15,6 @@ IMG_H, IMG_W = 384, 768
 BACKBONE_STRIDE = 32
 X3_H, X3_W = IMG_H // BACKBONE_STRIDE, IMG_W // BACKBONE_STRIDE
 N_X3_TOKENS = X3_H * X3_W
-N_FEAT_TOKENS = N_X3_TOKENS + 1
 
 X2_STRIDE = 16
 X2_H, X2_W = IMG_H // X2_STRIDE, IMG_W // X2_STRIDE
@@ -72,8 +71,8 @@ def pred(model, frame, target_color, frames:Tensor|None=None):
     frames.assign(Tensor.cat(frames[1:], frame.unsqueeze(0))).realize()
 
   target_color = target_color.to(Device.DEFAULT)
-  tokens = model.encode(frames.unsqueeze(0))
-  return model.corner_predict(tokens, target_color).float().to("CPU")
+  mem, sb = model.encode(frames.unsqueeze(0))
+  return model.corner_predict(mem, sb, target_color).float().to("CPU")
 
 class TemporalInference:
   def __init__(self, model_fn, T:int, model=None):

@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 from tinygrad import nn
 from tinygrad.dtype import dtypes
 from tinygrad.tensor import Tensor
@@ -9,10 +10,10 @@ from ..common.nn import Attention, FFN, MLP, LayerScale, LayerScale2d
 from ..common.nn.fuse import FusedBlock
 from ..common.nn.norm import GRN, RMSNorm, RMSNorm2d
 from ..common.losses import mal_loss
-from .common import IMG_H, IMG_W, N_X2_TOKENS, N_X3_TOKENS, N_FEAT_TOKENS, T, BIN_LO, BIN_HI
+from .common import IMG_H, IMG_W, N_X2_TOKENS, N_X3_TOKENS, X2_H, X2_W, X3_H, X3_W, T, BIN_LO, BIN_HI, CANONICAL_CAMERA_MATRIX
 
 class ChannelMixer:
-  def __init__(self, cin:int, cout:int=0, exp:int=3):
+  def __init__(self, cin:int, cout:int=0, exp:int=2):
     if cout == 0: cout = cin
     self.up = nn.Conv2d(cin, cin * exp, 1, 1, 0, bias=False)
     self.grn = GRN(cin * exp)
@@ -44,8 +45,8 @@ class ConvTokenMixer(FusedBlock):
       b = dw3x3_b + dw7x7_b
 
       self.conv = nn.Conv2d(self.dim, self.dim, 7, self.stride, 3, groups=self.dim)
-      self.conv.weight.replace(w)
-      self.conv.bias.replace(b)
+      self.conv.weight.replace(w.realize())
+      self.conv.bias.replace(b.realize())
 
       del self.dw3x3
       del self.dw7x7
@@ -269,27 +270,43 @@ class Backbone:
 
     return x0, x1, x2, x3, sb
 
+def coord_grid(h:int, w:int) -> Tensor:
+  u = (Tensor.arange(w, dtype=dtypes.float32) + 0.5) / w
+  v = (Tensor.arange(h, dtype=dtypes.float32) + 0.5) / h
+  grid = Tensor.stack(u.reshape(1, w).expand(h, w), v.reshape(h, 1).expand(h, w), dim=-1)  # (h,w,2)
+  return grid.reshape(h * w, 2).is_param_(False)
+
+class LearnedFourierPosEmb:
+  def __init__(self, dim:int, pos_dim:int=2, f_dim:int=0, hidden:int=32):
+    if f_dim == 0: f_dim = dim
+    self.scale = 1.0 / math.sqrt(f_dim)
+    self.freqs = nn.Linear(pos_dim, f_dim // 2, bias=False)
+    self.mlp = MLP(f_dim, dim, hidden, blocks=0)
+
+  def __call__(self, coords:Tensor) -> Tensor:
+    r = self.freqs(coords)
+    return self.mlp(Tensor.cat(r.cos(), r.sin(), dim=-1) * self.scale)
+
 class FeatureTokenizer:
   def __init__(self, cstage:list[int], sideband_dim:int, dim:int):
     self.norm_x2 = RMSNorm(cstage[2])
     self.proj_x2 = nn.Linear(cstage[2], dim, bias=False)
-    self.x2_pos_emb = Tensor.randn(N_X2_TOKENS, dim) * 0.02
-
     self.norm_x3 = RMSNorm(cstage[3])
     self.proj_x3 = nn.Linear(cstage[3], dim, bias=False)
-    self.x3_pos_emb = Tensor.randn(N_X3_TOKENS, dim) * 0.02
-
     self.norm_sb = RMSNorm(sideband_dim)
     self.proj_sb = nn.Linear(sideband_dim, dim, bias=False)
+    self.pos_emb = LearnedFourierPosEmb(dim)
+    self.coords = Tensor.cat(coord_grid(X3_H, X3_W), coord_grid(X2_H, X2_W), dim=0).is_param_(False)  # [x3 ; x2]
+    self.level = Tensor.randn(2, dim) * 0.02  # [x3, x2]
 
   def __call__(self, x2:Tensor, x3:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
-    fine_tokens = self.proj_x2(self.norm_x2(x2.flatten(2).transpose(1, 2))) + self.x2_pos_emb
-
-    x3_tokens = self.proj_x3(self.norm_x3(x3.flatten(2).transpose(1, 2))) + self.x3_pos_emb
-    sb_token = self.proj_sb(self.norm_sb(sb)).unsqueeze(1)
-    feat_tokens = Tensor.cat(x3_tokens, sb_token, dim=1)
-
-    return feat_tokens, fine_tokens
+    pos = self.pos_emb(self.coords)
+    x3_pos, x2_pos = pos[:N_X3_TOKENS], pos[N_X3_TOKENS:]
+    x2_tokens = self.proj_x2(self.norm_x2(x2.flatten(2).transpose(1, 2))) + x2_pos + self.level[1]
+    x3_tokens = self.proj_x3(self.norm_x3(x3.flatten(2).transpose(1, 2))) + x3_pos + self.level[0]
+    sb_token = self.proj_sb(self.norm_sb(sb)).unsqueeze(1)  # global register -> decoder query, not memory
+    mem = Tensor.cat(x3_tokens.contiguous(), x2_tokens.contiguous(), dim=1)  # [x3 ; x2] = 1440 (GPU-friendly)
+    return mem, sb_token
 
 class DecoderBlock:
   def __init__(self, dim:int, heads:int=4, kv_heads:int=1, dropout:float=0.0):
@@ -320,7 +337,6 @@ def bin_centers(n_bins:int) -> Tensor:
 class Decoder:
   def __init__(self, dim:int, n_layers:int=4, n_bins:int=N_BINS, dropout:float=0.0):
     self.n_bins = n_bins
-    self.pos_emb = Tensor.randn(N_FEAT_TOKENS, dim) * 0.02
     self.class_token = Tensor.randn(dim) * 0.02
     self.corner_tokens = Tensor.randn(N_CORNERS, dim) * 0.02
 
@@ -332,18 +348,15 @@ class Decoder:
     self.class_proj = nn.Linear(dim, NUM_CLASSES, bias=False)
     self.corner_mlp = MLP(dim, 2 * n_bins, dim // 2, blocks=1)  # shared residual head over absolute bins
 
-  def __call__(self, feat_tokens:Tensor, fine_tokens:Tensor, target_color:Tensor) -> tuple[Tensor, list]:
-    # feat_tokens: (B, N_FEAT_TOKENS, D) - coarse /32 (+sb); fine_tokens: (B, N_X2_TOKENS, D) - fine /16
+  def __call__(self, mem:Tensor, sb:Tensor, target_color:Tensor) -> tuple[Tensor, list]:
+    # mem: (B, N_X3_TOKENS+N_X2_TOKENS, D) spatial memory [x3 ; x2]; sb: (B, 1, D) global token (last query)
     # target_color: (B,) int32. Returns (class_logits, [cum_logits per layer]) - accumulated corner logits.
-    B, _, D = feat_tokens.shape
-
-    feat_tokens = feat_tokens + self.pos_emb.reshape(1, N_FEAT_TOKENS, D).expand(B, -1, -1)
-    mem = feat_tokens.cat(fine_tokens, dim=1)  # (B, N_FEAT+N_X2, D)
+    B, _, D = mem.shape
 
     target_tok = self.target_color_embed(target_color).reshape(B, 1, D)  # (B, 1, D)
     class_tok = self.class_token.reshape(1, 1, D).expand(B, 1, D)
     corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)
-    q = target_tok.cat(class_tok, corner_toks, dim=1)  # (B, 2+N_CORNERS, D)
+    q = target_tok.cat(class_tok, corner_toks, sb, dim=1)  # (B, 2+N_CORNERS+1, D) — sb (global register) last
 
     # fdr like thingy
     cum, cum_layers, qn = None, [], None
@@ -391,31 +404,53 @@ GOLSD_WEIGHT = 0.125
 QUALITY_TAU = 0.4
 MAL_GAMMA = 2
 MIN_PLATE_SCALE = 0.02
+GEOM_WEIGHT = 0.1
+
+# image of the absolute conic ω = (KKᵀ)⁻¹ in canonical pixel coords; a rectangle's two 3D edge
+# directions are orthogonal, so their image vanishing points satisfy v_hᵀ ω v_v = 0.
+_OMEGA = Tensor(np.linalg.inv(CANONICAL_CAMERA_MATRIX @ CANONICAL_CAMERA_MATRIX.T).astype(np.float32))
+
+def _cross(a:Tensor, b:Tensor) -> Tensor:  # batched 3-vector cross product, (...,3)
+  ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
+  bx, by, bz = b[..., 0], b[..., 1], b[..., 2]
+  return Tensor.stack(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx, dim=-1)
+
+def vp_orthogonality_loss(corners:Tensor) -> Tensor:
+  # corners: (B, 4, 2) predicted, normalized image coords, order TL, TR, BL, BR. Returns per-sample (B,).
+  # Penalizes the squared ω-cosine between the horizontal- and vertical-edge vanishing points, which is
+  # 0 exactly when the quad is the perspective image of a right-angled (rectangular) plate.
+  B = corners.shape[0]
+  pts = (corners * Tensor([IMG_W, IMG_H], dtype=corners.dtype)).cat(Tensor.ones(B, N_CORNERS, 1, dtype=corners.dtype), dim=-1)
+  tl, tr, bl, br = pts[:, 0], pts[:, 1], pts[:, 2], pts[:, 3]
+  v_h = _cross(_cross(tl, tr), _cross(bl, br))  # horizontal edges' vanishing point
+  v_v = _cross(_cross(tl, bl), _cross(tr, br))  # vertical edges' vanishing point
+  def q(a, b): return ((a @ _OMEGA) * b).sum(-1)
+  cos = q(v_h, v_v) / (q(v_h, v_h) * q(v_v, v_v)).sqrt().add(1e-9)
+  return cos * cos
 
 class Model:
-  def __init__(self, dim:int=384, temporal_size:int=1, sideband_dim:int=512,
-               cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(2, 0), (2, 0), (9, 0), (0, 3)],
+  def __init__(self, dim:int=192, temporal_size:int=1, sideband_dim:int=512,
+               cstage:list[int]=[32, 64, 128, 256], stages:list[tuple[int, int]]=[(1, 0), (2, 0), (6, 0), (0, 2)],
                sr_ratios:list[int]=[1, 1, 2, 1], dropout:float=0.0):
     self.temporal_size = temporal_size
     self.backbone = Backbone(cin=3, cstage=cstage, stages=stages, sideband_dim=sideband_dim,
                              sr_ratios=sr_ratios, temporal_size=temporal_size, dropout=dropout)
     self.feature_tokenizer = FeatureTokenizer(cstage, sideband_dim, dim)
-    self.decoder = Decoder(dim, n_layers=4, dropout=dropout)
+    self.decoder = Decoder(dim, n_layers=3, dropout=dropout)
 
   def encode(self, img:Tensor) -> tuple[Tensor, Tensor]:
     x0, x1, x2, x3, sb = self.backbone(img)
     return self.feature_tokenizer(x2, x3, sb)
 
-  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     # img: (B, T, IMG_H, IMG_W, 3)
-    # Returns (total_loss, class_loss, l1_loss, dfl_loss, lsd_loss).
+    # Returns (total_loss, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss).
     assert Tensor.training
-    tokens = self.encode(img)  # (feat_tokens, fine_tokens)
-    return self.corner_loss(tokens, y)
+    mem, sb = self.encode(img)
+    return self.corner_loss(mem, sb, y)
 
-  def corner_loss(self, tokens:tuple[Tensor, Tensor], y:Tensor) -> Tensor:
-    feat_tokens, fine_tokens = tokens
-    B = feat_tokens.shape[0]
+  def corner_loss(self, mem:Tensor, sb:Tensor, y:Tensor) -> Tensor:
+    B = mem.shape[0]
     N = self.decoder.n_bins
 
     # y: [class_id, c1x,c1y,c2x,c2y,c3x,c3y,c4x,c4y, has_class, has_corners, target_color]
@@ -425,7 +460,7 @@ class Model:
     has_corners = y[:, 10]
     target_color = y[:, 11].cast(dtypes.int32)
 
-    class_logits, cum_layers = self.decoder(feat_tokens, fine_tokens, target_color)
+    class_logits, cum_layers = self.decoder(mem, sb, target_color)
 
     denom = has_corners.sum().add(1e-6)
     centers = bin_centers(N)
@@ -467,15 +502,17 @@ class Model:
       lsd_loss += (has_corners * lsd_i).sum() / denom
     lsd_loss = lsd_loss / max(1, len(cum_layers) - 1)
 
-    total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss + GOLSD_WEIGHT * lsd_loss
-    return total, class_loss, l1_loss, dfl_loss, lsd_loss
+    # geometric prior — final-layer corners should be the perspective image of a rectangle (vp-orthogonality)
+    geom_loss = (has_corners * vp_orthogonality_loss(expected)).sum() / denom
 
-  def corner_predict(self, tokens:tuple[Tensor, Tensor], target_color:Tensor) -> Tensor:
-    feat_tokens, fine_tokens = tokens
-    B = feat_tokens.shape[0]
+    total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss + GOLSD_WEIGHT * lsd_loss + GEOM_WEIGHT * geom_loss
+    return total, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss
+
+  def corner_predict(self, mem:Tensor, sb:Tensor, target_color:Tensor) -> Tensor:
+    B = mem.shape[0]
     N = self.decoder.n_bins
 
-    class_logits, cum_layers = self.decoder(feat_tokens, fine_tokens, target_color)
+    class_logits, cum_layers = self.decoder(mem, sb, target_color)
 
     class_probs = class_logits.cast(dtypes.float32).sigmoid()  # one-vs-all; max = quality-aware confidence
     class_id = class_probs.argmax(-1, keepdim=True).cast(dtypes.default_float)
@@ -513,7 +550,7 @@ class Model:
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
   from tinygrad.helpers import GlobalCounters, getenv, Context
-  from .common import pred
+  from .common import pred, TemporalInference
   import time
 
   if getenv("HALF"):
@@ -521,25 +558,20 @@ if __name__ == "__main__":
 
   model = Model(temporal_size=T)
   if getenv("FUSE"): model.fuse()
+  infer = TemporalInference(pred, T=T, model=model)
 
   with Context(DEBUG=getenv("DEBUG", 2)):
-    for _ in range(3):
-      if T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone().realize()
-      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").clone().realize()
-      fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
-      GlobalCounters.reset()
-      ret = pred(model, fake_frame, fake_target, frames=fake_frames if T != 1 else None)
-      print(ret)
+    model_fn = infer.warmup()
+
+  infer = TemporalInference(model_fn, T=T)
 
   # full runs
   tms = []
   for _ in range(15):
-    if T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone().realize()
     fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").clone().realize()
-    fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
     GlobalCounters.reset()
     st = time.perf_counter()
-    ret = pred(model, fake_frame, fake_target, frames=fake_frames if T != 1 else None).tolist()
+    ret = infer(fake_frame, 0)
     tms.append(time.perf_counter() - st)
 
   print("jit run successful")
