@@ -21,7 +21,7 @@ class Attention:
   """
   Cross and Self Attention with qk-norm, gqa, xsa, and configurable output modulation
   """
-  def __init__(self, dim:int, qk_dim:int, heads:int, kv_heads:int=0, out:Literal["proj", "mod"]|None="proj", dropout:float=0.0):
+  def __init__(self, dim:int, qk_dim:int, heads:int, kv_heads:int=0, out:Literal["proj", "mod"]|None="proj", dropout:float=0.0, q:bool=True, kv:bool=True):
     if kv_heads == 0: kv_heads = heads
     assert qk_dim % heads == 0, "qk_dim must be divisible by heads"
     assert out in ["proj", "mod", None], "out must be one of 'proj', 'mod', or None"
@@ -30,34 +30,37 @@ class Attention:
 
     self.dim, self.qk_dim, self.heads, self.kv_heads = dim, qk_dim, heads, kv_heads
     self.head_dim, self.value_dim = qk_dim // heads, dim // heads
-    self.q = nn.Linear(dim, qk_dim, bias=False)
-    self.kv = nn.Linear(dim, self.kv_heads * (self.head_dim + self.value_dim), bias=False)
-
-    self.q_norm = RMSNorm(self.head_dim)
-    self.k_norm = RMSNorm(self.head_dim)
-
     self.out = out
-    match out:
-      case "proj":
-        self.proj = nn.Linear(dim, dim, bias=False)
-      case "mod":
-        self.gate = nn.Linear(dim, dim, bias=False)
-        self.proj = nn.Linear(dim, dim, bias=False)
 
-  def __call__(self, x:Tensor, kv:Tensor|None=None) -> Tensor:
+    if q:
+      self.q = nn.Linear(dim, qk_dim, bias=False)
+      self.q_norm = RMSNorm(self.head_dim)
+      match out:
+        case "proj":
+          self.proj = nn.Linear(dim, dim, bias=False)
+        case "mod":
+          self.gate = nn.Linear(dim, dim, bias=False)
+          self.proj = nn.Linear(dim, dim, bias=False)
+    if kv:
+      self.kv = nn.Linear(dim, self.kv_heads * (self.head_dim + self.value_dim), bias=False)
+      self.k_norm = RMSNorm(self.head_dim)
+
+  def kv_cache(self, x:Tensor) -> tuple[Tensor, Tensor]:
+    b, kvt, _ = x.shape
+    k, v = self.kv(x).split([self.kv_heads * self.head_dim, self.kv_heads * self.value_dim], dim=-1)
+    k = self.k_norm(k.reshape(b, kvt, self.kv_heads, self.head_dim)).transpose(1, 2)
+    v = v.reshape(b, kvt, self.kv_heads, self.value_dim).transpose(1, 2)
+    return k, v
+
+  def __call__(self, x:Tensor, kv:Tensor|tuple[Tensor, Tensor]|None=None) -> Tensor:
     b, t, c = x.shape
-    if kv is not None: kvt = kv.shape[1]
-    else: kvt = t
 
     # q, k, v
-    q = self.q(x)
-    k, v = self.kv(x if kv is None else kv).split([self.kv_heads * self.head_dim, self.kv_heads * self.value_dim], dim=-1)
-    q = self.q_norm(q.reshape(b, t, self.heads, self.head_dim))
-    k = self.k_norm(k.reshape(b, kvt, self.kv_heads, self.head_dim))
-    v = v.reshape(b, kvt, self.kv_heads, self.value_dim)
+    q = self.q_norm(self.q(x).reshape(b, t, self.heads, self.head_dim)).transpose(1, 2)
+    k, v = kv if isinstance(kv, tuple) else self.kv_cache(x if kv is None else kv)
+    kvt = k.shape[2]
 
     # sdpa
-    q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
     attn = q.scaled_dot_product_attention(k, v, enable_gqa=True, dropout_p=self.dropout)
 
     # xsa
