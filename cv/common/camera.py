@@ -22,9 +22,13 @@ def setup_aravis():
   dev.set_string_feature_value("UserSetSelector", "Default")
   dev.execute_command("UserSetLoad")
   dev.set_string_feature_value("DeviceLinkThroughputLimitMode", "Off")
-  dev.set_string_feature_value("ADCBitDepth", "ADCBitDepth_12")
+  try:
+    dev.set_string_feature_value("ADCBitDepth", "ADCBitDepth_12")
+  except: pass
   cam.set_pixel_format_from_string("RGB8Packed")
-  dev.set_boolean_feature_value("SuperBayerEnable", True)
+  try:
+    dev.set_boolean_feature_value("SuperBayerEnable", True)
+  except: pass
   cam.set_binning(2, 2)
   bw, bh = 1440 // 2, 1080 // 2
   ch = bw // 2
