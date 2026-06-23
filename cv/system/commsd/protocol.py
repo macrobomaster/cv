@@ -67,6 +67,8 @@ class Protocol:
     failures = []
     for attempt in range(1, PROTOCOL_RETRIES + 1):
       try:
+        # synchronous protocol: drop stale/desync bytes before each exchange
+        self.port.reset_input_buffer()
         self.port.write(request_frame)
 
         response_tag = self._read(1, "response tag")
@@ -99,9 +101,6 @@ class Protocol:
         logger.debug(f"protocol read timeout command={command_str(command)} args={args} request={hex_bytes(request_frame)} attempt={attempt}: {e}")
 
     # if we failed 3 times, we probably timed out
-    # flush the input buffer to prevent desync
-    self.port.reset_input_buffer()
-
     logger.error(f"protocol timed out command={command_str(command)} args={args} request={hex_bytes(request_frame)}; {'; '.join(failures)}")
 
   def _frame(self, command, *args):
