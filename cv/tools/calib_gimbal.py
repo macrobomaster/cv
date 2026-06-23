@@ -65,6 +65,7 @@ def aggregate(results):
   return {
     "delta_input": (float(onsets.mean()), float(onsets.std())),
     "omega_max": float(peaks.max()), "omega_reached": reached,
+    "k_joystick": ref,   # rad/s per aim_error unit (linear-region slope) → decisiond K_JOYSTICK
     "tau": (float(np.mean(unsat_taus)), float(np.std(unsat_taus))) if unsat_taus else None,
     "n_settle": sum(r["settle"] for r in results), "n": len(results), "n_saturated": int(saturated.sum()),
   }
@@ -140,6 +141,7 @@ def main():
     print(f"GIMBAL_TAU (first-order settle): {tau*1000:.1f} ± {taus*1000:.1f} ms  (from unsaturated pulses)")
   else:
     print("GIMBAL_TAU: n/a — no unsaturated settle; add smaller --amps")
+  print(f"K_JOYSTICK (rad/s per aim_error unit): {agg['k_joystick']:.2f}  → decisiond K_JOYSTICK / AIM_KP")
   print(f"response: {agg['n_settle']}/{agg['n']} pulses SETTLE → "
         + ("POSITION servo (aim_error is a position error — decisiond is correct)"
            if agg["n_settle"] > agg["n"]//2

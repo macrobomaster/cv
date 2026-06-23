@@ -56,6 +56,17 @@ DELTA_TRIGGER = 0.060    # s, flywheel delay
 GIMBAL_TAU = 0.040       # s, gimbal first-order motor constant.
 GIMBAL_OMEGA_MAX = 12.0  # rad/s, gimbal slew rate ceiling.
 
+# Gimbal tracking control (decisiond). aim_error is a RATE/joystick command:
+# gimbal_velocity = K_JOYSTICK * aim_error. The controller commands the velocity needed to follow
+# the moving aim point: velocity feedforward + PID on the angular position error, then / K_JOYSTICK.
+K_JOYSTICK = 10.0        # rad/s per aim_error unit. TODO: calibrate (calib_gimbal: peak_rate/amp).
+AIM_KP = 10.0            # 1/s. ≈ K_JOYSTICK reproduces the old proportional behavior at zero feedforward
+AIM_KI = 0.0            # leave 0; raise only if a persistent offset remains
+AIM_KD = 0.0            # leave 0; raise only if oscillation appears
+AIM_I_CLAMP = 2.0       # rad/s, anti-windup ceiling on the integral's velocity contribution
+AIM_FF_DT = 0.010       # s, forward finite-difference step for the velocity feedforward
+AIM_D_TAU = 0.020       # s, low-pass time constant on the derivative term
+
 # camera frame to gimbal frame
 R_MOUNT = np.array([[0,  0,  1],
                     [0, -1,  0],

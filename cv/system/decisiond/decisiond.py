@@ -12,6 +12,7 @@ from ..core.helpers import FrequencyKeeper
 from ...autoaim.common import (
   MUZZLE_VELOCITY, GRAVITY,
   DELTA_INPUT, DELTA_TRIGGER, GIMBAL_TAU, GIMBAL_OMEGA_MAX,
+  K_JOYSTICK, AIM_KP, AIM_KI, AIM_KD, AIM_I_CLAMP, AIM_FF_DT, AIM_D_TAU,
 )
 
 # Chassis
@@ -243,13 +244,45 @@ class ChassisController:
       cv["z"] = math.copysign(min(CHASE_SPEED, abs(yaw_to_target) / math.radians(5)), yaw_to_target)
     return cv
 
+# --- Gimbal tracking controller (rate/joystick output) ---
+
+class AxisPID:
+  """Velocity feedforward + PID on the angular position error → aim_error (a rate command, divided
+  by K_JOYSTICK). With KI=KD=0 this is feedforward + P. omega_ff carries the aim-point motion so the
+  loop tracks moving targets without the steady-state lag a pure position controller leaves.
+
+  The derivative is computed as the ERROR rate from clean signals — d(θ_err)/dt = θ̇_target − θ̇_gimbal
+  = omega_ff − gimbal_rate — not by differencing the noisy position error, then low-pass filtered.
+  That's kick-free (a retarget step in θ_target never spikes it) and ~0 during good tracking."""
+  def __init__(self, kp, ki, kd, k_joystick, i_clamp, d_tau):
+    self.kp, self.ki, self.kd, self.kj, self.i_clamp, self.d_tau = kp, ki, kd, k_joystick, i_clamp, d_tau
+    self.reset()
+
+  def reset(self):
+    self.integ = 0.0
+    self.d_filt = 0.0
+
+  def update(self, err:float, omega_ff:float, gimbal_rate:float, dt:float) -> float:
+    if dt > 0:
+      self.integ += err * dt
+      if self.ki > 0:  # clamp the integral's velocity contribution (anti-windup)
+        lim = self.i_clamp / self.ki
+        self.integ = max(-lim, min(lim, self.integ))
+    d_err = omega_ff - gimbal_rate                          # error derivative from clean signals
+    if dt > 0 and self.d_tau > 0:
+      self.d_filt += (dt / (self.d_tau + dt)) * (d_err - self.d_filt)
+    else:
+      self.d_filt = d_err
+    omega_des = omega_ff + self.kp * err + self.ki * self.integ + self.kd * self.d_filt
+    return omega_des / self.kj
+
 # --- Daemon entry point ---
 
-def _latest_gimbal(gimbal_sub:messaging.Sub) -> Optional[tuple[float, float]]:
+def _latest_gimbal(gimbal_sub:messaging.Sub) -> Optional[tuple[float, float, float, float]]:
   msgs = gimbal_sub.drain("gimbal_state")
   if not msgs: return None
   last = msgs[-1]
-  return last["yaw_gi"], last["pitch_gi"]
+  return last["yaw_gi"], last["pitch_gi"], last["yaw_rate_gi"], last["pitch_rate_gi"]
 
 def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
@@ -258,9 +291,14 @@ def run():
 
   trigger = TriggerGate()
   # chassis = ChassisController()
+  yaw_pid = AxisPID(AIM_KP, AIM_KI, AIM_KD, K_JOYSTICK, AIM_I_CLAMP, AIM_D_TAU)
+  pitch_pid = AxisPID(AIM_KP, AIM_KI, AIM_KD, K_JOYSTICK, AIM_I_CLAMP, AIM_D_TAU)
 
   yaw_gi_now, pitch_gi_now = 0.0, 0.0
+  yaw_rate_now, pitch_rate_now = 0.0, 0.0
   d_theta_prev = 0.0
+  last_t = None
+  last_target_id = -1
   fk = FrequencyKeeper(200)
   warned_no_gimbal = False
 
@@ -274,14 +312,21 @@ def run():
         logger.warning("decisiond: no gimbal_state samples; using zero gimbal pose")
         warned_no_gimbal = True
     else:
-      yaw_gi_now, pitch_gi_now = gp
+      yaw_gi_now, pitch_gi_now, yaw_rate_now, pitch_rate_now = gp
 
     plate = sub["plate"]
     if plate is None: continue
     if not sub.updated["plate"]: continue
 
+    # Reset the controllers on retarget so integral/derivative state doesn't carry across targets.
+    if plate["target_id"] != last_target_id:
+      yaw_pid.reset(); pitch_pid.reset()
+      last_t = None
+      last_target_id = plate["target_id"]
+
     cls = plate["class"]
     if cls in ("LOST", "UNKNOWN"):
+      yaw_pid.reset(); pitch_pid.reset(); last_t = None
       pub.send("aim_error", {"x": 0.0, "y": 0.0})
       pub.send("shoot", False)
       pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
@@ -301,13 +346,29 @@ def run():
       continue
     yaw_gi_cmd, pitch_cmd, t_arrival, target_at_arrival = sol
 
+    # Aim-point angular velocity (feedforward): how fast the lead-compensated command moves in real
+    # time → tracks moving/spinning targets. Advance BOTH t_now and t_state by FF_DT: in real time a
+    # fresh plate arrives with t_state advanced too, so the (t_now - t_state) lead term stays constant
+    # (advancing only t_now would double-count it and over-feedforward by ~2×).
+    sol_ff = solve_with_lead(predict, t_now + AIM_FF_DT, plate["t_state"] + AIM_FF_DT, d_theta_prev)
+    if sol_ff is not None:
+      yaw_ff = wrap_pi(sol_ff[0] - yaw_gi_cmd) / AIM_FF_DT
+      pitch_ff = (sol_ff[1] - pitch_cmd) / AIM_FF_DT
+    else:
+      yaw_ff = pitch_ff = 0.0
+
     yaw_err = wrap_pi(yaw_gi_cmd - yaw_gi_now)
     pitch_err = pitch_cmd - pitch_gi_now
     d_theta_prev = math.hypot(yaw_err, pitch_err)
 
+    dt = 0.0 if last_t is None else (t_now - last_t)
+    last_t = t_now
+    aim_x = yaw_pid.update(yaw_err, yaw_ff, yaw_rate_now, dt)
+    aim_y = pitch_pid.update(pitch_err, pitch_ff, pitch_rate_now, dt)
+
     fire = trigger.evaluate(plate, yaw_err, pitch_err, t_arrival, t_now)
 
-    pub.send("aim_error", {"x": yaw_err, "y": pitch_err})
+    pub.send("aim_error", {"x": aim_x, "y": aim_y})
     pub.send("aim_angle", {"x": math.degrees(yaw_gi_cmd), "y": math.degrees(pitch_cmd)})
     pub.send("shoot", fire)
     # pub.send("chassis_velocity", chassis.step(plate))

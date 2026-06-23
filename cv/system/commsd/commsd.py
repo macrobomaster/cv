@@ -10,7 +10,7 @@ from .protocol import Protocol, Command, State
 
 COMM_RATES_HZ = {
   "gimbal_state": 200.0,
-  "aim_error": 50.0,
+  "aim_error": 200.0,
   "shoot": 20.0,
   "chassis_velocity": 50.0,
   "spinning": 10.0,
