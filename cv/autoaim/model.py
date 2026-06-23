@@ -571,8 +571,8 @@ if __name__ == "__main__":
 
   # full runs
   tms = []
+  fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").clone().realize()
   for _ in range(15):
-    fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").clone().realize()
     GlobalCounters.reset()
     st = time.perf_counter()
     ret = infer(fake_frame, 0)
