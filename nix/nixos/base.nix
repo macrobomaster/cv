@@ -180,6 +180,9 @@
   # use systemd initrd
   boot.initrd.systemd.enable = true;
   boot.initrd.systemd.emergencyAccess = true;
+  # Tegra kernel has no tpm-crb/tpm-tis and root isn't TPM-unlocked; stops the
+  # modprobe "FATAL: Module tpm-crb not found" noise during initrd assembly
+  boot.initrd.systemd.tpm2.enable = false;
 
   # firewall
   networking = {

@@ -82,6 +82,117 @@
           xxhash
           scipy
         ];
+
+      # shared by both Jetson configs (the installer ISO and the on-disk system)
+      jetson-common = {
+        imports = [ inputs.jetpack-nixos.nixosModules.default ];
+        hardware.nvidia-jetpack = {
+          enable = true;
+          # som is set per-config (orin-nano vs orin-nx) by mkOrin below
+          super = true;
+          carrierBoard = "devkit";
+          # uarta PIO overlay (serial-tegra RX-DMA UAF workaround); UEFI applies it at boot
+          flashScriptOverrides.additionalDtbOverlays = [
+            "${./nix/nixos/enable-serial.dtb}"
+          ];
+        };
+        boot.kernelPatches = [
+          {
+            name = "config";
+            patch = null;
+            extraConfig = ''
+              ARM64_PMEM y
+              PCI_TEGRA y
+              PCIE_TEGRA194 y
+              PCIE_TEGRA194_HOST y
+              BLK_DEV_NVME y
+              NVME_CORE y
+              FB_SIMPLE y
+              IWLWIFI m
+            '';
+          }
+        ];
+
+        # board-level: NVMe-over-Tegra-PCIe + on-board filesystems
+        boot.initrd.availableKernelModules = [
+          "nvme"
+          "pcie-tegra194"
+        ];
+        # btrfs root is auto-included from disk.nix; just need the vfat ESP here
+        boot.supportedFilesystems = {
+          vfat = true;
+        };
+      };
+
+      # the installer ISO (cross-built on x86_64); flashes firmware for its SoM
+      orinInstaller = {
+        imports = [ "${inputs.nixpkgs-jetson}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix" ];
+        nixpkgs = {
+          buildPlatform = "x86_64-linux";
+          hostPlatform = "aarch64-linux";
+        };
+        boot.supportedFilesystems.zfs = lib.mkForce false;
+        boot.initrd.supportedFilesystems.zfs = lib.mkForce false;
+        hardware.enableAllHardware = lib.mkForce false;
+      };
+
+      # the on-disk system (native aarch64); hostname tracks the SoM (orin-nano/orin-nx)
+      orinSystem =
+        { config, ... }:
+        {
+          _module.args = { inherit inputs; };
+          nixpkgs = {
+            buildPlatform = "aarch64-linux";
+            hostPlatform = "aarch64-linux";
+            config = pkgs-aarch64-linux.config;
+          };
+          nixpkgs.overlays = common_overlays ++ [
+            (final: _: { inherit (final.nvidia-jetpack) cudaPackages; })
+          ];
+
+          imports = [
+            inputs.disko.nixosModules.disko
+            ./nix/nixos/base.nix
+            ./nix/nixos/disk.nix
+          ];
+
+          boot.loader.systemd-boot.enable = true;
+          boot.loader.efi.canTouchEfiVariables = true;
+
+          hardware.graphics.enable = true;
+          hardware.nvidia-jetpack = {
+            firmware.autoUpdate = true;
+            modesetting.enable = true;
+          };
+
+          systemd.services.cv = {
+            description = "cv service";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network.target" ];
+            serviceConfig = {
+              Type = "oneshot";
+              WorkingDirectory = "/root/cv";
+              RemainAfterExit = true;
+              ExecStart = "${pkgs-aarch64-linux.tmux}/bin/tmux new-session -d -s cv ${./nix/nixos/script.sh}";
+              ExecStop = "${pkgs-aarch64-linux.tmux}/bin/tmux kill-session -t cv";
+              TimeoutStopSec = 1;
+            };
+          };
+
+          networking.hostName = config.hardware.nvidia-jetpack.som;
+          system.stateVersion = "25.05";
+        };
+
+      # one config per SoM; firmware/boardspec differ, everything else is shared
+      mkOrin =
+        som: extra:
+        lib.nixosSystem {
+          modules = [
+            jetson-common
+            { hardware.nvidia-jetpack.som = som; }
+          ]
+          ++ extra;
+        };
     in
     {
       devShells = {
@@ -105,38 +216,9 @@
               ++ common-python-packages p;
             python = pkgs-x86_64-linux.python314;
             pythonEnv = python.withPackages python-packages;
-            pythonCapWrapper = pkgs-x86_64-linux.stdenv.mkDerivation {
-              name = "python-cap-wrapper";
-              dontUnpack = true;
-              buildInputs = [ pkgs-x86_64-linux.libcap ];
-              buildPhase = ''
-                cat > wrapper.c << 'EOF'
-                #include <sys/prctl.h>
-                #include <sys/capability.h>
-                #include <unistd.h>
-                #include <stdio.h>
-                int main(int argc, char *argv[]) {
-                  cap_value_t cap_list[] = {CAP_DAC_OVERRIDE, CAP_SYS_RAWIO, CAP_SYS_ADMIN, CAP_IPC_LOCK};
-                  int n = sizeof(cap_list) / sizeof(cap_list[0]);
-                  cap_t caps = cap_get_proc();
-                  if (!caps) { perror("cap_get_proc"); _exit(1); }
-                  if (cap_set_flag(caps, CAP_INHERITABLE, n, cap_list, CAP_SET) < 0) { perror("cap_set_flag"); _exit(1); }
-                  if (cap_set_proc(caps) < 0) { perror("cap_set_proc"); _exit(1); }
-                  cap_free(caps);
-                  for (int i = 0; i < n; i++)
-                    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap_list[i], 0, 0) < 0) { perror("prctl"); _exit(1); }
-                  execv("${python}/bin/python3", argv);
-                  perror("execv");
-                  return 1;
-                }
-                EOF
-                $CC wrapper.c -o python-cap-wrapper -lcap
-              '';
-              installPhase = ''
-                mkdir -p $out/bin
-                install -m 755 python-cap-wrapper $out/bin/python3
-                ln $out/bin/python3 $out/bin/python
-              '';
+            pythonCapWrapper = import ./nix/python-cap-wrapper.nix {
+              pkgs = pkgs-x86_64-linux;
+              inherit python;
             };
           in
           pkgs-x86_64-linux.mkShell {
@@ -167,16 +249,7 @@
               export NIX_PYTHONEXECUTABLE='${pythonEnv}/bin/python3'
               export NIX_PYTHONPATH='${pythonEnv}/${python.sitePackages}'
 
-              # Copy the capability wrapper and setcap it
-              _CAPS_DIR="$HOME/.cache/python-caps-$(echo '${pythonCapWrapper}' | sha256sum | cut -c1-16)"
-              if [ ! -f "$_CAPS_DIR/.ok" ]; then
-                rm -rf "$_CAPS_DIR"
-                mkdir -p "$_CAPS_DIR"
-                cp ${pythonCapWrapper}/bin/python3 "$_CAPS_DIR/python3"
-                ln -f "$_CAPS_DIR/python3" "$_CAPS_DIR/python"
-                sudo ${pkgs-x86_64-linux.libcap}/bin/setcap 'cap_dac_override,cap_sys_rawio,cap_sys_admin,cap_ipc_lock=ep' "$_CAPS_DIR/python3" && touch "$_CAPS_DIR/.ok"
-              fi
-              export PATH="$_CAPS_DIR:$PATH"
+              source ${pythonCapWrapper.setup}
             '';
           };
         aarch64-linux.default = pkgs-aarch64-linux.mkShell {
@@ -226,175 +299,10 @@
       };
 
       nixosConfigurations = {
-        orin-nano-installer = lib.nixosSystem {
-          modules = [
-            {
-              imports = [
-                "${inputs.nixpkgs-jetson}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
-                inputs.jetpack-nixos.nixosModules.default
-              ];
-              nixpkgs = {
-                buildPlatform = "x86_64-linux";
-                hostPlatform = "aarch64-linux";
-              };
-              boot.kernelPatches = [
-                {
-                  name = "config";
-                  patch = null;
-                  extraConfig = ''
-                    ARM64_PMEM y
-                    PCI_TEGRA y
-                    PCIE_TEGRA194 y
-                    PCIE_TEGRA194_HOST y
-                    BLK_DEV_NVME y
-                    NVME_CORE y
-                    FB_SIMPLE y
-                  '';
-                }
-              ];
-              boot.supportedFilesystems = {
-                zfs = lib.mkForce false;
-              };
-              boot.initrd.supportedFilesystems = {
-                zfs = lib.mkForce false;
-              };
-              hardware.enableAllHardware = lib.mkForce false;
-              hardware.nvidia-jetpack = {
-                enable = true;
-                som = "orin-nano";
-                super = true;
-                carrierBoard = "devkit";
-                flashScriptOverrides.additionalDtbOverlays = [
-                  "${./nix/nixos/enable-serial.dtb}"
-                ];
-              };
-              hardware.deviceTree = {
-                enable = true;
-                overlays = [
-                  {
-                    name = "enable-serial";
-                    dtsText = ''
-                      /dts-v1/;
-                      /plugin/;
-                      / {
-                        fragment@0 {
-                          target = <&uarta>;
-                          __overlay__ {
-                            status = "okay";
-                            // serial-tegra RX-DMA UAF (tegra_uart_rx_buffer_push) corrupts
-                            // small frames + panics; no "rx"/"tx" in dma-names => force PIO
-                            dma-names = "none";
-                          };
-                        };
-                      };
-                    '';
-                  }
-                ];
-              };
-            }
-          ];
-        };
-        orin-nano = lib.nixosSystem {
-          modules = [
-            {
-              _module.args = { inherit inputs; };
-              nixpkgs = {
-                buildPlatform = "aarch64-linux";
-                hostPlatform = "aarch64-linux";
-                config = pkgs-aarch64-linux.config;
-              };
-              nixpkgs.overlays = common_overlays ++ [
-                (final: _: { inherit (final.nvidia-jetpack) cudaPackages; })
-              ];
-
-              imports = [
-                inputs.jetpack-nixos.nixosModules.default
-                inputs.disko.nixosModules.disko
-                ./nix/nixos/base.nix
-                ./nix/nixos/disk.nix
-              ];
-
-              boot.kernelPatches = [
-                {
-                  name = "config";
-                  patch = null;
-                  extraConfig = ''
-                    ARM64_PMEM y
-                    PCI_TEGRA y
-                    PCIE_TEGRA194 y
-                    PCIE_TEGRA194_HOST y
-                    BLK_DEV_NVME y
-                    NVME_CORE y
-                    FB_SIMPLE y
-                    IWLWIFI m
-                  '';
-                }
-              ];
-              boot.initrd.availableKernelModules = [
-                "nvme"
-                "f2fs"
-                "pcie-tegra194"
-              ];
-              boot.supportedFilesystems = [
-                "f2fs"
-                "vfat"
-              ];
-              boot.loader.systemd-boot.enable = true;
-              boot.loader.efi.canTouchEfiVariables = true;
-
-              hardware.graphics.enable = true;
-              hardware.nvidia-jetpack = {
-                enable = true;
-                firmware.autoUpdate = true;
-                modesetting.enable = true;
-                som = "orin-nano";
-                super = true;
-                carrierBoard = "devkit";
-              };
-
-              hardware.deviceTree = {
-                enable = true;
-                overlays = [
-                  {
-                    name = "enable-serial";
-                    dtsText = ''
-                      /dts-v1/;
-                      /plugin/;
-                      / {
-                        fragment@0 {
-                          target = <&uarta>;
-                          __overlay__ {
-                            status = "okay";
-                            // serial-tegra RX-DMA UAF (tegra_uart_rx_buffer_push) corrupts
-                            // small frames + panics; no "rx"/"tx" in dma-names => force PIO
-                            dma-names = "none";
-                          };
-                        };
-                      };
-                    '';
-                  }
-                ];
-              };
-
-              systemd.services.cv = {
-                description = "cv service";
-                wantedBy = [ "multi-user.target" ];
-                after = [ "network.target" ];
-                serviceConfig = {
-                  Type = "oneshot";
-                  WorkingDirectory = "/root/cv";
-                  RemainAfterExit = true;
-                  ExecStart = "${pkgs-aarch64-linux.tmux}/bin/tmux new-session -d -s cv ${./nix/nixos/script.sh}";
-                  ExecStop = "${pkgs-aarch64-linux.tmux}/bin/tmux kill-session -t cv";
-                  TimeoutStopSec = 1;
-                };
-              };
-
-              networking.hostName = "orin-nano";
-              system.stateVersion = "25.05";
-            }
-          ];
-        };
+        orin-nano = mkOrin "orin-nano" [ orinSystem ];
+        orin-nx = mkOrin "orin-nx" [ orinSystem ];
+        orin-nano-installer = mkOrin "orin-nano" [ orinInstaller ];
+        orin-nx-installer = mkOrin "orin-nx" [ orinInstaller ];
       };
     };
 }
