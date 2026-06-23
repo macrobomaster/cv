@@ -277,15 +277,13 @@
                       /dts-v1/;
                       /plugin/;
                       / {
-                        serial@3110000 {
-                          status = "okay";
-                        };
-                      };
-                      / {
                         fragment@0 {
-                          target = <&uartb>;
+                          target = <&uarta>;
                           __overlay__ {
                             status = "okay";
+                            // serial-tegra RX-DMA UAF (tegra_uart_rx_buffer_push) corrupts
+                            // small frames + panics; no "rx"/"tx" in dma-names => force PIO
+                            dma-names = "none";
                           };
                         };
                       };
@@ -363,15 +361,13 @@
                       /dts-v1/;
                       /plugin/;
                       / {
-                        serial@3110000 {
-                          status = "okay";
-                        };
-                      };
-                      / {
                         fragment@0 {
-                          target = <&uartb>;
+                          target = <&uarta>;
                           __overlay__ {
                             status = "okay";
+                            // serial-tegra RX-DMA UAF (tegra_uart_rx_buffer_push) corrupts
+                            // small frames + panics; no "rx"/"tx" in dma-names => force PIO
+                            dma-names = "none";
                           };
                         };
                       };
