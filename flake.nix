@@ -124,17 +124,24 @@
         };
       };
 
-      # the installer ISO (cross-built on x86_64); flashes firmware for its SoM
-      orinInstaller = {
-        imports = [ "${inputs.nixpkgs-jetson}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix" ];
-        nixpkgs = {
-          buildPlatform = "x86_64-linux";
-          hostPlatform = "aarch64-linux";
+      # the installer ISO (cross-built on x86_64); flashes firmware + provisions NVMe for its SoM
+      orinInstaller =
+        { pkgs, ... }:
+        {
+          imports = [ "${inputs.nixpkgs-jetson}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix" ];
+          nixpkgs = {
+            buildPlatform = "x86_64-linux";
+            hostPlatform = "aarch64-linux";
+          };
+          boot.supportedFilesystems.zfs = lib.mkForce false;
+          boot.initrd.supportedFilesystems.zfs = lib.mkForce false;
+          hardware.enableAllHardware = lib.mkForce false;
+          # partition + install onto NVMe from the ISO; disko CLI from the same input as the module
+          environment.systemPackages = [
+            inputs.disko.packages.${pkgs.system}.default
+            pkgs.git
+          ];
         };
-        boot.supportedFilesystems.zfs = lib.mkForce false;
-        boot.initrd.supportedFilesystems.zfs = lib.mkForce false;
-        hardware.enableAllHardware = lib.mkForce false;
-      };
 
       # the on-disk system (native aarch64); hostname tracks the SoM (orin-nano/orin-nx)
       orinSystem =
