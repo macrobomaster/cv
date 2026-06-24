@@ -26,7 +26,7 @@ T = getenv("T", 1)
 # corner output valid range
 BIN_LO, BIN_HI = -0.5, 1.5
 
-MODEL_VERSION = 33
+MODEL_VERSION = 34
 
 # canonical camera
 CANONICAL_FX_FY = 1010

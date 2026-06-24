@@ -318,12 +318,14 @@ class DecoderBlock:
     self.cross_attn = Attention(dim, dim, heads=heads, kv_heads=kv_heads, out="proj", kv=False, dropout=dropout)
     self.ls_ca = LayerScale(dim)
 
-    self.ffn = FFN(dim, exp=2, norm=True, bias=False, dropout=dropout)
+    self.ffn = FFN(dim, exp=3, norm=True, bias=False, dropout=dropout)
     self.ls_ffn = LayerScale(dim)
 
-  def __call__(self, q:Tensor, kv:tuple[Tensor, Tensor]) -> Tensor:
+  def __call__(self, q:Tensor, kv:tuple[Tensor, Tensor], q_pos:Tensor|None=None) -> Tensor:
     q = self.ls_sa(q, self.self_attn(self.sa_norm(q)))
-    q = self.ls_ca(q, self.cross_attn(self.ca_norm_q(q), kv))
+    ca_in = self.ca_norm_q(q)
+    if q_pos is not None: ca_in = ca_in + q_pos  # reference-point positional query (out of residual stream)
+    q = self.ls_ca(q, self.cross_attn(ca_in, kv))
     q = self.ls_ffn(q, self.ffn(q))
     return q
 
@@ -338,6 +340,9 @@ class Decoder:
     self.n_bins = n_bins
     self.class_token = Tensor.randn(dim) * 0.02
     self.corner_tokens = Tensor.randn(N_CORNERS, dim) * 0.02
+    # position-only query selection over memory tokens: pick the plate token, predict its corner box from its feature
+    self.objness = nn.Linear(dim, 1, bias=False)  # scores each memory token for the target-color plate
+    self.ref_head = nn.Linear(dim, N_CORNERS * 2, bias=False)  # selected token's feature -> size-aware corner offsets
 
     self.target_color_embed = nn.Embedding(2, dim)
 
@@ -350,29 +355,45 @@ class Decoder:
     self.class_proj = nn.Linear(dim, NUM_CLASSES, bias=False)
     self.corner_mlp = MLP(dim, 2 * n_bins, dim // 2, blocks=1)  # shared residual head over absolute bins
 
-  def __call__(self, mem:Tensor, sb:Tensor, target_color:Tensor) -> tuple[Tensor, list]:
+  def __call__(self, mem:Tensor, sb:Tensor, target_color:Tensor, pos_emb, coords:Tensor) -> tuple[Tensor, list, Tensor]:
     # mem: (B, N_X3_TOKENS+N_X2_TOKENS, D) spatial memory [x3 ; x2]; sb: (B, 1, D) global token (last query)
-    # target_color: (B,) int32. Returns (class_logits, [cum_logits per layer]) - accumulated corner logits.
+    # target_color: (B,) int32; pos_emb/coords shared with FeatureTokenizer (same Fourier space as mem).
+    # Returns (class_logits, [cum_logits per layer], obj_logit) — obj_logit scores tokens for query selection.
     B, _, D = mem.shape
 
-    kv = self.kv_proj.kv_cache(self.ca_norm_kv(mem))
-
     target_tok = self.target_color_embed(target_color).reshape(B, 1, D)  # (B, 1, D)
+    kv = self.kv_proj.kv_cache(self.ca_norm_kv(mem))  # cross-attn still reads BOTH levels [x3 ; x2]
+
+    # position-only query selection on the COARSE level only (x3 @ /32): propose coarse, refine fine.
+    # x3 has the largest receptive field -> best for "where is the plate + how big"; its coarse coordinate is
+    # recovered by the refinement loop, and x2 detail still drives the cross-attention. (a single top-1 commits
+    # to one level anyway; pooling both levels just lets the finer x2 always win the nearest-centroid target.)
+    x3_mem, x3_coords = mem[:, :N_X3_TOKENS], coords[:N_X3_TOKENS]
+    obj_logit = self.objness(x3_mem + target_tok).squeeze(-1)  # (B, N_X3_TOKENS)
+    onehot = obj_logit.argmax(-1).one_hot(N_X3_TOKENS).cast(mem.dtype)  # (B, N_X3_TOKENS) hard top-1
+    sel_feat = onehot.unsqueeze(1) @ x3_mem  # (B, 1, D) selected token's feature
+    c0 = onehot.unsqueeze(1) @ x3_coords  # (B, 1, 2) selected token's (u, v)
+    ref = (c0 + self.ref_head(sel_feat).reshape(B, N_CORNERS, 2)).clip(0, 1)  # (B, 4, 2) initial corner refs
+
     class_tok = self.class_token.reshape(1, 1, D).expand(B, 1, D)
-    corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)
+    corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)  # content stays learnable
     q = target_tok.cat(class_tok, corner_toks, sb, dim=1)  # (B, 2+N_CORNERS+1, D) — sb (global register) last
 
-    # fdr like thingy
+    # fdr like thingy, with iterative reference refinement steering the cross-attention
+    centers = bin_centers(self.n_bins)
     cum, cum_layers, qn = None, [], None
     for block in self.blocks:
-      q = block(q, kv)
+      q_pos = (q[:, :2] * 0).cat(pos_emb(ref), q[:, :1] * 0, dim=1)  # pos on corner queries only (sharding-safe zeros)
+      q = block(q, kv, q_pos)
       qn = self.ln_out(q)
       ct = qn[:, 2:2 + N_CORNERS, :]  # (B, 4, D)
       cum = self.corner_mlp(ct) if cum is None else cum + self.corner_mlp(ct)
       cum_layers.append(cum)
+      expected = (cum.reshape(B, N_CORNERS, 2, self.n_bins).softmax(-1) * centers).sum(-1)  # (B, 4, 2)
+      ref = expected.clip(0, 1).detach()  # next layer attends where this layer pointed
 
     class_logits = self.class_proj(qn[:, 1, :])  # (B, NUM_CLASSES)
-    return class_logits, cum_layers
+    return class_logits, cum_layers, obj_logit
 
 # Unified class encoding:
 # 0: no plate
@@ -409,6 +430,8 @@ QUALITY_TAU = 0.4
 MAL_GAMMA = 2
 MIN_PLATE_SCALE = 0.02
 GEOM_WEIGHT = 0.1
+DEGEN_FRAC = 0.1  # vp non-degeneracy: penalize perimeter edges shorter than this fraction of the diagonal
+OBJ_WEIGHT = 0.5  # query-selection objectness: find the plate token (NOT quality-weighted — must find small plates too)
 
 # image of the absolute conic ω = (KKᵀ)⁻¹ in canonical pixel coords; a rectangle's two 3D edge
 # directions are orthogonal, so their image vanishing points satisfy v_hᵀ ω v_v = 0.
@@ -423,14 +446,20 @@ def vp_orthogonality_loss(corners:Tensor) -> Tensor:
   # corners: (B, 4, 2) predicted, normalized image coords, order TL, TR, BL, BR. Returns per-sample (B,).
   # Penalizes the squared ω-cosine between the horizontal- and vertical-edge vanishing points, which is
   # 0 exactly when the quad is the perspective image of a right-angled (rectangular) plate.
-  B = corners.shape[0]
-  pts = (corners * Tensor([IMG_W, IMG_H], dtype=corners.dtype)).cat(Tensor.ones(B, N_CORNERS, 1, dtype=corners.dtype), dim=-1)
+  px = corners * Tensor([IMG_W, IMG_H], dtype=corners.dtype, device=corners.device)
+  pts = px.cat(px[..., :1] * 0 + 1, dim=-1)  # homogeneous coord, derived from px so it shards with the batch
   tl, tr, bl, br = pts[:, 0], pts[:, 1], pts[:, 2], pts[:, 3]
   v_h = _cross(_cross(tl, tr), _cross(bl, br))  # horizontal edges' vanishing point
   v_v = _cross(_cross(tl, bl), _cross(tr, br))  # vertical edges' vanishing point
-  def q(a, b): return ((a @ _OMEGA) * b).sum(-1)
+  omega = _OMEGA.to(corners.device)  # match shard layout: a single-device const can't meet a sharded tensor
+  def q(a, b): return ((a @ omega) * b).sum(-1)
   cos = q(v_h, v_v) / (q(v_h, v_h) * q(v_v, v_v)).sqrt().add(1e-9)
-  return cos * cos
+  # non-degeneracy: cos² is trivially 0 if any edge collapses (its vanishing point -> 0), so penalize
+  # perimeter edges much shorter than the diagonal to stop the loss folding the quad into a triangle.
+  def seg(i, j): return ((corners[:, i] - corners[:, j]) ** 2).sum(-1).sqrt()
+  diag = (seg(0, 3) + seg(1, 2)) * 0.5 + 1e-6
+  degen = sum((DEGEN_FRAC - seg(*e) / diag).relu() for e in ((0, 1), (1, 3), (3, 2), (2, 0))) / DEGEN_FRAC
+  return cos * cos + degen
 
 class Model:
   def __init__(self, dim:int=192, temporal_size:int=1, sideband_dim:int=512,
@@ -446,9 +475,9 @@ class Model:
     x0, x1, x2, x3, sb = self.backbone(img)
     return self.feature_tokenizer(x2, x3, sb)
 
-  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     # img: (B, T, IMG_H, IMG_W, 3)
-    # Returns (total_loss, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss).
+    # Returns (total_loss, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss, obj_loss).
     assert Tensor.training
     mem, sb = self.encode(img)
     return self.corner_loss(mem, sb, y)
@@ -464,7 +493,8 @@ class Model:
     has_corners = y[:, 10]
     target_color = y[:, 11].cast(dtypes.int32)
 
-    class_logits, cum_layers = self.decoder(mem, sb, target_color)
+    ft = self.feature_tokenizer
+    class_logits, cum_layers, obj_logit = self.decoder(mem, sb, target_color, ft.pos_emb, ft.coords)
 
     denom = has_corners.sum().add(1e-6)
     centers = bin_centers(N)
@@ -509,14 +539,23 @@ class Model:
     # geometric prior — final-layer corners should be the perspective image of a rectangle (vp-orthogonality)
     geom_loss = (has_corners * vp_orthogonality_loss(expected)).sum() / denom
 
-    total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss + GOLSD_WEIGHT * lsd_loss + GEOM_WEIGHT * geom_loss
-    return total, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss
+    # query-selection objectness — pick the x3 token nearest the plate centroid (softmax over the coarse level)
+    centroid = corners_f.mean(1)  # (B, 2)
+    x3_coords = ft.coords[:N_X3_TOKENS]  # selection pool is the coarse level only
+    d2 = ((x3_coords.reshape(1, -1, 2) - centroid.reshape(B, 1, 2)) ** 2).sum(-1)  # (B, N_X3_TOKENS)
+    obj_target = d2.argmin(-1).one_hot(obj_logit.shape[-1]).cast(dtypes.float32)  # (B, N_X3_TOKENS)
+    obj_i = obj_logit.cast(dtypes.float32).cross_entropy(obj_target, reduction="none")  # (B,)
+    obj_loss = (has_corners * obj_i).sum() / denom
+
+    total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss + GOLSD_WEIGHT * lsd_loss + GEOM_WEIGHT * geom_loss + OBJ_WEIGHT * obj_loss
+    return total, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss, obj_loss
 
   def corner_predict(self, mem:Tensor, sb:Tensor, target_color:Tensor) -> Tensor:
     B = mem.shape[0]
     N = self.decoder.n_bins
 
-    class_logits, cum_layers = self.decoder(mem, sb, target_color)
+    ft = self.feature_tokenizer
+    class_logits, cum_layers, _ = self.decoder(mem, sb, target_color, ft.pos_emb, ft.coords)
 
     class_probs = class_logits.cast(dtypes.float32).sigmoid()  # one-vs-all; max = quality-aware confidence
     class_id = class_probs.argmax(-1, keepdim=True).cast(dtypes.default_float)

@@ -12,14 +12,14 @@ from ..system.core.logging import logger
 from ..system.core.keyvalue import kv_put
 from ..common.dataloader import BatchDesc, Dataloader
 from tinygrad.nn.optim import OptimizerGroup, Muon
-from ..common.optim import CLAMB, TrapezoidalWarmupLR, MasterWeights
+from ..common.optim import CLAMB, TrapezoidalWarmupLR, MasterWeights, CosineWarmupLR
 from .common import BASE_PATH
 from .model import Model
 from .data import get_train_files
 from .common import T, IMG_H, IMG_W
 
 GPUS = tuple(f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 1)))
-BS = 128 * len(GPUS)
+BS = 64 * len(GPUS)
 WARMUP_STEPS = 100
 WARMPUP_LR = 1e-6
 ADAMW_START_LR = 1e-3 * math.sqrt(BS / 256)
@@ -56,7 +56,7 @@ def run():
   for _, x in state_dict.items(): x.to_(GPUS)
 
   _NODECAY_KW = ("norm", "gamma", "beta", "bias", "ls", "corner_tokens", "pos_emb", "embed", "level")
-  _DECAY_PATHS = ("backbone.stem.conv", "decoder.class_proj", "decoder.corner_mlp.out")
+  _DECAY_PATHS = ("backbone.stem.conv", "decoder.class_proj", "decoder.corner_mlp.out", "decoder.objness", "decoder.ref_head")
   def _classify(name, p):
     if p.ndim < 2 or any(k in name for k in _NODECAY_KW): return "nodecay"
     if any(path in name for path in _DECAY_PATHS): return "decay"
@@ -71,9 +71,9 @@ def run():
   adamw_decay = MasterWeights(decay_params, CLAMB, lr=ADAMW_START_LR, weight_decay=0.01, adam=True)
   adamw_nodecay = MasterWeights(nodecay_params, CLAMB, lr=ADAMW_START_LR, weight_decay=0.0, adam=True)
   optim = OptimizerGroup(muon_optim, adamw_decay, adamw_nodecay)
-  muon_lr_sched = TrapezoidalWarmupLR(muon_optim, WARMUP_STEPS, WARMPUP_LR, MUON_START_LR, MUON_END_LR, EPOCHS, STEPS_PER_EPOCH)
-  adamw_decay_sched = TrapezoidalWarmupLR(adamw_decay, WARMUP_STEPS, WARMPUP_LR, ADAMW_START_LR, ADAMW_END_LR, EPOCHS, STEPS_PER_EPOCH)
-  adamw_nodecay_sched = TrapezoidalWarmupLR(adamw_nodecay, WARMUP_STEPS, WARMPUP_LR, ADAMW_START_LR, ADAMW_END_LR, EPOCHS, STEPS_PER_EPOCH)
+  muon_lr_sched = CosineWarmupLR(muon_optim, WARMUP_STEPS, WARMPUP_LR, MUON_START_LR, MUON_END_LR, EPOCHS, STEPS_PER_EPOCH)
+  adamw_decay_sched = CosineWarmupLR(adamw_decay, WARMUP_STEPS, WARMPUP_LR, ADAMW_START_LR, ADAMW_END_LR, EPOCHS, STEPS_PER_EPOCH)
+  adamw_nodecay_sched = CosineWarmupLR(adamw_nodecay, WARMUP_STEPS, WARMPUP_LR, ADAMW_START_LR, ADAMW_END_LR, EPOCHS, STEPS_PER_EPOCH)
 
   if (ckpt := getenv("CKPT", "")) != "":
     logger.info(f"loading checkpoint {BASE_PATH / 'intermediate' / f'model_{ckpt}.safetensors'}")
@@ -101,9 +101,9 @@ def run():
 
   @TinyJit
   def train_step(x, y):
-    total, class_l, l1_l, dfl_l, lsd_l, geom_l = model(x, y)
+    total, class_l, l1_l, dfl_l, lsd_l, geom_l, obj_l = model(x, y)
     total.backward()
-    loss_cpu = Tensor.stack(total, class_l, l1_l, dfl_l, lsd_l, geom_l).float().to("CPU")
+    loss_cpu = Tensor.stack(total, class_l, l1_l, dfl_l, lsd_l, geom_l, obj_l).float().to("CPU")
     return loss_cpu.realize(*grads)
 
   @TinyJit
@@ -140,14 +140,14 @@ def run():
       except StopIteration: next_d = None
       dt = time.perf_counter()
 
-      total_loss, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss = loss.tolist()
+      total_loss, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss, obj_loss = loss.tolist()
       muon_lr, adamw_lr, grad_norm, = map(lambda x: x.item(), ret)
       at = time.perf_counter()
 
       logger.info(
         f"{epoch:3} {i:5}/{STEPS_PER_EPOCH} {((at - st)) * 1000.0:7.2f} ms step, "
         f"{(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms data, {(at - dt) * 1000.0:7.2f} ms accel, "
-        f"{total_loss:9.4f} loss (cls {class_loss:.4f} | l1 {l1_loss:.4f} | dfl {dfl_loss:.4f} | lsd {lsd_loss:.4f} | geom {geom_loss:.4f}), "
+        f"{total_loss:9.4f} loss (cls {class_loss:.4f} | l1 {l1_loss:.4f} | dfl {dfl_loss:.4f} | lsd {lsd_loss:.4f} | geom {geom_loss:.4f} | obj {obj_loss:.4f}), "
         f"{grad_norm:9.4f} grad_norm, {muon_lr:.6f} muon_lr, {adamw_lr:.6f} adamw_lr, "
         f"{GlobalCounters.mem_used / 1e9:7.2f} GB used, {GlobalCounters.mem_used * 1e-9 / (at - st):9.2f} GB/s, "
         f"{GlobalCounters.global_ops * 1e-9 / (at - st):9.2f} GFLOPS"
@@ -157,7 +157,7 @@ def run():
         wandb.log({
           "epoch": epoch + (i + 1) / STEPS_PER_EPOCH,
           "step_time": at - st, "python_time": pt - st, "data_time": dt - pt, "accel_time": at - dt,
-          "loss": total_loss, "class_loss": class_loss, "l1_loss": l1_loss, "dfl_loss": dfl_loss, "lsd_loss": lsd_loss, "geom_loss": geom_loss,
+          "loss": total_loss, "class_loss": class_loss, "l1_loss": l1_loss, "dfl_loss": dfl_loss, "lsd_loss": lsd_loss, "geom_loss": geom_loss, "obj_loss": obj_loss,
           "grad_norm": grad_norm, "muon_lr": muon_lr, "adamw_lr": adamw_lr,
           "gb": GlobalCounters.mem_used / 1e9, "gbps": GlobalCounters.mem_used * 1e-9 / (at - st),
           "gflops": GlobalCounters.global_ops * 1e-9 / (at - st)
