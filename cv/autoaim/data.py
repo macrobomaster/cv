@@ -1,4 +1,5 @@
 from tinygrad.helpers import getenv
+import random
 import albumentations as A
 import cv2
 import numpy as np
@@ -24,16 +25,34 @@ SEQ_PIPELINE = A.Compose([
     A.PlanckianJitter(mode="cied"),
     A.PlanckianJitter(),
   ], p=0.5),
-  A.Downscale(scale_range=(0.5, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.1),
 ], additional_targets={f"image{t}": "image" for t in range(1, T)})
-FRAME_PIPELINE = A.Compose([
-  # Strong scene-wide motion blur, applied directly (not inside a OneOf) so it actually fires often
-  A.MotionBlur(blur_limit=(5, 17), p=0.5),
+# Per-frame sensor noise (motion blur is handled separately, size-aware, below).
+FRAME_NOISE = A.Compose([
   A.OneOf([
     A.GaussNoise(std_range=(0.05, 0.2), p=0.5),
     A.ISONoise(p=0.5),
   ], p=0.25),
 ])
+
+# Size-aware motion blur. A fixed up-to-17px kernel smears a small (<~20px) plate into mush while the
+# label still carries pixel-precise corners — unlearnable supervision. So cap the kernel to a
+# fraction of the target plate's apparent size: large plates still get the full blur, tiny plates
+# stay legible. Negatives (no target) get the full blur.
+FRAME_BLUR_MAX = 17     # max motion-blur kernel (px)
+FRAME_BLUR_P = 0.5
+BLUR_SIZE_FRAC = 0.6    # cap kernel to this fraction of the target's apparent (screw-quad) size
+
+def _target_apparent_px(class_id, corners_8):
+  if class_id <= 0: return None
+  k = np.array(corners_8, dtype=np.float32).reshape(4, 2) * np.array([IMG_W, IMG_H], dtype=np.float32)
+  return max(float(np.linalg.norm(k[i] - k[(i + 1) % 4])) for i in range(4))
+
+def _size_aware_motion_blur(img, target_px):
+  if random.random() > FRAME_BLUR_P: return img
+  cap = FRAME_BLUR_MAX if target_px is None else int(min(FRAME_BLUR_MAX, BLUR_SIZE_FRAC * target_px))
+  if cap % 2 == 0: cap -= 1  # MotionBlur needs an odd kernel
+  if cap < 3: return img     # plate too small to blur without erasing it
+  return A.MotionBlur(blur_limit=(3, cap), p=1.0)(image=img)["image"]
 
 # Label format: [class_id, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y, has_class, has_corners, target_color] — 12 values
 # corners are normalized to image dims and may fall outside [0, 1] for partial plates;
@@ -51,7 +70,8 @@ def load_single_file(file) -> dict[str, bytes]:
     raise ValueError("unknown file type")
 
   img = SEQ_PIPELINE(image=img)["image"]
-  img = FRAME_PIPELINE(image=img)["image"]
+  img = _size_aware_motion_blur(img, _target_apparent_px(class_id, corners_8))
+  img = FRAME_NOISE(image=img)["image"]
 
   has_class = 1.0
   has_corners = 1.0 if class_id > 0 else 0.0
@@ -75,7 +95,10 @@ def load_sequence_file(file) -> dict[str, bytes]:
     seq_out = SEQ_PIPELINE(image=imgs[0], **{f"image{t}": imgs[t] for t in range(1, T)})
     imgs[0] = seq_out["image"]
     for t in range(1, T): imgs[t] = seq_out[f"image{t}"]
-    for t in range(T): imgs[t] = FRAME_PIPELINE(image=imgs[t])["image"]
+    tgt_px = _target_apparent_px(class_id, corners_8)  # label is the last frame; size-cap blur to it
+    for t in range(T):
+      imgs[t] = _size_aware_motion_blur(imgs[t], tgt_px)
+      imgs[t] = FRAME_NOISE(image=imgs[t])["image"]
   else:
     raise ValueError("unknown file type")
 

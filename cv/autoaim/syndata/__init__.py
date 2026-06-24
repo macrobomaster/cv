@@ -55,11 +55,6 @@ def apply_highlight_desat(img, p=0.5, thresh=None, desat_factor=None):
     hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
   return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
 
-PLATE_PIPELINE = A.Compose([
-  A.RandomScale(scale_limit=(0.05-1, 0.5-1), p=1),
-  A.Perspective(scale=(0.05, 0.2), keep_size=True, fit_output=True, p=1),
-  A.SafeRotate(limit=(-90, 90), p=0.5),
-], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
 PLATE_PIPELINE_2 = A.Compose([
   A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.25),
   A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.25),
@@ -92,6 +87,40 @@ FOCAL_JITTER = 0.05
 def _sample_focal() -> float:
   return CANONICAL_FX_FY * random.uniform(1 - FOCAL_JITTER, 1 + FOCAL_JITTER)
 
+# Beyond this yaw (degrees off head-on) a plate is too foreshortened to reliably localize or hit —
+# the screw-quad collapses toward a line so PnP and aiming both degrade. Such plates are still
+# RENDERED (the model must learn to see them and not fire) but are never picked as the positive
+# target, so the sample becomes a negative. Plates past 90° face fully away and aren't drawn at all.
+MAX_ENGAGE_YAW = 75.0
+
+# A plate occluded by a nearer plate is unhittable. After depth-ordered compositing we require at
+# least this fraction of a candidate's screw-quad to still show its own pixels; below it the plate
+# is rendered (partly hidden) but dropped from the target set, so the sample becomes a negative.
+MIN_TARGET_VISIBLE = 0.5
+
+# The seeded plate's yaw at the LABELED (final) frame. A free 0-360 spin lands on the far
+# hemisphere ~half the time (faces away -> negative), flooding the set with negatives. With this
+# probability the seed's final yaw is instead drawn UNIFORMLY across the engageable band
+# [-MAX_ENGAGE_YAW, MAX_ENGAGE_YAW] — flat coverage so angled-but-hittable plates (60°, 75°) are
+# sampled as densely as head-on, all as positives. The rest spin freely (full yaw) so sliver/
+# back-facing negatives still appear. Raise to skew more positive (fewer yaw-driven negatives).
+SEED_ENGAGEABLE_PROB = 0.7
+
+# Depth bias for the plate's apparent size. Image-space position sampling keeps near (large) plates
+# that the old metric sampling rejected off-frame, which floods positives with big plates and
+# starves small-object learning. DEPTH_FAR_BIAS>1 skews the (log-uniform) depth toward far so small/
+# distant plates stay well-represented; 1.0 = unbiased, ~2.5 ≈ old ≤40px share, higher = smaller.
+# (Plates below ~20px need range beyond z=6000mm; raise that bound, not this, to reach them.)
+DEPTH_FAR_BIAS = 2.5
+
+# Hunt color (the model's target_color input) vs the seeded plate's color. The seed file fixes the
+# plate color, so a uniformly-random hunt color mismatches it ~half the time -> the seed is the
+# wrong color -> ineligible as the target -> negative. With this probability we set hunt = seed
+# color so the on-screen plate is engageable; the rest are opposite-color "only the wrong color in
+# frame" negatives. Seeds are 50/50 red/blue across the file list, so the color INPUT distribution
+# stays balanced either way — only its correlation with the visible plate changes.
+HUNT_MATCHES_SEED_PROB = 0.7
+
 # Canonical camera — zero distortion, focal sampled near CANONICAL_FX_FY per sample. CANONICAL_CX/CY
 # come from autoaim.common (the shared canonical-pinhole convention).
 def _make_canonical_camera(fx=None):
@@ -113,21 +142,22 @@ def plate_dims(number:int) -> tuple[float, float]:
   return (PLATE_WIDTH_LARGE, PLATE_HEIGHT_LARGE) if number == 1 else (PLATE_WIDTH_SMALL, PLATE_HEIGHT_SMALL)
 
 def project_plate(plate, plate_alpha, plate_kps_local, img, x, y, z, rx, ry, rz, plate_w, plate_h, fx=None):
-  """Project plate onto image at explicit pose. Returns (projected_kps, H) where projected_kps
-  is (N,2) in image pixel coords and H is the homography from texture to image space, or None
-  on failure. Composits plate into img in-place."""
-  source_points = np.array([
-    [0, 0],
-    [plate.shape[1], 0],
-    [plate.shape[1], plate.shape[0]],
-    [0, plate.shape[0]],
-  ], dtype=np.float32)
+  """Project plate onto image at explicit pose. Returns (projected_kps, H, mask) where projected_kps
+  is (N,2) in image pixel coords, H is the homography from texture to image space, and mask is the
+  warped binary alpha (IMG_H, IMG_W) of the composited pixels. Returns None on failure. Composits
+  plate into img in-place."""
+  # Anchor the homography on the four SCREW keypoints, not the texture corners. The screws are the
+  # PnP feature and plate_points_3d is the screw rectangle (SCREW_DIMS), so mapping screws->rectangle
+  # renders them at the true SCREW_DIMS aspect and lets the plate body extend correctly beyond them.
+  # Using the texture corners stretched the screw quad to the texture's aspect (a sim-to-real bug).
+  # plate_kps_local order is [TL, TR, BL, BR]; plate_points_3d below matches that order.
+  source_points = np.array(plate_kps_local, dtype=np.float32)
 
   plate_points_3d = np.array([
-    [-plate_w / 2, -plate_h / 2, 0],
-    [ plate_w / 2, -plate_h / 2, 0],
-    [ plate_w / 2,  plate_h / 2, 0],
-    [-plate_w / 2,  plate_h / 2, 0]
+    [-plate_w / 2, -plate_h / 2, 0],   # TL
+    [ plate_w / 2, -plate_h / 2, 0],   # TR
+    [-plate_w / 2,  plate_h / 2, 0],   # BL
+    [ plate_w / 2,  plate_h / 2, 0],   # BR
   ], dtype=np.float32)
 
   tvec = np.array([[x], [y], [z]], dtype=np.float32)
@@ -152,7 +182,7 @@ def project_plate(plate, plate_alpha, plate_kps_local, img, x, y, z, rx, ry, rz,
 
   kps_array = np.array(plate_kps_local, dtype=np.float32).reshape(-1, 1, 2)
   projected_kps = cv2.perspectiveTransform(kps_array, H).reshape(-1, 2)
-  return projected_kps, H
+  return projected_kps, H, mask
 
 def _apply_emissive_leds(img, plate_rgb, plate_alpha, color_str, H, velocity_px=None):
   """Build an emissive LED layer from color-saturated texture pixels, warp into image space,
@@ -231,7 +261,7 @@ def random_plate(plate, plate_alpha, plate_kps_local, img, plate_w, plate_h, fx=
   rx, ry, rz = random.uniform(-5, 5), random.uniform(-60, 60), random.uniform(-30, 30)
   ret = project_plate(plate, plate_alpha, plate_kps_local, img, x, y, z, rx, ry, rz, plate_w, plate_h, fx)
   if ret is None: return None, (x, y, z), (rx, ry, rz), None
-  kps, H = ret
+  kps, H, _ = ret
   return kps, (x, y, z), (rx, ry, rz), H
 
 def _normalize_and_validate_corners(projected_kps):
@@ -243,6 +273,11 @@ def _normalize_and_validate_corners(projected_kps):
     return [0.0] * 8, 0.0
   corners_norm = projected_kps / np.array([IMG_W, IMG_H], dtype=np.float32)
   if (corners_norm < BIN_LO).any() or (corners_norm > BIN_HI).any():
+    return [0.0] * 8, 0.0
+  # Partial plates (some corners off-frame) are valid PnP targets, but a plate whose CENTER is off
+  # the visible frame has no on-screen anchor — it's effectively invisible. Mark it negative rather
+  # than teaching the model to regress fully-exterior keypoints.
+  if not (0.0 <= corners_norm[:, 0].mean() <= 1.0 and 0.0 <= corners_norm[:, 1].mean() <= 1.0):
     return [0.0] * 8, 0.0
   return corners_norm.flatten().tolist(), 1.0
 
@@ -266,6 +301,11 @@ def encode_unified_class(color_str:str, number:int) -> int:
 # learns to disambiguate (pick the target_color plate closest to frame center) instead of
 # locking onto whichever plate it sees first.
 MULTI_PLATE_PROB = 0.2
+# Mixed-color discrimination: when the seed IS the hunt color (a positive scene), add an opposite-
+# color distractor this often so the model must hit the hunt-color plate and ignore the wrong one.
+# Teaches "don't shoot the wrong color" from a positive, decoupling discrimination from the
+# wrong-color-only negative rate.
+MIXED_COLOR_PROB = 0.5
 ALL_PLATE_NUMBERS = [1, 2, 3, 4, 5, 6]
 BLANK_PLATE_NUMBERS = [1, 3, 4, 5]
 TARGET_COLORS = ("red", "blue")
@@ -283,12 +323,26 @@ def _random_distractor_plate(seed_color:str) -> str:
   number = random.choice(BLANK_PLATE_NUMBERS if color == "blank" else ALL_PLATE_NUMBERS)
   return f"{number}_{color}"
 
-def _build_scene_plates(seed_plate_name:str) -> list[str]:
-  """Plates to place in a scene. Seed first; with probability MULTI_PLATE_PROB also adds
-  1-2 distractors. Duplicates de-duped."""
+def _resolve_target_color(seed_plate_name:str, target_color:str|None) -> str:
+  """Hunt color. If unset, match the seed's color with prob HUNT_MATCHES_SEED_PROB (so the seeded
+  plate is usually an engageable positive), else pick randomly (yields opposite-color negatives)."""
+  if target_color is not None: return target_color
+  seed_color = seed_plate_name.split("_")[1]
+  if seed_color not in TARGET_COLORS: return random.choice(TARGET_COLORS)  # blank seed: no positive anyway
+  if random.random() < HUNT_MATCHES_SEED_PROB: return seed_color
+  return "blue" if seed_color == "red" else "red"  # opposite -> wrong-color-only negative
+
+def _build_scene_plates(seed_plate_name:str, target_color:str) -> list[str]:
+  """Plates to place in a scene. Seed first. When the seed is the hunt color (a positive scene),
+  with prob MIXED_COLOR_PROB add an opposite-(wrong-)color distractor so the model must hit the
+  hunt plate and ignore the wrong color. Then with prob MULTI_PLATE_PROB add 1-2 generic distractors
+  (teammates / blanks) for clutter. Duplicates de-duped."""
   plates = [seed_plate_name]
+  seed_color = seed_plate_name.split("_")[1]
+  if seed_color == target_color and random.random() < MIXED_COLOR_PROB:
+    opp = "blue" if target_color == "red" else "red"
+    plates.append(f"{random.choice(ALL_PLATE_NUMBERS)}_{opp}")
   if random.random() < MULTI_PLATE_PROB:
-    seed_color = seed_plate_name.split("_")[1]
     for _ in range(random.randint(1, 2)):
       distractor = _random_distractor_plate(seed_color)
       if distractor not in plates: plates.append(distractor)
@@ -316,11 +370,10 @@ def generate_sample(file, target_color:str|None=None) -> tuple[cv2.Mat, int, lis
     the right one instead of any visible plate."""
   global plate_images, plate_corners, background_images
 
-  if target_color is None: target_color = random.choice(TARGET_COLORS)
-  target_color_id = 0 if target_color == "red" else 1
-
   seed_plate_name = file.split(":")[1]
-  scene_plate_names = _build_scene_plates(seed_plate_name)
+  target_color = _resolve_target_color(seed_plate_name, target_color)
+  target_color_id = 0 if target_color == "red" else 1
+  scene_plate_names = _build_scene_plates(seed_plate_name, target_color)
 
   # Lazy-load any plates we haven't seen yet
   for name in scene_plate_names:
@@ -416,20 +469,39 @@ def _load_plate(plate_name):
   plate_alpha = raw_plate[:, :, 3]
   return plate_rgba, plate_alpha, number, color
 
-def _sample_plate_dynamics():
-  """Sample per-plate motion parameters (shared kinematics regardless of seq_type)."""
+def _sample_plate_dynamics(fx, engageable=False):
+  """Sample per-plate motion parameters (shared kinematics regardless of seq_type). engageable draws
+  the labeled-frame yaw (base_ry + theta_final) UNIFORMLY across [-MAX_ENGAGE_YAW, MAX_ENGAGE_YAW] —
+  flat coverage so angled-but-hittable plates (60°, 75°) are as common as head-on, all positives —
+  instead of a free 0-360 spin that faces away ~half the time.
+
+  Position is sampled in IMAGE space: the plate's final-frame center is placed uniformly across the
+  frame so it lands on-screen at every depth. Metric x/y sampling threw near plates fully off-frame
+  (the model sees nothing -> wasted negative); here edge placements still yield partial plates (the
+  model still sees most of the plate) but never fully-exterior ones. The orbit center cx/cy/cz is
+  back-solved so the plate (center + r·[sinθ,·,cosθ]) lands at the chosen image point."""
+  base_ry = random.uniform(-30, 30)
+  # final-frame yaw = base_ry + theta_final; pick theta_final so the sum is uniform in the engageable
+  # band, else free spin (full yaw, incl. sliver/back-facing negatives).
+  theta_final = (random.uniform(-MAX_ENGAGE_YAW, MAX_ENGAGE_YAW) - base_ry) if engageable else random.uniform(0, 360)
+  r = random.uniform(150, 250)
+  z_plate = math.exp(math.log(200) + random.random() ** (1.0 / DEPTH_FAR_BIAS) * (math.log(6000) - math.log(200)))
+  u, v = random.uniform(0, IMG_W), random.uniform(0, IMG_H)
+  x_plate = (u - CANONICAL_CX) * z_plate / fx
+  y_plate = (v - CANONICAL_CY) * z_plate / fx
+  th = math.radians(theta_final)
   return {
-    "cx": random.uniform(-400, 400),
-    "cy": random.uniform(-200, 200),
-    "cz": math.exp(random.uniform(math.log(200), math.log(6000))),
-    "r":  random.uniform(150, 250),
-    "theta_final": random.uniform(0, 360),
+    "cx": x_plate - r * math.sin(th),
+    "cy": y_plate,
+    "cz": z_plate - r * math.cos(th),
+    "r":  r,
+    "theta_final": theta_final,
     "omega": random.uniform(-15, 15),
     "dvx": random.uniform(-15, 15),
     "dvy": random.uniform(-3, 3),
     "dvz": random.uniform(-30, 30),
     "base_rx": random.uniform(-5, 5),
-    "base_ry": random.uniform(-30, 30),
+    "base_ry": base_ry,
     "base_rz": random.uniform(-30, 30),
     "wrx": random.uniform(-0.5, 0.5),
     "wrz": random.uniform(-2.0, 2.0),
@@ -474,11 +546,10 @@ def generate_sequence(file, T=4, target_color:str|None=None):
   use continuous motion regardless. If no target_color plate is centrally placed at T-1,
   class_id=0 and corners are zeros.
   """
-  if target_color is None: target_color = random.choice(TARGET_COLORS)
-  target_color_id = 0 if target_color == "red" else 1
-
   seed_plate_name = file.split(":")[1]
-  scene_plate_names = _build_scene_plates(seed_plate_name)
+  target_color = _resolve_target_color(seed_plate_name, target_color)
+  target_color_id = 0 if target_color == "red" else 1
+  scene_plate_names = _build_scene_plates(seed_plate_name, target_color)
 
   # Load all plates; augment each texture once per sequence so its appearance is consistent
   # across the T frames (real video has stable lighting/material per object within ~4 frames).
@@ -512,7 +583,9 @@ def generate_sequence(file, T=4, target_color:str|None=None):
   plate_dynamics = []
   for plate_idx in range(len(plate_infos)):
     eff_seq_type = seq_type if plate_idx == 0 else "continuous"
-    dyn = _sample_plate_dynamics()
+    # Bias only the seed plate (the one that can be the label) toward engageable yaw; distractors spin free.
+    engageable = plate_idx == 0 and random.random() < SEED_ENGAGEABLE_PROB
+    dyn = _sample_plate_dynamics(fx, engageable=engageable)
     if eff_seq_type == "static":
       dyn["omega"], dyn["dvx"], dyn["dvy"], dyn["dvz"], dyn["wrx"], dyn["wrz"] = 0, 0, 0, 0, 0, 0
     plate_dynamics.append((dyn, eff_seq_type))
@@ -544,12 +617,13 @@ def generate_sequence(file, T=4, target_color:str|None=None):
       if abs(ry_norm) > 90:
         no_plate_frames_per_plate[plate_idx].add(t)
 
+  # Motion blur is applied size-aware in data.py (so small plates aren't smeared away); here keep
+  # only the per-frame sensor noise.
   per_frame_aug = A.Compose([
     A.OneOf([
       A.GaussNoise(std_range=(0.02, 0.1), p=0.5),
       A.ISONoise(p=0.5),
     ], p=0.3),
-    A.MotionBlur(blur_limit=(5, 15), p=0.4),
   ])
 
   images = []
@@ -558,7 +632,11 @@ def generate_sequence(file, T=4, target_color:str|None=None):
 
   for t in range(T):
     img = bg_base.copy()
+    id_buf = np.full((IMG_H, IMG_W), -1, dtype=np.int16)  # topmost (nearest) plate idx per pixel
 
+    # Resolve each visible plate's jittered pose first, then composite far -> near so nearer plates
+    # correctly occlude farther ones (plate_infos order is arbitrary, not depth-sorted).
+    pending = []  # (z_t, plate_idx, info, pose, curr_center, velocity_px)
     for plate_idx, info in enumerate(plate_infos):
       if t in no_plate_frames_per_plate[plate_idx]:
         prev_centers[plate_idx] = None
@@ -577,17 +655,35 @@ def generate_sequence(file, T=4, target_color:str|None=None):
 
       curr_center = _estimate_plate_center_px(x_t, y_t, z_t, rx_t, ry_t, rz_t, fx)
       velocity_px = (curr_center - prev_centers[plate_idx]) if prev_centers[plate_idx] is not None else None
+      pending.append((z_t, plate_idx, info, (x_t, y_t, z_t, rx_t, ry_t, rz_t), curr_center, velocity_px))
 
+    pending.sort(key=lambda p: p[0], reverse=True)  # far first; nearer plates painted on top
+
+    drawn = []  # (plate_idx, info, kps_t, curr_center, ry_t) at t == T-1
+    for _z, plate_idx, info, pose, curr_center, velocity_px in pending:
+      x_t, y_t, z_t, rx_t, ry_t, rz_t = pose
       ret = project_plate(info["plate_rgba"], info["plate_alpha"], info["kps_local"], img,
                           x_t, y_t, z_t, rx_t, ry_t, rz_t, info["plate_w"], info["plate_h"], fx)
       if ret is not None:
-        kps_t, H_t = ret
+        kps_t, H_t, mask_t = ret
+        id_buf[mask_t > 0] = plate_idx
         _apply_emissive_leds(img, info["plate_rgba"], info["plate_alpha"], info["color"], H_t, velocity_px=velocity_px)
         prev_centers[plate_idx] = curr_center
-        if t == T - 1:
-          final_projections.append((info["color"], info["number"], kps_t, curr_center))
+        if t == T - 1: drawn.append((plate_idx, info, kps_t, curr_center, ry_t))
       else:
         prev_centers[plate_idx] = None
+
+    # Target candidates at the final frame: engageable yaw AND not occluded by a nearer plate. Both
+    # gates keep the plate in the image but drop it from the target set, yielding a negative sample.
+    if t == T - 1:
+      for plate_idx, info, kps_t, curr_center, ry_t in drawn:
+        if abs(((ry_t + 180) % 360) - 180) > MAX_ENGAGE_YAW: continue
+        quad = np.zeros((IMG_H, IMG_W), dtype=np.uint8)
+        cv2.fillConvexPoly(quad, kps_t.reshape(-1, 1, 2).astype(np.int32), 1)
+        area = int(quad.sum())
+        if area == 0: continue  # quad fully off-frame
+        if ((id_buf == plate_idx) & (quad > 0)).sum() / area < MIN_TARGET_VISIBLE: continue
+        final_projections.append((info["color"], info["number"], kps_t, curr_center))
 
     if desat_params is not None:
       img = apply_highlight_desat(img, p=1.0, thresh=desat_params[0], desat_factor=desat_params[1])
