@@ -18,17 +18,33 @@ class SupervisedProcess:
   proc: multiprocessing.Process | None = None
   shutting_down: bool = False
 
-  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True, watchdog_dt:float=-1):
+  def __init__(self, name:str, module:str, should_run:Callable[[dict], bool]=lambda _: True, watchdog_dt:float=-1, cpu_affinity:int|set[int]|None=None, rt_priority:int|None=None):
     self.name = name
     self.module = module
     self.should_run = should_run
     self.watchdog_dt = watchdog_dt
+    self.cpu_affinity = cpu_affinity
+    self.rt_priority = rt_priority
 
   @staticmethod
-  def _start(name:str, module:str):
+  def _start(name:str, module:str, cpu_affinity:int|set[int]|None=None, rt_priority:int|None=None):
     try:
       logger.unbind()
       logger.bind(name)
+
+      if cpu_affinity is not None:
+        cores = {cpu_affinity} if isinstance(cpu_affinity, int) else set(cpu_affinity)
+        try:
+          os.sched_setaffinity(0, cores)
+          logger.info(f"pinned {name} to CPUs {sorted(cores)}")
+        except OSError as e:
+          logger.warning(f"failed to set CPU affinity for {name}: {e}")
+      if rt_priority is not None:
+        try:
+          os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(rt_priority))
+          logger.info(f"set {name} to SCHED_FIFO priority {rt_priority}")
+        except OSError as e:
+          logger.warning(f"failed to set RT priority for {name}: {e}")
 
       messaging.reset_context()
       kv_reset()
@@ -55,7 +71,7 @@ class SupervisedProcess:
 
     logger.info(f"starting {self.module} as {self.name}")
     if self.watchdog_dt > 0: kv_put("watchdog", self.name, time.monotonic())
-    self.proc = _mp_ctx.Process(name="MainProcess", target=self._start, args=(self.name, self.module))
+    self.proc = _mp_ctx.Process(name="MainProcess", target=self._start, args=(self.name, self.module, self.cpu_affinity, self.rt_priority))
     self.proc.start()
     self.shutting_down = False
 
@@ -130,6 +146,20 @@ class Supervisor:
   def run(self):
     logger.bind("supervisor")
     setproctitle("supervisor")
+
+    reserved = set()
+    for p in self.sprocs.values():
+      if p.cpu_affinity is not None:
+        a = p.cpu_affinity
+        reserved |= {a} if isinstance(a, int) else set(a)
+    if reserved:
+      available = os.sched_getaffinity(0) - reserved
+      if available:
+        try:
+          os.sched_setaffinity(0, available)
+          logger.info(f"supervisor pinned to CPUs {sorted(available)} (reserved {sorted(reserved)} for daemons)")
+        except OSError as e:
+          logger.warning(f"failed to set supervisor CPU affinity: {e}")
 
     try:
       while True:
