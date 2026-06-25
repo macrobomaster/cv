@@ -12,7 +12,7 @@ from ..core.helpers import FrequencyKeeper
 from ...autoaim.common import (
   MUZZLE_VELOCITY, GRAVITY,
   DELTA_INPUT, DELTA_TRIGGER, GIMBAL_TAU, GIMBAL_OMEGA_MAX,
-  K_JOYSTICK, AIM_KP, AIM_KI, AIM_KD, AIM_I_CLAMP, AIM_FF_DT, AIM_D_TAU,
+  AIM_GAINS, AIM_I_CLAMP, AIM_FF_DT, AIM_D_TAU,
 )
 
 # Chassis
@@ -37,8 +37,11 @@ MUZZLE_OFFSET = np.zeros(3)            # muzzle position in gimbal-inertial. TOD
 def wrap_pi(x:float) -> float:
   return (x + math.pi) % (2 * math.pi) - math.pi
 
-def delta_settle(d_theta:float) -> float:
-  return GIMBAL_TAU + abs(d_theta) / GIMBAL_OMEGA_MAX
+def delta_settle(yaw_err:float, pitch_err:float) -> float:
+  # Gimbal isn't settled until BOTH axes are → max of the per-axis slew+settle times.
+  sy = GIMBAL_TAU["yaw"] + abs(yaw_err) / GIMBAL_OMEGA_MAX["yaw"]
+  sp = GIMBAL_TAU["pitch"] + abs(pitch_err) / GIMBAL_OMEGA_MAX["pitch"]
+  return max(sy, sp)
 
 # --- Ballistic solver (drag-free, low-arc) ---
 
@@ -57,12 +60,12 @@ def _ballistic_pitch(target:np.ndarray, muzzle:np.ndarray=MUZZLE_OFFSET) -> Opti
   return theta, t_f
 
 def solve_with_lead(predict_fn:Callable[[float], np.ndarray], t_now:float, t_state:float,
-                    d_theta_prev:float=0.0):
+                    d_yaw_prev:float=0.0, d_pitch_prev:float=0.0):
   # Returns (yaw_gi_cmd, pitch_cmd, t_arrival, target_at_arrival) or None.
   target = predict_fn(t_now)
   r0 = math.hypot(target[0] - MUZZLE_OFFSET[0], target[2] - MUZZLE_OFFSET[2])
   t_f = r0 / MUZZLE_VELOCITY
-  dp_pipeline = (t_now - t_state) + DELTA_INPUT + DELTA_TRIGGER + delta_settle(d_theta_prev)
+  dp_pipeline = (t_now - t_state) + DELTA_INPUT + DELTA_TRIGGER + delta_settle(d_yaw_prev, d_pitch_prev)
 
   for _ in range(BALLISTIC_MAX_ITER):
     t_arrival = t_now + dp_pipeline + t_f
@@ -291,12 +294,12 @@ def run():
 
   trigger = TriggerGate()
   # chassis = ChassisController()
-  yaw_pid = AxisPID(AIM_KP, AIM_KI, AIM_KD, K_JOYSTICK, AIM_I_CLAMP, AIM_D_TAU)
-  pitch_pid = AxisPID(AIM_KP, AIM_KI, AIM_KD, K_JOYSTICK, AIM_I_CLAMP, AIM_D_TAU)
+  yaw_pid = AxisPID(**AIM_GAINS["yaw"], i_clamp=AIM_I_CLAMP, d_tau=AIM_D_TAU)
+  pitch_pid = AxisPID(**AIM_GAINS["pitch"], i_clamp=AIM_I_CLAMP, d_tau=AIM_D_TAU)
 
   yaw_gi_now, pitch_gi_now = 0.0, 0.0
   yaw_rate_now, pitch_rate_now = 0.0, 0.0
-  d_theta_prev = 0.0
+  d_yaw_prev, d_pitch_prev = 0.0, 0.0
   last_t = None
   last_target_id = -1
   fk = FrequencyKeeper(200)
@@ -339,7 +342,7 @@ def run():
       continue
 
     t_now = time.monotonic()
-    sol = solve_with_lead(predict, t_now, plate["t_state"], d_theta_prev)
+    sol = solve_with_lead(predict, t_now, plate["t_state"], d_yaw_prev, d_pitch_prev)
     if sol is None:
       pub.send("aim_error", {"x": 0.0, "y": 0.0})
       pub.send("shoot", False)
@@ -350,7 +353,7 @@ def run():
     # time → tracks moving/spinning targets. Advance BOTH t_now and t_state by FF_DT: in real time a
     # fresh plate arrives with t_state advanced too, so the (t_now - t_state) lead term stays constant
     # (advancing only t_now would double-count it and over-feedforward by ~2×).
-    sol_ff = solve_with_lead(predict, t_now + AIM_FF_DT, plate["t_state"] + AIM_FF_DT, d_theta_prev)
+    sol_ff = solve_with_lead(predict, t_now + AIM_FF_DT, plate["t_state"] + AIM_FF_DT, d_yaw_prev, d_pitch_prev)
     if sol_ff is not None:
       yaw_ff = wrap_pi(sol_ff[0] - yaw_gi_cmd) / AIM_FF_DT
       pitch_ff = (sol_ff[1] - pitch_cmd) / AIM_FF_DT
@@ -359,7 +362,7 @@ def run():
 
     yaw_err = wrap_pi(yaw_gi_cmd - yaw_gi_now)
     pitch_err = pitch_cmd - pitch_gi_now
-    d_theta_prev = math.hypot(yaw_err, pitch_err)
+    d_yaw_prev, d_pitch_prev = abs(yaw_err), abs(pitch_err)
 
     dt = 0.0 if last_t is None else (t_now - last_t)
     last_t = t_now

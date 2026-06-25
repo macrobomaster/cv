@@ -146,11 +146,23 @@ def main():
     print(f"GIMBAL_TAU (velocity-rise const): {tau*1000:.1f} ± {taus*1000:.1f} ms  (from unsaturated pulses)")
   else:
     print("GIMBAL_TAU: n/a — no unsaturated pulse cleanly rose; adjust --amps")
-  print(f"K_JOYSTICK (rad/s per aim_error unit): {agg['k_joystick']:.2f}  → set decisiond K_JOYSTICK and AIM_KP")
+  print(f"K_JOYSTICK (rad/s per aim_error unit): {agg['k_joystick']:.2f}")
   print(f"response: {agg['n_settle']}/{agg['n']} pulses SETTLE → "
         + ("POSITION servo (aim_error is a position error — decisiond is correct)"
            if agg["n_settle"] > agg["n"]//2
-           else "RAMP → RATE command (decisiond should send absolute target, not position error!)"))
+           else "RAMP → RATE command (decisiond's velocity feedforward is the right design for this)"))
+
+  # Starting kp = the stability ceiling 1/(2·(dead time + rise lag)); tune UP to ringing, back off ~30%.
+  di = agg["delta_input"][0]
+  lag = di + (agg["tau"][0] if agg["tau"] else 0.0)
+  kp = round(1.0 / (2.0 * lag), 1) if lag > 0 else 3.0
+  ax = args.axis
+  print(f"\n# paste into cv/autoaim/common.py (tune kp up to the ringing limit, back off ~30%):")
+  print(f'  AIM_GAINS["{ax}"]        = dict(k_joystick={agg["k_joystick"]:.2f}, kp={kp}, ki=0.0, kd=0.0)')
+  tau_s = f'{agg["tau"][0]:.3f}' if agg["tau"] else "<n/a>"
+  print(f'  GIMBAL_TAU["{ax}"]       = {tau_s}')
+  print(f'  GIMBAL_OMEGA_MAX["{ax}"] = {agg["omega_max"]:.2f}'
+        + ("" if agg["omega_reached"] else "   # LOWER BOUND — rerun with larger --amps to saturate"))
 
   Path(args.out).parent.mkdir(parents=True, exist_ok=True)
   np.savez(args.out, t=t, cmd=np.array(trace_cmd), ang=ang, rate=rate,

@@ -50,19 +50,24 @@ def plate_screw_points(number:int) -> np.ndarray:
 MUZZLE_VELOCITY = 28.0   # m/s
 GRAVITY = 9.81           # m/s^2
 
-# pipeline latencies
+# pipeline latencies. DELTA_INPUT/TRIGGER are shared (same comms path); TAU/OMEGA_MAX are PER-AXIS
+# (different motor + inertia). All from calib_gimbal --axis {yaw,pitch}; feed the lead-settle timing.
 DELTA_INPUT = 0.020      # s, uart to control board
 DELTA_TRIGGER = 0.060    # s, flywheel delay
-GIMBAL_TAU = 0.040       # s, gimbal first-order motor constant.
-GIMBAL_OMEGA_MAX = 12.0  # rad/s, gimbal slew rate ceiling.
+GIMBAL_TAU = {"yaw": 0.072, "pitch": 0.072}        # s, velocity-rise const per axis. TODO: pitch
+GIMBAL_OMEGA_MAX = {"yaw": 6.78, "pitch": 6.78}    # rad/s, slew ceiling per axis. TODO: pitch
 
 # Gimbal tracking control (decisiond). aim_error is a RATE/joystick command:
-# gimbal_velocity = K_JOYSTICK * aim_error. The controller commands the velocity needed to follow
-# the moving aim point: velocity feedforward + PID on the angular position error, then / K_JOYSTICK.
-K_JOYSTICK = 10.0        # rad/s per aim_error unit. TODO: calibrate (calib_gimbal: peak_rate/amp).
-AIM_KP = 10.0            # 1/s. ≈ K_JOYSTICK reproduces the old proportional behavior at zero feedforward
-AIM_KI = 0.0            # leave 0; raise only if a persistent offset remains
-AIM_KD = 0.0            # leave 0; raise only if oscillation appears
+# gimbal_velocity = k_joystick * aim_error. The controller commands the velocity to follow the moving
+# aim point: velocity feedforward + PID on the angular position error, then / k_joystick.
+# PER-AXIS — yaw and pitch differ (pitch carries gravity torque + different inertia → different
+# k_joystick / stable kp, and pitch may need ki for gravity droop). Calibrate each with
+# `calib_gimbal --axis {yaw,pitch}`. k_joystick = steady-velocity slope; kp = position-loop bandwidth
+# (keep below ~1/(2·(DELTA_INPUT+TAU)) ≈ 3 rad/s or it rings; calib_gimbal prints a starting kp).
+AIM_GAINS = {
+  "yaw":   dict(k_joystick=9.05, kp=3.0, ki=0.0, kd=0.0),
+  "pitch": dict(k_joystick=9.05, kp=3.0, ki=0.0, kd=0.0),   # TODO: calib_gimbal --axis pitch
+}
 AIM_I_CLAMP = 2.0       # rad/s, anti-windup ceiling on the integral's velocity contribution
 AIM_FF_DT = 0.010       # s, forward finite-difference step for the velocity feedforward
 AIM_D_TAU = 0.020       # s, low-pass time constant on the derivative term
