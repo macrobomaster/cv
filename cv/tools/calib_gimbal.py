@@ -97,7 +97,8 @@ def main():
 
   def send(v): pub.send("aim_error", {"x": v if xy == "x" else 0.0, "y": v if xy == "y" else 0.0})
   def drain():
-    sub.update(timeout=5)
+    # drain ONLY — do NOT also call sub.update(); update() pulls one msg off the same socket that
+    # drain() then can't return, and at the gimbal_state rate that eats almost every sample.
     for d in sub.drain("gimbal_state"):
       trace_ang.append(d[ax_key]); trace_rate.append(d[rate_key]); trace_t.append(d["t_stamp"])
       trace_cmd.append(cmd[0])
@@ -107,11 +108,11 @@ def main():
     for amp, sign in pulses:
       cmd[0] = sign * amp
       t_on = time.monotonic(); windows.append([t_on, None, sign * amp])
-      while time.monotonic() - t_on < args.hold: send(cmd[0]); drain()
+      while time.monotonic() - t_on < args.hold: send(cmd[0]); drain(); time.sleep(0.002)
       windows[-1][1] = time.monotonic()
       cmd[0] = 0.0
       t_rest = time.monotonic()
-      while time.monotonic() - t_rest < args.gap: send(0.0); drain()
+      while time.monotonic() - t_rest < args.gap: send(0.0); drain(); time.sleep(0.002)
   finally:
     for _ in range(10): send(0.0); time.sleep(0.005)
 

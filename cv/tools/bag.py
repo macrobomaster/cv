@@ -50,7 +50,8 @@ def main():
   try:
     with open(args.out, "wb") as f:
       while True:
-        sub.update(timeout=20)
+        # drain ONLY — sub.update() would pull one msg/topic off the socket that drain() then misses.
+        time.sleep(0.002)
         now = time.monotonic()
         for topic in topics:
           for data in sub.drain(topic):
