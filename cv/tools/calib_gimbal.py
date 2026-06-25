@@ -4,77 +4,77 @@ DELTA_INPUT (command→motion onset), GIMBAL_TAU (first-order settle), GIMBAL_OM
 Also classifies the response as SETTLE (firmware servos aim_error to a position) vs RAMP (firmware
 treats it as a rate command) — the open question for decisiond's control law.
 
-Run with decisiond STOPPED (it also publishes aim_error). The gimbal WILL move — keep amplitude
-small and the area clear:
-    python -m cv.tools.calib_gimbal --axis pitch --amp 0.05 --hold 0.4 --steps 6
+Run with decisiond STOPPED (it also publishes aim_error). The gimbal WILL move — keep the area clear:
+    python -m cv.tools.calib_gimbal --axis yaw
 
-Prints estimates and saves weights/gimbal_sysid.npz (raw traces for inspection in Rerun).
+Sweeps several amplitudes (small → K_JOYSTICK/TAU, large → OMEGA_MAX). Prints estimates and saves
+weights/gimbal_sysid.npz (raw traces for inspection in Rerun).
 """
-import argparse, time
+import argparse, time, math
 from pathlib import Path
 
 import numpy as np
 
 from ..system.core import messaging
 
-def _analyze_step(t, ang, rate, t_on, t_off, rate_floor=None):
-  """One pulse: command steps at t_on, releases at t_off. Returns onset delay, peak rate,
-  classification (settle/ramp), and tau (if settle)."""
+def _analyze_step(t, ang, rate, t_on, t_off, sign):
+  """One pulse (commanded direction = `sign`). Returns onset delay, STEADY velocity v_ss (mean rate
+  over the plateau — noise-robust, the right metric for a rate command), the velocity-rise tau, and a
+  settle/ramp flag. v_ss is signed in the command direction (negative ⇒ moved the wrong way)."""
   t = np.asarray(t); ang = np.asarray(ang); rate = np.asarray(rate)
   drive = (t >= t_on) & (t < t_off)
-  if drive.sum() < 4: return None
-  td, ad, rd = t[drive], ang[drive], rate[drive]
+  if drive.sum() < 8: return None
+  td, rd = t[drive], rate[drive] * sign            # command-direction positive
+  n = len(rd)
   peak = float(np.max(np.abs(rd)))
-  floor = rate_floor if rate_floor is not None else max(0.05 * peak, 1e-3)
+  v_ss = float(np.mean(rd[-max(3, int(0.4 * n)):]))   # steady velocity over the last 40%
+  late = float(np.mean(np.abs(rd[-max(2, n // 5):])))
+  settle = late < 0.25 * peak                         # rate decayed → position servo; else rate cmd
 
-  moved = np.where(np.abs(rd) > floor)[0]
-  if len(moved) == 0: return None
-  onset_delay = float(td[moved[0]] - t_on)
-
-  a0 = float(ad[0])
-  ad_rel = ad - a0
-  total = float(ad_rel[-1])
-  # SETTLE: rate decays to near zero before release (position servo).
-  # RAMP: rate stays high at release (velocity command → angle keeps moving).
-  tail_rate = float(np.mean(np.abs(rd[-max(2, len(rd)//5):])))
-  settle = tail_rate < 0.25 * peak
-
+  floor = max(0.15 * peak, 1e-3)
+  moved = np.where(np.abs(rd) > floor)[0]                 # magnitude → catches wrong-direction motion too
+  onset_delay = float(td[moved[0]] - t_on) if len(moved) else float("nan")
   tau = None
-  if settle and abs(total) > 1e-3:
-    # time to 63% of final from onset → first-order tau
-    target = a0 + 0.632 * total
-    cross = np.where((ad_rel / total) >= 0.632)[0] if total > 0 else np.where((ad_rel / total) >= 0.632)[0]
-    if len(cross):
-      tau = float(td[cross[0]] - (t_on + onset_delay))
-  return {"onset_delay": onset_delay, "peak_rate": peak, "settle": settle,
-          "tau": tau, "total_move": total, "tail_rate": tail_rate}
+  if not settle and abs(v_ss) > floor and len(moved):
+    cross = np.where(np.abs(rd) >= 0.632 * abs(v_ss))[0]
+    cross = cross[cross >= moved[0]]
+    if len(cross): tau = float(td[cross[0]] - td[moved[0]])
+  return {"onset_delay": onset_delay, "v_ss": v_ss, "peak": peak, "settle": settle, "tau": tau}
 
 def aggregate(results):
-  """Separate TAU from OMEGA_MAX. For an unsaturated first-order pulse peak_rate ≈ amp/TAU
-  (grows linearly with amp); once slew-limited it clamps at OMEGA_MAX. So the peak/amp ratio is
-  flat in the linear region and DROPS where it saturates — that drop is how we know OMEGA_MAX was
-  actually reached (vs just the biggest unsaturated pulse). TAU comes from the unsaturated pulses."""
-  peaks = np.array([r["peak_rate"] for r in results])
-  amps = np.array([r["amp"] for r in results])
-  onsets = np.array([r["onset_delay"] for r in results])
-  ratio = peaks / np.maximum(amps, 1e-9)                       # ≈ 1/TAU until saturation
-  ref = float(np.median(ratio[amps <= np.median(amps)]))       # ratio in the small-amp (linear) half
-  saturated = ratio < 0.7 * ref                                # ratio fell off → slew-limited
-  reached = bool(saturated.any())
-  unsat_taus = [r["tau"] for r, s in zip(results, saturated) if not s and r["tau"] is not None]
+  """Rate-command system-ID from the STEADY velocity. For a rate command v_ss ≈ K_JOYSTICK·amp until
+  it clamps at OMEGA_MAX, so OMEGA_MAX = max(v_ss); the unsaturated points (v_ss < 0.85·max) give
+  K_JOYSTICK as the slope of a through-origin line fit (robust to the per-pulse noise that wrecked the
+  old peak metric); TAU is the velocity-rise constant from those points. DELTA_INPUT uses only pulses
+  that clearly moved (v_ss above noise), so sub-noise small amps don't corrupt the onset."""
+  res = [r for r in results if r["onset_delay"] == r["onset_delay"]]  # drop NaN-onset (no motion)
+  if not res:
+    return {"n": 0}
+  amps = np.array([r["amp"] for r in res]); vss = np.array([r["v_ss"] for r in res])
+  vmag = np.abs(vss)                                  # gain magnitude (sign handled via n_wrongdir)
+  omega_max = float(np.max(vmag))
+  unsat = vmag < 0.85 * omega_max
+  reached = bool((~unsat).sum() >= 2)                 # ≥2 points plateaued → saturation observed
+  if unsat.sum() >= 2 and np.sum(amps[unsat] ** 2) > 0:
+    k = float(np.sum(vmag[unsat] * amps[unsat]) / np.sum(amps[unsat] ** 2))   # LS slope through origin
+  else:
+    k = float(np.median(vmag / np.maximum(amps, 1e-9)))
+  taus = [r["tau"] for r, u in zip(res, unsat) if u and r["tau"] is not None]
+  clear = [r for r in res if abs(r["v_ss"]) > 0.3]    # onset only from pulses well above noise
+  onsets = np.array([r["onset_delay"] for r in (clear or res)])
   return {
-    "delta_input": (float(onsets.mean()), float(onsets.std())),
-    "omega_max": float(peaks.max()), "omega_reached": reached,
-    "k_joystick": ref,   # rad/s per aim_error unit (linear-region slope) → decisiond K_JOYSTICK
-    "tau": (float(np.mean(unsat_taus)), float(np.std(unsat_taus))) if unsat_taus else None,
-    "n_settle": sum(r["settle"] for r in results), "n": len(results), "n_saturated": int(saturated.sum()),
+    "delta_input": (float(np.median(onsets)), float(np.std(onsets))),
+    "omega_max": omega_max, "omega_reached": reached, "k_joystick": k,
+    "tau": (float(np.median(taus)), float(np.std(taus))) if taus else None,
+    "n_settle": sum(r["settle"] for r in res), "n": len(res),
+    "n_saturated": int((~unsat).sum()), "n_wrongdir": int(np.sum(vss < 0)),
   }
 
 def main():
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--axis", choices=["yaw", "pitch"], default="pitch")
-  ap.add_argument("--amps", default="0.02,0.05,0.15,0.30",
-                  help="comma list of pulse amplitudes (rad). Small→TAU (unsaturated), large→OMEGA_MAX (saturated)")
+  ap.add_argument("--amps", default="0.05,0.1,0.2,0.4,0.7",
+                  help="comma list of pulse amplitudes. Small→K_JOYSTICK/TAU (unsaturated), large→OMEGA_MAX (saturated)")
   ap.add_argument("--reps", type=int, default=2, help="+/- pulse pairs per amplitude")
   ap.add_argument("--hold", type=float, default=0.4, help="pulse hold time (s)")
   ap.add_argument("--gap", type=float, default=0.6, help="rest between pulses (s)")
@@ -122,27 +122,31 @@ def main():
 
   results = []
   for w in windows:
-    r = _analyze_step(t, ang, rate, w[0], w[1])
+    r = _analyze_step(t, ang, rate, w[0], w[1], math.copysign(1.0, w[2]))
     if r: r["amp"] = abs(w[2]); results.append(r)
   if not results:
     raise SystemExit("no clean pulses detected — increase amplitudes or check the aim_error sign")
   agg = aggregate(results)
+  if agg["n"] == 0:
+    raise SystemExit("no gimbal motion detected in any pulse — check the aim_error sign/wiring and that the gimbal is enabled")
 
   print(f"\n{agg['n']} pulses analyzed ({agg['n_saturated']} slew-saturated)")
+  if agg["n_wrongdir"] > agg["n"] // 2:
+    print("WARNING: most pulses moved AGAINST the command — flip AIM_*_SIGN in commsd (wrong actuation sign)")
   di, dis = agg["delta_input"]
   print(f"DELTA_INPUT (onset delay):    {di*1000:.1f} ± {dis*1000:.1f} ms"
         f"   (slightly inflated by ~gimbal_state sampling latency)")
   if agg["omega_reached"]:
-    print(f"GIMBAL_OMEGA_MAX (peak slew): {agg['omega_max']:.2f} rad/s")
+    print(f"GIMBAL_OMEGA_MAX (slew ceiling): {agg['omega_max']:.2f} rad/s")
   else:
     print(f"GIMBAL_OMEGA_MAX: ≥ {agg['omega_max']:.2f} rad/s (LOWER BOUND — never saturated; "
-          f"add larger --amps until peak rate stops growing with amplitude)")
+          f"add larger --amps until steady velocity stops growing with amplitude)")
   if agg["tau"]:
     tau, taus = agg["tau"]
-    print(f"GIMBAL_TAU (first-order settle): {tau*1000:.1f} ± {taus*1000:.1f} ms  (from unsaturated pulses)")
+    print(f"GIMBAL_TAU (velocity-rise const): {tau*1000:.1f} ± {taus*1000:.1f} ms  (from unsaturated pulses)")
   else:
-    print("GIMBAL_TAU: n/a — no unsaturated settle; add smaller --amps")
-  print(f"K_JOYSTICK (rad/s per aim_error unit): {agg['k_joystick']:.2f}  → decisiond K_JOYSTICK / AIM_KP")
+    print("GIMBAL_TAU: n/a — no unsaturated pulse cleanly rose; adjust --amps")
+  print(f"K_JOYSTICK (rad/s per aim_error unit): {agg['k_joystick']:.2f}  → set decisiond K_JOYSTICK and AIM_KP")
   print(f"response: {agg['n_settle']}/{agg['n']} pulses SETTLE → "
         + ("POSITION servo (aim_error is a position error — decisiond is correct)"
            if agg["n_settle"] > agg["n"]//2
