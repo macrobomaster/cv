@@ -13,7 +13,7 @@ ON_ORIN = on_orin()
 
 PROCS = [
   SupervisedProcess("commsd", "cv.system.commsd.commsd", on_orin, watchdog_dt=5),
-  SupervisedProcess("camerad", "cv.system.camerad.camerad", on_orin, watchdog_dt=5,
+  SupervisedProcess("camerad", "cv.system.camerad.camerad", watchdog_dt=5,
                     cpu_affinity=2 if ON_ORIN else None, rt_priority=80 if ON_ORIN else None),
   SupervisedProcess("autoaimd", "cv.system.autoaimd.autoaimd",
                     cpu_affinity=3 if ON_ORIN else None, rt_priority=80 if ON_ORIN else None),
