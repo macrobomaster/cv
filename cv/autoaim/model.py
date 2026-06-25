@@ -383,7 +383,8 @@ class Decoder:
     centers = bin_centers(self.n_bins)
     cum, cum_layers, qn = None, [], None
     for block in self.blocks:
-      q_pos = (q[:, :2] * 0).cat(pos_emb(ref), q[:, :1] * 0, dim=1)  # pos on corner queries only (sharding-safe zeros)
+      center = ref.mean(1, keepdim=True)  # (B, 1, 2) plate center — where the digit (class) lives
+      q_pos = (q[:, :1] * 0).cat(pos_emb(center), pos_emb(ref), q[:, :1] * 0, dim=1)  # class@center, corners@ref (sharding-safe zeros)
       q = block(q, kv, q_pos)
       qn = self.ln_out(q)
       ct = qn[:, 2:2 + N_CORNERS, :]  # (B, 4, D)
