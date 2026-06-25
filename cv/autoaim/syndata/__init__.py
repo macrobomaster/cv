@@ -58,8 +58,6 @@ def apply_highlight_desat(img, p=0.5, thresh=None, desat_factor=None):
 PLATE_PIPELINE_2 = A.Compose([
   A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.25),
   A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.25),
-  # Heavier plate motion blur: spin-top / fast-translate plates routinely smear by 11-21 px
-  A.MotionBlur(blur_limit=(5, 21), p=0.7),
   A.Downscale(scale_range=(0.25, 0.75), interpolation_pair={"downscale": cv2.INTER_NEAREST, "upscale": cv2.INTER_LINEAR}, p=0.2),
 ])
 BACKGROUND_PIPELINE = A.Compose([
@@ -97,6 +95,12 @@ MAX_ENGAGE_YAW = 75.0
 # least this fraction of a candidate's screw-quad to still show its own pixels; below it the plate
 # is rendered (partly hidden) but dropped from the target set, so the sample becomes a negative.
 MIN_TARGET_VISIBLE = 0.5
+
+# Foreground occluders (poles / our own arm / robot edges / structure) composited in FRONT of all
+# plates so the model learns partial-plate robustness. They're marked in the depth buffer too, so a
+# target whose screws they cover drops below MIN_TARGET_VISIBLE and becomes a negative.
+OCCLUDER_PROB = 0.3   # fraction of sequences with 1-2 foreground occluders
+OCCLUDER_ID = -2      # id_buf sentinel for occluder pixels (not -1 background, not any plate idx)
 
 # The seeded plate's yaw at the LABELED (final) frame. A free 0-360 spin lands on the far
 # hemisphere ~half the time (faces away -> negative), flooding the set with negatives. With this
@@ -141,7 +145,32 @@ PLATE_WIDTH_LARGE, PLATE_HEIGHT_LARGE = SCREW_DIMS_LARGE[0]*1000, SCREW_DIMS_LAR
 def plate_dims(number:int) -> tuple[float, float]:
   return (PLATE_WIDTH_LARGE, PLATE_HEIGHT_LARGE) if number == 1 else (PLATE_WIDTH_SMALL, PLATE_HEIGHT_SMALL)
 
-def project_plate(plate, plate_alpha, plate_kps_local, img, x, y, z, rx, ry, rz, plate_w, plate_h, fx=None):
+# Plate motion blur is applied in OBJECT space (on the warped plate + its alpha, along the plate's
+# own image velocity), not on the composited frame — so the static background stays sharp and the
+# blur doesn't bleed background across the plate edge. Blur length = per-frame image displacement ×
+# this exposure fraction (shutter open time as a fraction of the frame interval).
+PLATE_BLUR_EXPOSURE = (0.3, 0.8)
+
+# The plate texture is ~512px but renders at tens of px; warpPerspective (INTER_LINEAR) under-samples
+# that downscale and aliases into non-physically crisp detail. Pre-blur the texture by the local
+# downscale factor (band-limit to the target sampling rate) so far plates get the soft, low-detail
+# look the real camera produces. TEXTURE_MTF_SIGMA is a floor so even large/near plates aren't
+# perfectly sharp (approximates the lens MTF + canonical-warp resampling at inference).
+TEXTURE_MTF_SIGMA = 0.6
+
+def _motion_kernel(vx, vy, length):
+  """Normalized line kernel along (vx, vy) of `length` px, for directional motion blur."""
+  n = max(3, min(int(length) | 1, 51))  # odd, clamped
+  mid = n // 2
+  ang = math.atan2(vy, vx)
+  k = np.zeros((n, n), dtype=np.float32)
+  for i in range(-mid, mid + 1):
+    kx, ky = int(round(mid + i * math.cos(ang))), int(round(mid + i * math.sin(ang)))
+    if 0 <= kx < n and 0 <= ky < n: k[ky, kx] = 1.0
+  k /= k.sum() + 1e-6
+  return k
+
+def project_plate(plate, plate_alpha, plate_kps_local, img, x, y, z, rx, ry, rz, plate_w, plate_h, fx=None, velocity_px=None):
   """Project plate onto image at explicit pose. Returns (projected_kps, H, mask) where projected_kps
   is (N,2) in image pixel coords, H is the homography from texture to image space, and mask is the
   warped binary alpha (IMG_H, IMG_W) of the composited pixels. Returns None on failure. Composits
@@ -175,10 +204,29 @@ def project_plate(plate, plate_alpha, plate_kps_local, img, x, y, z, rx, ry, rz,
   H, _ = cv2.findHomography(source_points, projected_points_2d)
   if H is None: return None
 
+  # Band-limit the texture for the downscale (see TEXTURE_MTF_SIGMA): pre-blur by the local downscale
+  # factor so the INTER_LINEAR warp doesn't alias high-res detail into non-physical sharpness.
+  p3 = cv2.perspectiveTransform(np.array([[[0, 0]], [[plate.shape[1], 0]], [[0, plate.shape[0]]]], dtype=np.float32), H).reshape(3, 2)
+  downscale = 2.0 / (np.linalg.norm(p3[1] - p3[0]) / plate.shape[1] + np.linalg.norm(p3[2] - p3[0]) / plate.shape[0] + 1e-9)
+  plate = cv2.GaussianBlur(plate, (0, 0), max(TEXTURE_MTF_SIGMA, downscale * 0.5))
+
   warped_plate = cv2.warpPerspective(plate, H, (IMG_W, IMG_H))
-  mask = (plate_alpha > 0.5).astype(np.uint8) * 255
-  mask = cv2.warpPerspective(mask, H, (IMG_W, IMG_H))
-  cv2.copyTo(warped_plate, mask, img)
+  # Continuous-alpha composite (not a binary copyTo): warp the real alpha channel, feather it a little
+  # (lens/sensor edge softness, beyond the ~1px warp AA), then blend — so plate edges are soft and
+  # sub-pixel-blended with the background instead of a razor-sharp aliased boundary the model cues on.
+  warped_alpha = cv2.warpPerspective(plate_alpha, H, (IMG_W, IMG_H))
+  warped_alpha = cv2.GaussianBlur(warped_alpha, (0, 0), random.uniform(0.6, 1.8)).astype(np.float32) / 255.0
+  # Object-space directional motion blur: smear the plate AND its alpha along the plate's own image
+  # velocity (so trailing edges go semi-transparent and blend right), leaving the background sharp.
+  if velocity_px is not None:
+    blur_len = math.hypot(float(velocity_px[0]), float(velocity_px[1])) * random.uniform(*PLATE_BLUR_EXPOSURE)
+    if blur_len >= 2:
+      k = _motion_kernel(velocity_px[0], velocity_px[1], blur_len)
+      warped_plate = cv2.filter2D(warped_plate, -1, k)
+      warped_alpha = cv2.filter2D(warped_alpha, -1, k)
+  a = warped_alpha[..., None]
+  img[...] = (warped_plate.astype(np.float32) * a + img.astype(np.float32) * (1.0 - a)).astype(np.uint8)
+  mask = (warped_alpha > 0.5).astype(np.uint8) * 255  # footprint for id_buf / occlusion gate
 
   kps_array = np.array(plate_kps_local, dtype=np.float32).reshape(-1, 1, 2)
   projected_kps = cv2.perspectiveTransform(kps_array, H).reshape(-1, 2)
@@ -216,21 +264,10 @@ def _apply_emissive_leds(img, plate_rgb, plate_alpha, color_str, H, velocity_px=
   # the LEDs are the only thing bright enough to register through the smear. The whole-frame
   # MotionBlur pass downstream is uniform, so we add this here on just the LED layer.
   if velocity_px is not None:
-    vx, vy = float(velocity_px[0]), float(velocity_px[1])
-    speed = math.hypot(vx, vy)
-    if speed > 1.5:
-      smear_len = int(np.clip(speed * random.uniform(0.5, 1.5), 5, 51))
-      if smear_len % 2 == 0: smear_len += 1
-      mid = smear_len // 2
-      angle = math.atan2(vy, vx)
-      kernel = np.zeros((smear_len, smear_len), dtype=np.float32)
-      for k in range(-mid, mid + 1):
-        kx = int(round(mid + k * math.cos(angle)))
-        ky = int(round(mid + k * math.sin(angle)))
-        if 0 <= kx < smear_len and 0 <= ky < smear_len:
-          kernel[ky, kx] = 1.0
-      kernel /= kernel.sum() + 1e-6
-      warped_led = cv2.filter2D(warped_led, -1, kernel)
+    speed = math.hypot(float(velocity_px[0]), float(velocity_px[1]))
+    if speed > 1.5:  # LEDs over-trail the body (they're the only thing bright enough to register)
+      warped_led = cv2.filter2D(warped_led, -1, _motion_kernel(velocity_px[0], velocity_px[1],
+                                                               np.clip(speed * random.uniform(0.5, 1.5), 5, 51)))
 
   # Wide halo + tight core, both additively blended
   bloom_sigma = random.uniform(1.0, 8.0)
@@ -247,6 +284,17 @@ def _estimate_plate_center_px(x, y, z, rx, ry, rz, fx):
   pt, _ = cv2.projectPoints(np.array([[0, 0, 0]], dtype=np.float32), euler_to_rvec(rx, ry, rz),
                             np.array([[x], [y], [z]], dtype=np.float32), cam, dist)
   return pt[0, 0]
+
+def _plate_image_velocity(dyn, dt, fx):
+  """Per-frame image-space velocity (px) of the plate center from its smooth dynamics (jitter-free),
+  so motion blur smears the plate along its ACTUAL motion. Works at T=1. Mirrors the position formula
+  in _compute_plate_poses (centered finite difference over one frame)."""
+  def xyz(d):
+    th = math.radians(dyn["theta_final"] + dyn["omega"] * d)
+    return (dyn["cx"] + dyn["r"] * math.sin(th) + dyn["dvx"] * d,
+            dyn["cy"] + dyn["dvy"] * d,
+            dyn["cz"] + dyn["r"] * math.cos(th) + dyn["dvz"] * d)
+  return _estimate_plate_center_px(*xyz(dt + 0.5), 0, 0, 0, fx) - _estimate_plate_center_px(*xyz(dt - 0.5), 0, 0, 0, fx)
 
 def random_plate(plate, plate_alpha, plate_kps_local, img, plate_w, plate_h, fx=None):
   """Sample random pose, project plate, return (projected_kps, pose_tuple, rot_tuple, H)."""
@@ -535,6 +583,42 @@ def _compute_plate_poses(dyn, T:int, seq_type:str, jump_frame=None, jump_angle=0
       )
   return poses
 
+def _sample_occluders():
+  """Foreground occluders (poles / arm / robot edges) as rotated bars, sampled once per sequence so
+  they're consistent across frames. Returns a list of (poly_int32, color_rgb)."""
+  if random.random() >= OCCLUDER_PROB: return []
+  occ = []
+  for _ in range(random.randint(1, 2)):
+    cx, cy = random.uniform(0, IMG_W), random.uniform(0, IMG_H)
+    length = random.uniform(0.4, 1.5) * max(IMG_W, IMG_H)
+    width = random.uniform(8, 100)
+    ang = random.uniform(0, math.pi)
+    dx, dy = math.cos(ang), math.sin(ang)
+    nx, ny = -dy, dx
+    hl, hw = length / 2, width / 2
+    poly = np.array([
+      [cx + dx*hl + nx*hw, cy + dy*hl + ny*hw],
+      [cx + dx*hl - nx*hw, cy + dy*hl - ny*hw],
+      [cx - dx*hl - nx*hw, cy - dy*hl - ny*hw],
+      [cx - dx*hl + nx*hw, cy - dy*hl + ny*hw],
+    ], dtype=np.int32)
+    if random.random() < 0.7:  # mostly dark/gray structure (poles, metal, arm)
+      g = random.randint(10, 90)
+      color = tuple(int(max(0, min(255, g + random.randint(-12, 12)))) for _ in range(3))
+    else:
+      color = tuple(random.randint(0, 255) for _ in range(3))
+    occ.append((poly, color))
+  return occ
+
+def _draw_occluders(img, id_buf, occluders):
+  """Composite occluders in front of everything and mark them in id_buf (OCCLUDER_ID) so covered
+  target screws count as hidden in the visibility gate."""
+  for poly, color in occluders:
+    cv2.fillConvexPoly(img, poly, color)
+    m = np.zeros(img.shape[:2], dtype=np.uint8)
+    cv2.fillConvexPoly(m, poly, 1)
+    id_buf[m > 0] = OCCLUDER_ID
+
 def generate_sequence(file, T=4, target_color:str|None=None):
   """Generate a T-frame temporal sequence with physics-based plate motion.
 
@@ -617,8 +701,8 @@ def generate_sequence(file, T=4, target_color:str|None=None):
       if abs(ry_norm) > 90:
         no_plate_frames_per_plate[plate_idx].add(t)
 
-  # Motion blur is applied size-aware in data.py (so small plates aren't smeared away); here keep
-  # only the per-frame sensor noise.
+  # Motion blur is object-space (in project_plate, along each plate's own velocity); here keep only
+  # the per-frame sensor noise.
   per_frame_aug = A.Compose([
     A.OneOf([
       A.GaussNoise(std_range=(0.02, 0.1), p=0.5),
@@ -626,9 +710,10 @@ def generate_sequence(file, T=4, target_color:str|None=None):
     ], p=0.3),
   ])
 
+  occluders = _sample_occluders()  # foreground occluders, consistent across the T frames
+
   images = []
   final_projections = []  # (color, number, projected_kps, center_px) at frame T-1
-  prev_centers = [None] * len(plate_infos)
 
   for t in range(T):
     img = bg_base.copy()
@@ -639,11 +724,7 @@ def generate_sequence(file, T=4, target_color:str|None=None):
     pending = []  # (z_t, plate_idx, info, pose, curr_center, velocity_px)
     for plate_idx, info in enumerate(plate_infos):
       if t in no_plate_frames_per_plate[plate_idx]:
-        prev_centers[plate_idx] = None
         continue
-      # spin_jump only affects the seed plate's velocity continuity
-      if plate_idx == 0 and t == jump_frame:
-        prev_centers[plate_idx] = None
 
       x_t, y_t, z_t, rx_t, ry_t, rz_t = plate_poses[plate_idx][t]
       x_t += random.gauss(0, 1)
@@ -654,7 +735,8 @@ def generate_sequence(file, T=4, target_color:str|None=None):
       rz_t += random.gauss(0, 0.05)
 
       curr_center = _estimate_plate_center_px(x_t, y_t, z_t, rx_t, ry_t, rz_t, fx)
-      velocity_px = (curr_center - prev_centers[plate_idx]) if prev_centers[plate_idx] is not None else None
+      # plate's own image-space velocity (smooth dynamics) -> object-space motion blur; works at T=1
+      velocity_px = _plate_image_velocity(plate_dynamics[plate_idx][0], t - (T - 1), fx)
       pending.append((z_t, plate_idx, info, (x_t, y_t, z_t, rx_t, ry_t, rz_t), curr_center, velocity_px))
 
     pending.sort(key=lambda p: p[0], reverse=True)  # far first; nearer plates painted on top
@@ -663,15 +745,16 @@ def generate_sequence(file, T=4, target_color:str|None=None):
     for _z, plate_idx, info, pose, curr_center, velocity_px in pending:
       x_t, y_t, z_t, rx_t, ry_t, rz_t = pose
       ret = project_plate(info["plate_rgba"], info["plate_alpha"], info["kps_local"], img,
-                          x_t, y_t, z_t, rx_t, ry_t, rz_t, info["plate_w"], info["plate_h"], fx)
+                          x_t, y_t, z_t, rx_t, ry_t, rz_t, info["plate_w"], info["plate_h"], fx, velocity_px=velocity_px)
       if ret is not None:
         kps_t, H_t, mask_t = ret
         id_buf[mask_t > 0] = plate_idx
         _apply_emissive_leds(img, info["plate_rgba"], info["plate_alpha"], info["color"], H_t, velocity_px=velocity_px)
-        prev_centers[plate_idx] = curr_center
         if t == T - 1: drawn.append((plate_idx, info, kps_t, curr_center, ry_t))
-      else:
-        prev_centers[plate_idx] = None
+
+    # Foreground occluders in front of all plates (+ marked in id_buf), so the visibility gate below
+    # treats covered screws as hidden.
+    _draw_occluders(img, id_buf, occluders)
 
     # Target candidates at the final frame: engageable yaw AND not occluded by a nearer plate. Both
     # gates keep the plate in the image but drop it from the target set, yielding a negative sample.
