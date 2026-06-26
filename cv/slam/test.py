@@ -154,8 +154,11 @@ def test_msckf_endtoend() -> None:
   ts = [p_cl_np[s] for s in slots]
   est_pw, ok = triangulate_feature(np.array([uv for _, uv in uvs], np.float32), Rs, ts)
   _check("VIO triangulation ok", ok)
-  n_used = st.update_with_features([est_pw], [uvs])
-  _check("MSCKF update accepted feature", n_used == 1)
+  pos_var_before = float(np.trace(st.P.numpy()[0:3, 0:3]))
+  st.update_with_features([est_pw], [uvs])
+  pos_var_after = float(np.trace(st.P.numpy()[0:3, 0:3]))
+  _check("MSCKF feature update reduces position variance", pos_var_after < pos_var_before,
+         f"trace(P_pos) {pos_var_before:.2e} -> {pos_var_after:.2e}")
 
   P_eig = np.linalg.eigvalsh(st.P.numpy() + 1e-9*np.eye(ERR_DIM))
   _check("P remains positive definite", float(P_eig.min()) > -1e-5, f"min eig={P_eig.min():.2e}")
@@ -186,12 +189,40 @@ def test_position_update() -> None:
          f"x {x_before:.4f} -> {x_after:.4f}")
 
 # ---------------------------------------------------------------------------
+def test_yaw_update() -> None:
+  """δψ yaw-bias state: covariance grows under random walk, a yaw residual
+  pulls the correction toward it, and repeated updates stay finite."""
+  from .msckf import PSI
+  accel = np.array([0, 0, 9.81], np.float32)
+  st = MsckfState.init()
+  psi0 = float(st.P.numpy()[PSI, PSI])
+  for _ in range(50): st.predict(accel, 0.01, _I3)        # random-walk grows δψ var
+  psi1 = float(st.P.numpy()[PSI, PSI])
+  _check("yaw variance grows under random walk", psi1 > psi0, f"{psi0:.2e} -> {psi1:.2e}")
+
+  # A yaw residual of +0.1 rad should be partially absorbed (covariance-weighted)
+  # and shrink the yaw variance; the returned δψ increment has the right sign.
+  dpsi = st.update_with_yaw(0.1)
+  psi2 = float(st.P.numpy()[PSI, PSI])
+  _check("yaw update reduces yaw variance", psi2 < psi1, f"{psi1:.2e} -> {psi2:.2e}")
+  _check("yaw correction has correct sign", 0.0 < dpsi <= 0.1, f"dpsi={dpsi:.4f}")
+
+  # survives repeated interleaved predict + yaw updates
+  finite = True
+  for k in range(6):
+    for _ in range(10): st.predict(accel, 0.01, _I3)
+    st.update_with_yaw(0.05)
+    if not np.isfinite(st.P.numpy()).all(): finite = False; break
+  _check("yaw update survives repeated calls", finite)
+
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
   test_linalg()
   test_predict()
   test_triangulate()
   test_msckf_endtoend()
   test_position_update()
+  test_yaw_update()
   print()
   if _failures:
     print(f"{len(_failures)} FAILURE(S): {_failures}")

@@ -88,7 +88,8 @@ TAG_POS_NOISE = 0.05             # m
 TAG_ROT_NOISE = 0.05            # rad
 # Reject tag detections whose PnP reprojection is implausible / too far.
 TAG_MAX_RANGE = 8.0              # m
-# Gimbal yaw is gyro-integrated and drifts (no absolute yaw reference); tags
-# are the only global yaw anchor. Complementary-filter the gimbal-yaw offset
-# toward the tag-implied yaw at this gain per detection (0 disables).
-YAW_CORRECT_ALPHA = 0.3
+# Gimbal yaw is gyro-integrated and drifts (no absolute yaw reference); the
+# filter carries a yaw-bias state δψ that random-walks at this rate and is
+# corrected by the tag's absolute yaw (a Kalman update with TAG_YAW_NOISE).
+YAW_DRIFT_RW = 5.0e-3            # rad / s / sqrt(Hz) — gimbal yaw drift rate
+TAG_YAW_NOISE = 0.03            # rad — AprilTag yaw measurement stddev
