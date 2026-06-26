@@ -96,14 +96,10 @@ def run():
     if due(next_comm_at, "raw_imu"):
       ra = comm_msg(protocol, comm_counts, "raw_imu", Command.RAW_ACCEL)
       if ra is not None:
-        # RAW_ACCEL returns 6 floats: accel xyz (m/s^2), gyro xyz (rad/s) in
-        # the gimbal-IMU frame. TODO: confirm field order + axis convention
-        # against firmware; SLAM expects +z up / gravity per slam.calib.
-        ax, ay, az, gx, gy, gz = ra
+        ax, ay, az, delta = ra
         gimbal_pub.send("raw_imu", {
           "t": time.monotonic(),
           "accel": [ax, ay, az],
-          "gyro": [gx, gy, gz],
         })
 
     aim_error = sub["aim_error"]

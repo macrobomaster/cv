@@ -15,24 +15,24 @@ class Command(Enum):
   GIMBAL_STATE = 0x08
 
 COMMAND_FORMATS = {
-  Command.CHECK_STATE: 'B',
-  Command.MOVE_ROBOT: 'ff',
-  Command.CONTROL_SPINNING: 'B',
-  Command.AIM_ERROR: 'ff',
-  Command.CONTROL_SHOOT: 'B',
+  Command.CHECK_STATE: '<B',
+  Command.MOVE_ROBOT: '<ff',
+  Command.CONTROL_SPINNING: '<B',
+  Command.AIM_ERROR: '<ff',
+  Command.CONTROL_SHOOT: '<B',
   Command.RAW_ACCEL: '',
   Command.GIMBAL_STATE: '',
 }
 
 RESPONSE_FORMATS = {
-  Command.CHECK_STATE: 'BB',
-  Command.MOVE_ROBOT: 'B',
-  Command.CONTROL_SPINNING: 'B',
-  Command.AIM_ERROR: 'B',
-  Command.CONTROL_SHOOT: 'B',
-  Command.RAW_ACCEL: 'ffffffL',
+  Command.CHECK_STATE: '<BB',
+  Command.MOVE_ROBOT: '<B',
+  Command.CONTROL_SPINNING: '<B',
+  Command.AIM_ERROR: '<B',
+  Command.CONTROL_SHOOT: '<B',
+  Command.RAW_ACCEL: '<fffL',
   # fused-IMU absolute angles + rates (no encoders): pitch, yaw, pitch_rate, yaw_rate (rad, rad/s)
-  Command.GIMBAL_STATE: 'ffff',
+  Command.GIMBAL_STATE: '<ffff',
 }
 
 CRC8_INIT = 0xff
