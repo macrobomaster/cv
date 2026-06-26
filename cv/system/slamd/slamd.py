@@ -67,11 +67,12 @@ def _gimbal_R_wb(yaw:float, pitch:float) -> np.ndarray:
   Ry = np.array([[cp,0,sp],[0,1,0],[-sp,0,cp]], np.float32)   # pitch about +y
   return (Rz @ Ry).astype(np.float32)
 
-def _tag_body_position(tag_id:int, corners:np.ndarray, p_offset:np.ndarray):
-  """PnP a single tag + field map → camera position in world, then the IMU
-  body position p_wb = p_wc - p_offset (p_offset = R_wb·t_ic, known from the
-  gimbal). Orientation is NOT taken from the tag — the gimbal owns it.
-  Returns p_wb (3,) or None."""
+def _tag_body_pose(tag_id:int, corners:np.ndarray, p_offset:np.ndarray, R_ic:np.ndarray):
+  """PnP a single tag + field map. Returns (p_wb, yaw_tag) or None:
+    p_wb    = IMU body position in world = p_wc - p_offset (p_offset=R_wb·t_ic)
+    yaw_tag = absolute body yaw implied by the tag (for gimbal-yaw-drift
+              correction). Pitch/roll are NOT taken from the tag — the gimbal
+              (gravity-referenced) owns them; only yaw lacks an absolute ref."""
   entry = calib.TAG_FIELD_MAP.get(tag_id)
   if entry is None: return None
   R_wt, t_wt = entry
@@ -83,7 +84,9 @@ def _tag_body_position(tag_id:int, corners:np.ndarray, p_offset:np.ndarray):
   R_ct = cv2.Rodrigues(rvec)[0]                        # camera <- tag
   R_wc = R_wt @ R_ct.T                                  # world <- camera
   p_wc = t_wt - R_wc @ t_ct                            # camera origin in world
-  return (p_wc - p_offset).astype(np.float32)
+  R_wb_tag = R_wc @ R_ic.T                              # world <- IMU body (from tag)
+  yaw_tag = float(np.arctan2(R_wb_tag[1, 0], R_wb_tag[0, 0]))  # Rz(yaw)Ry(pitch) → yaw
+  return (p_wc - p_offset).astype(np.float32), yaw_tag
 
 def _triangulate_msg_track(tr_msg:dict, R_cl:list, p_cl:np.ndarray,
                            fid_to_slot:dict[int, int]):
@@ -118,6 +121,7 @@ def run():
   n_tags_total = 0
   gimbal_yaw = 0.0
   gimbal_pitch = 0.0          # latest gimbal angles for the body/camera orientation
+  yaw_offset = 0.0            # gimbal-yaw drift correction, anchored by AprilTags
   last_wd = 0.0
   # flow diagnostics (logged ~0.5 Hz)
   diag_t = time.monotonic()
@@ -146,7 +150,9 @@ def run():
     d_frames += 1
 
     # Orientation is known from the gimbal (body = IMU, camera = yaw-stage).
-    R_wb = _gimbal_R_wb(gimbal_yaw, gimbal_pitch)        # world<-IMU
+    # yaw_offset corrects the gimbal's slowly-drifting integrated yaw (anchored
+    # by AprilTags below); pitch is gravity-referenced so it's used as-is.
+    R_wb = _gimbal_R_wb(gimbal_yaw + yaw_offset, gimbal_pitch)   # world<-IMU
     R_ic, t_ic = calib.cam_from_imu(gimbal_pitch)        # IMU<-camera
     R_wc = (R_wb @ R_ic).astype(np.float32)              # world<-camera
     p_offset = (R_wb @ t_ic).astype(np.float32)          # camera-pos offset from IMU
@@ -185,10 +191,15 @@ def run():
     if tags is not None and sub.updated["apriltags"]:
       d_tags_seen += len(tags["detections"])
       for det in tags["detections"]:
-        p_wb = _tag_body_position(int(det["id"]), np.array(det["corners"], dtype=np.float32),
-                                  p_offset)
-        if p_wb is None: continue
+        res = _tag_body_pose(int(det["id"]), np.array(det["corners"], dtype=np.float32),
+                             p_offset, R_ic)
+        if res is None: continue
+        p_wb, yaw_tag = res
         st.update_with_position(p_wb)
+        # Anchor the drifting gimbal yaw to the tag's absolute yaw (wrapped).
+        err = yaw_tag - (gimbal_yaw + yaw_offset)
+        err = float(np.arctan2(np.sin(err), np.cos(err)))
+        yaw_offset += calib.YAW_CORRECT_ALPHA * err
         n_tags_total += 1
         d_tags_matched += 1
         seen_tag_p.append(p_wb.tolist())

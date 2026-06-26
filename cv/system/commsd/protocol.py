@@ -30,7 +30,7 @@ RESPONSE_FORMATS = {
   Command.CONTROL_SPINNING: 'B',
   Command.AIM_ERROR: 'B',
   Command.CONTROL_SHOOT: 'B',
-  Command.RAW_ACCEL: 'ffffff',
+  Command.RAW_ACCEL: 'ffffffL',
   # fused-IMU absolute angles + rates (no encoders): pitch, yaw, pitch_rate, yaw_rate (rad, rad/s)
   Command.GIMBAL_STATE: 'ffff',
 }

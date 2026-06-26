@@ -88,3 +88,7 @@ TAG_POS_NOISE = 0.05             # m
 TAG_ROT_NOISE = 0.05            # rad
 # Reject tag detections whose PnP reprojection is implausible / too far.
 TAG_MAX_RANGE = 8.0              # m
+# Gimbal yaw is gyro-integrated and drifts (no absolute yaw reference); tags
+# are the only global yaw anchor. Complementary-filter the gimbal-yaw offset
+# toward the tag-implied yaw at this gain per detection (0 disables).
+YAW_CORRECT_ALPHA = 0.3
