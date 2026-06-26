@@ -343,6 +343,7 @@ class Decoder:
     # position-only query selection over memory tokens: pick the plate token, predict its corner box from its feature
     self.objness = nn.Linear(dim, 1, bias=False)  # scores each memory token for the target-color plate
     self.ref_head = nn.Linear(dim, N_CORNERS * 2, bias=False)  # selected token's feature -> size-aware corner offsets
+    self.id_proj = nn.Linear(dim, dim, bias=False)  # selected token's feature -> identity-register query token (memory -> query space)
 
     self.target_color_embed = nn.Embedding(2, dim)
 
@@ -377,7 +378,8 @@ class Decoder:
 
     class_tok = self.class_token.reshape(1, 1, D).expand(B, 1, D)
     corner_toks = self.corner_tokens.reshape(1, N_CORNERS, D).expand(B, N_CORNERS, D)  # content stays learnable
-    q = target_tok.cat(class_tok, corner_toks, sb, dim=1)  # (B, 2+N_CORNERS+1, D) — sb (global register) last
+    id_tok = self.id_proj(sel_feat)  # (B, 1, D) selected plate's identity register — disambiguates which plate to commit to
+    q = target_tok.cat(class_tok, corner_toks, sb, id_tok, dim=1)  # (B, 8, D) — sb (global) + id (plate identity) registers last
 
     # fdr like thingy, with iterative reference refinement steering the cross-attention
     centers = bin_centers(self.n_bins)
