@@ -22,8 +22,8 @@ Subs:
   apriltags:      {ct, frame_id, detections:[{id, corners:[[u,v]*4]}]}
 
 Pubs:
-  slam_pose:  {t, p_w, v_w, q_wb, cov_pose, n_tracks, n_clones, n_tags}
-  slam_debug: {t, clone_p, clone_q, recent_points, seen_tag_p}
+  slam_pose:  {t, p_w, v_w, q_wb(from gimbal), cov_pos(3x3), n_tracks, n_clones, n_tags}
+  slam_debug: {t, clone_p, recent_points, seen_tag_p}
 """
 import gc, time
 from collections import deque
@@ -52,28 +52,28 @@ _TAG_OBJ_PTS = np.array([[-_S,  _S, 0], [_S,  _S, 0],
                          [ _S, -_S, 0], [-_S, -_S, 0]], dtype=np.float32)
 _DIST_ZERO = np.zeros((1, 5), dtype=np.float32)  # frames are pre-undistorted
 
-def _quat_to_R_np(q:np.ndarray) -> np.ndarray:
-  w, x, y, z = q
-  ww, xx, yy, zz = w*w, x*x, y*y, z*z
-  wx, wy, wz = w*x, w*y, w*z
-  xy, xz, yz = x*y, x*z, y*z
-  return np.array([
-    [ww+xx-yy-zz, 2*(xy-wz),   2*(xz+wy)  ],
-    [2*(xy+wz),   ww-xx+yy-zz, 2*(yz-wx)  ],
-    [2*(xz-wy),   2*(yz+wx),   ww-xx-yy+zz],
-  ], dtype=np.float32)
-
 def _R_to_quat_np(M:np.ndarray) -> np.ndarray:
   from scipy.spatial.transform import Rotation as R
   q = R.from_matrix(M).as_quat()
   return np.array([q[3], q[0], q[1], q[2]], dtype=np.float32)
 
-def _tag_body_pose(tag_id:int, corners:np.ndarray, pitch:float):
-  """PnP a single tag, combine with the field map to get the world<-camera
-  pose, then convert to the world<-IMU(body) pose using the gimbal-pitch
-  extrinsic. Returns (q_wb, p_wb) or None if unusable."""
+def _gimbal_R_wb(yaw:float, pitch:float) -> np.ndarray:
+  """world<-IMU(body) orientation from the gimbal's absolute angles (roll≈0).
+  Gravity-referenced, so the world frame is z-up automatically.
+  TODO: confirm yaw/pitch axis order + signs against the gimbal firmware."""
+  cy, sy = np.cos(yaw), np.sin(yaw)
+  cp, sp = np.cos(pitch), np.sin(pitch)
+  Rz = np.array([[cy,-sy,0],[sy,cy,0],[0,0,1]], np.float32)   # yaw about world +z
+  Ry = np.array([[cp,0,sp],[0,1,0],[-sp,0,cp]], np.float32)   # pitch about +y
+  return (Rz @ Ry).astype(np.float32)
+
+def _tag_body_position(tag_id:int, corners:np.ndarray, p_offset:np.ndarray):
+  """PnP a single tag + field map → camera position in world, then the IMU
+  body position p_wb = p_wc - p_offset (p_offset = R_wb·t_ic, known from the
+  gimbal). Orientation is NOT taken from the tag — the gimbal owns it.
+  Returns p_wb (3,) or None."""
   entry = calib.TAG_FIELD_MAP.get(tag_id)
-  if entry is None: return None                       # unknown tag, ignore
+  if entry is None: return None
   R_wt, t_wt = entry
   ok, rvec, tvec = cv2.solvePnP(_TAG_OBJ_PTS, corners.astype(np.float32),
                                 calib.K, _DIST_ZERO, flags=cv2.SOLVEPNP_IPPE_SQUARE)
@@ -83,20 +83,16 @@ def _tag_body_pose(tag_id:int, corners:np.ndarray, pitch:float):
   R_ct = cv2.Rodrigues(rvec)[0]                        # camera <- tag
   R_wc = R_wt @ R_ct.T                                  # world <- camera
   p_wc = t_wt - R_wc @ t_ct                            # camera origin in world
-  # camera -> IMU(body): R_ic is IMU<-camera at this pitch
-  R_ic, t_ic = calib.cam_from_imu(pitch)
-  R_wb = (R_wc @ R_ic.T).astype(np.float32)
-  p_wb = (p_wc - R_wb @ t_ic).astype(np.float32)
-  return _R_to_quat_np(R_wb), p_wb
+  return (p_wc - p_offset).astype(np.float32)
 
-def _triangulate_msg_track(tr_msg:dict, q_cl:np.ndarray, p_cl:np.ndarray,
+def _triangulate_msg_track(tr_msg:dict, R_cl:list, p_cl:np.ndarray,
                            fid_to_slot:dict[int, int]):
   obs = []
   for fid, uv in zip(tr_msg["frame_ids"], tr_msg["uvs"]):
     slot = fid_to_slot.get(int(fid))
     if slot is not None: obs.append((slot, np.asarray(uv, dtype=np.float32)))
   if len(obs) < 2: return None, [], False
-  Rs = [_quat_to_R_np(q_cl[s]) for s, _ in obs]
+  Rs = [R_cl[s] for s, _ in obs]                       # known world<-camera per clone
   ts = [p_cl[s] for s, _ in obs]
   uvs = np.array([uv for _, uv in obs], dtype=np.float32)
   pw, ok = triangulate_feature(uvs, Rs, ts)
@@ -120,8 +116,12 @@ def run():
   last_imu_t:float|None = None
   recent_points:deque = deque(maxlen=200)
   n_tags_total = 0
-  gimbal_pitch = 0.0          # latest gimbal pitch (rad) for the cam<-imu extrinsic
+  gimbal_yaw = 0.0
+  gimbal_pitch = 0.0          # latest gimbal angles for the body/camera orientation
   last_wd = 0.0
+  # flow diagnostics (logged ~0.5 Hz)
+  diag_t = time.monotonic()
+  d_imu = d_feat_used = d_tags_seen = d_tags_matched = d_frames = 0
 
   kv_put("watchdog", "slamd", time.monotonic())
 
@@ -137,15 +137,23 @@ def run():
 
     gs = sub["gimbal_state"]
     if gs is not None and sub.updated["gimbal_state"]:
-      gimbal_pitch = float(gs["pitch_gi"])
+      gimbal_yaw = float(gs["yaw_gi"]); gimbal_pitch = float(gs["pitch_gi"])
 
     ft = sub["feature_tracks"]
     if ft is None or not sub.updated["feature_tracks"]: continue
     ct = float(ft["ct"])
     frame_id = int(ft["frame_id"])
+    d_frames += 1
+
+    # Orientation is known from the gimbal (body = IMU, camera = yaw-stage).
+    R_wb = _gimbal_R_wb(gimbal_yaw, gimbal_pitch)        # world<-IMU
+    R_ic, t_ic = calib.cam_from_imu(gimbal_pitch)        # IMU<-camera
+    R_wc = (R_wb @ R_ic).astype(np.float32)              # world<-camera
+    p_offset = (R_wb @ t_ic).astype(np.float32)          # camera-pos offset from IMU
 
     # Drain every queued IMU sample (non-conflate), oldest first.
     imu_samples = imu_sub.drain("raw_imu")
+    d_imu += len(imu_samples)
 
     # --- Predict through all IMU samples since the last frame --------------
     for s in imu_samples:
@@ -153,63 +161,68 @@ def run():
       dt = t_imu - last_imu_t if last_imu_t is not None else 0.005
       last_imu_t = t_imu
       if dt <= 0 or dt > 0.5: continue
-      st.predict(np.array(s["accel"], dtype=np.float32),
-                 np.array(s["gyro"],  dtype=np.float32), dt)
+      st.predict(np.array(s["accel"], dtype=np.float32), dt, R_wb)
 
-    # --- Augment clone (camera pose, via the current gimbal-pitch extrinsic)
-    R_ic, t_ic = calib.cam_from_imu(gimbal_pitch)
-    st.augment(t=ct, frame_id=frame_id, q_ic=_R_to_quat_np(R_ic), t_ic=t_ic)
+    # --- Augment clone (camera position; orientation R_wc is known) --------
+    st.augment(t=ct, frame_id=frame_id, R_wc=R_wc, p_offset=p_offset)
 
     # --- Local VIO: feature update from terminated tracks -----------------
     fid_to_slot = {fid: i for i, fid in enumerate(st.fid_cl) if fid >= 0}
-    q_cl_np = st.q_cl.numpy(); p_cl_np = st.p_cl.numpy()
+    p_cl_np = st.p_cl.numpy()
     points, obs = [], []
     for tr_msg in ft["terminated"]:
-      pw, obs_list, ok = _triangulate_msg_track(tr_msg, q_cl_np, p_cl_np, fid_to_slot)
+      pw, obs_list, ok = _triangulate_msg_track(tr_msg, st.R_cl, p_cl_np, fid_to_slot)
       if not ok or len(obs_list) < 2: continue
       points.append(pw); obs.append(obs_list)
     if points:
       st.update_with_features(points, obs)
+      d_feat_used += len(points)
       for pw in points: recent_points.append(pw.tolist())
 
-    # --- Absolute correction: AprilTag pose updates -----------------------
+    # --- Absolute correction: AprilTag position fixes ---------------------
     seen_tag_p = []
     tags = sub["apriltags"]
     if tags is not None and sub.updated["apriltags"]:
+      d_tags_seen += len(tags["detections"])
       for det in tags["detections"]:
-        res = _tag_body_pose(int(det["id"]), np.array(det["corners"], dtype=np.float32),
-                             gimbal_pitch)
-        if res is None: continue
-        q_wb, p_wb = res
-        st.update_with_pose(q_wb, p_wb)
+        p_wb = _tag_body_position(int(det["id"]), np.array(det["corners"], dtype=np.float32),
+                                  p_offset)
+        if p_wb is None: continue
+        st.update_with_position(p_wb)
         n_tags_total += 1
+        d_tags_matched += 1
         seen_tag_p.append(p_wb.tolist())
 
+    # --- Flow diagnostics --------------------------------------------------
+    if now - diag_t > 2.0:
+      dt = now - diag_t
+      logger.info(
+        f"slamd flow: frames {d_frames/dt:.0f}/s  imu {d_imu/dt:.0f}/s  "
+        f"feats_used {d_feat_used/dt:.0f}/s  tags_seen {d_tags_seen/dt:.0f}/s  "
+        f"tags_matched {d_tags_matched/dt:.0f}/s  p_w={st.p_w.numpy().round(3).tolist()}")
+      diag_t = now
+      d_imu = d_feat_used = d_tags_seen = d_tags_matched = d_frames = 0
+
     # --- Publish ----------------------------------------------------------
-    P_np = st.P.numpy()
-    cov_pose = np.zeros((6, 6), dtype=np.float32)
-    cov_pose[0:3, 0:3] = P_np[0:3, 0:3]
-    cov_pose[3:6, 3:6] = P_np[3:6, 3:6]
-    cov_pose[0:3, 3:6] = P_np[0:3, 3:6]
-    cov_pose[3:6, 0:3] = P_np[3:6, 0:3]
+    # Orientation is the gimbal's (known); the filter estimates position.
+    cov_pos = st.P.numpy()[0:3, 0:3]                     # 3x3 position covariance
 
     pub.send("slam_pose", {
       "t": ct,
       "p_w": st.p_w.numpy().tolist(),
       "v_w": st.v_w.numpy().tolist(),
-      "q_wb": st.q_wb.numpy().tolist(),
-      "cov_pose": cov_pose.flatten().tolist(),
+      "q_wb": _R_to_quat_np(R_wb).tolist(),
+      "cov_pos": cov_pos.flatten().tolist(),
       "n_tracks": len(ft["live_ids"]),
       "n_clones": sum(1 for fid in st.fid_cl if fid >= 0),
       "n_tags": n_tags_total,
     })
 
-    p_cl_full = st.p_cl.numpy(); q_cl_full = st.q_cl.numpy()
+    p_cl_full = st.p_cl.numpy()
     active_idx = [i for i, fid in enumerate(st.fid_cl) if fid >= 0]
     pub.send("slam_debug", {
       "t": ct,
       "clone_p": [p_cl_full[i].tolist() for i in active_idx],
-      "clone_q": [q_cl_full[i].tolist() for i in active_idx],
       "recent_points": list(recent_points),
       "seen_tag_p": seen_tag_p,
     })

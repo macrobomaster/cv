@@ -14,7 +14,6 @@ from .linalg import (det3, inv3, skew, vee, so3_exp, so3_log,
                      so3_right_jacobian, so3_right_jacobian_inv,
                      quat_mul, quat_to_R, quat_exp_so3,
                      solve_upper_triangular, solve_lower_triangular)
-from .imu_preint import imu_step_nominal, imu_step_phi_g, DIM_ERR, DIM_NOISE
 from .triangulate import triangulate_feature
 from .msckf import MsckfState, ERR_DIM, N_CLONES, IMU_ERR_DIM, CLONE_ERR_DIM
 from . import calib
@@ -83,31 +82,27 @@ def test_linalg() -> None:
          np.allclose(solve_lower_triangular(Tensor(L), Tensor(b)).numpy(),
                      solve_triangular(L, b, lower=True), atol=1e-4))
 
-# ---------------------------------------------------------------------------
-def test_imu_preint() -> None:
-  q = Tensor(np.array([1.0, 0, 0, 0], np.float32))
-  p = Tensor.zeros(3); v = Tensor.zeros(3)
-  b_g = Tensor.zeros(3); b_a = Tensor.zeros(3)
-  g_w = Tensor(calib.GRAVITY)
+_I3 = np.eye(3, dtype=np.float32)
+_Z3v = np.zeros(3, dtype=np.float32)
 
-  # Stationary IMU: must stay at rest. accel reads −R_bw·g = (0,0,9.81) for identity attitude.
-  a = Tensor(np.array([0,0,9.81], np.float32)); g = Tensor.zeros(3)
-  for _ in range(200): q, p, v = imu_step_nominal(q, p, v, a, g, b_g, b_a, g_w, 0.005)
-  _check("stationary IMU stays still", float(p.numpy().max()) < 1e-5 and float(v.numpy().max()) < 1e-5,
-         f"p={p.numpy()}, v={v.numpy()}")
+# ---------------------------------------------------------------------------
+def test_predict() -> None:
+  # Orientation is an input now (R_wb). At rest with R_wb=I the accelerometer
+  # reads -g = (0,0,9.81), so a_w=0 → state stays put.
+  st = MsckfState.init()
+  accel_rest = np.array([0, 0, 9.81], np.float32)
+  for _ in range(200): st.predict(accel_rest, 0.005, _I3)
+  p, v = st.p_w.numpy(), st.v_w.numpy()
+  _check("stationary stays still", float(np.abs(p).max()) < 1e-4 and float(np.abs(v).max()) < 1e-4,
+         f"p={p}, v={v}")
 
   # 1 m/s² along +x for 1 s → p≈0.5, v≈1.0
-  a = Tensor(np.array([1.0,0,9.81], np.float32))
-  q, p, v = Tensor(np.array([1.0,0,0,0], np.float32)), Tensor.zeros(3), Tensor.zeros(3)
-  for _ in range(100): q, p, v = imu_step_nominal(q, p, v, a, g, b_g, b_a, g_w, 0.01)
-  _check("1 m/s² for 1s", abs(p.numpy()[0] - 0.5) < 1e-3 and abs(v.numpy()[0] - 1.0) < 1e-3,
-         f"p={p.numpy()[0]:.5f}, v={v.numpy()[0]:.5f}")
-
-  # Phi/G shapes
-  Phi, G = imu_step_phi_g(Tensor(np.array([1.0,0,0,0], np.float32)),
-                          Tensor.zeros(3), Tensor.zeros(3), b_g, b_a, 0.01)
-  _check("Phi shape", Phi.shape == (DIM_ERR, DIM_ERR))
-  _check("G shape", G.shape == (DIM_ERR, DIM_NOISE))
+  st = MsckfState.init()
+  accel_x = np.array([1.0, 0, 9.81], np.float32)
+  for _ in range(100): st.predict(accel_x, 0.01, _I3)
+  p, v = st.p_w.numpy(), st.v_w.numpy()
+  _check("1 m/s² for 1s", abs(p[0]-0.5) < 1e-3 and abs(v[0]-1.0) < 1e-3,
+         f"p_x={p[0]:.5f}, v_x={v[0]:.5f}")
 
 # ---------------------------------------------------------------------------
 def test_triangulate() -> None:
@@ -133,24 +128,21 @@ def test_triangulate() -> None:
 
 # ---------------------------------------------------------------------------
 def test_msckf_endtoend() -> None:
-  """Constant-velocity trajectory + a few feature observations. Verify the
-  filter remains stable and outputs reasonable pose estimates."""
+  """Constant-velocity trajectory + feature observations. Orientation is the
+  known input (identity here). Verify stability + reasonable position."""
   st = MsckfState.init()
-  st.v_w = Tensor(np.array([0.5, 0.0, 0.0], dtype=np.float32), device="CPU")
-  accel = np.array([0.0, 0.0, 9.81], dtype=np.float32)
-  gyro = np.zeros(3, dtype=np.float32)
+  st.v_w = Tensor(np.array([0.5, 0.0, 0.0], dtype=np.float32), device="CPU").contiguous()
+  accel = np.array([0.0, 0.0, 9.81], dtype=np.float32)   # a_w=0 with R_wb=I → const vel
 
   pw_true = np.array([3.0, 0.0, 0.5], dtype=np.float32)
   K = 5
   for k in range(K):
-    for _ in range(25): st.predict(accel, gyro, 0.01)
-    st.augment(t=0.25*(k+1), frame_id=k)
+    for _ in range(25): st.predict(accel, 0.01, _I3)
+    st.augment(t=0.25*(k+1), frame_id=k, R_wc=_I3, p_offset=_Z3v)
 
-  # In the always-full sliding window, the K augments land in the last K
-  # slots (N_CLONES-K..N_CLONES-1, oldest→newest).
   rng = np.random.default_rng(1)
   p_cl_np = st.p_cl.numpy()
-  slots = list(range(N_CLONES - K, N_CLONES))
+  slots = list(range(N_CLONES - K, N_CLONES))     # the K augments land in the last K slots
   uvs = []
   for s in slots:
     p_c = pw_true - p_cl_np[s]
@@ -158,63 +150,48 @@ def test_msckf_endtoend() -> None:
     uv = np.array([calib.FX * p_c[0]/p_c[2] + calib.CX, calib.FY * p_c[1]/p_c[2] + calib.CY])
     uv += rng.standard_normal(2) * 0.5
     uvs.append((s, uv.astype(np.float32)))
-  Rs = [np.eye(3) for _ in slots]
+  Rs = [_I3 for _ in slots]
   ts = [p_cl_np[s] for s in slots]
   est_pw, ok = triangulate_feature(np.array([uv for _, uv in uvs], np.float32), Rs, ts)
   _check("VIO triangulation ok", ok)
   n_used = st.update_with_features([est_pw], [uvs])
   _check("MSCKF update accepted feature", n_used == 1)
 
-  # Verify P stays ~PSD. Threshold is float32-roundoff tolerant: CPU reduction
-  # ordering is nondeterministic so the smallest eigenvalue jitters around 0 by
-  # ~1e-6 on a covariance whose entries are ~1e-3. A real non-PD bug shows much
-  # larger negatives.
   P_eig = np.linalg.eigvalsh(st.P.numpy() + 1e-9*np.eye(ERR_DIM))
-  _check("P remains positive definite", float(P_eig.min()) > -1e-5,
-         f"min eig={P_eig.min():.2e}")
+  _check("P remains positive definite", float(P_eig.min()) > -1e-5, f"min eig={P_eig.min():.2e}")
 
-  # Position should be approximately the constant-velocity prediction
   exp_x = 0.5 * 1.25  # 0.5 m/s × 1.25 s
   err_x = abs(float(st.p_w.numpy()[0]) - exp_x)
   _check("filter p_x near 0.625m", err_x < 0.05, f"p_x={float(st.p_w.numpy()[0]):.4f}")
 
 # ---------------------------------------------------------------------------
-def test_apriltag_pose_update() -> None:
-  """An absolute pose measurement should pull a drifted state back, and must
-  survive many calls (guards the tinygrad 6x6 qr JIT-replay bug)."""
-  def q_yaw(a):
-    q = R.from_euler('z', a).as_quat()
-    return np.array([q[3], q[0], q[1], q[2]], dtype=np.float32)
-
-  st = MsckfState.init()
+def test_position_update() -> None:
+  """Absolute position fix (AprilTag) pulls drift back and survives repeated
+  calls (3x3 solve — no qr-replay issues)."""
   accel = np.array([1.0, 0.0, 9.81], dtype=np.float32)
-  gyro  = np.zeros(3, dtype=np.float32)
-
+  st = MsckfState.init()
   finite_all = True
   for k in range(6):
-    for _ in range(10): st.predict(accel, gyro, 0.01)
-    # truth: at origin, yaw = 0.1*k
-    st.update_with_pose(q_yaw(0.1*k), np.array([0.02*k, 0.0, 0.0], np.float32))
-    if not (np.isfinite(st.q_wb.numpy()).all() and np.isfinite(st.p_w.numpy()).all()):
-      finite_all = False; break
-  _check("pose update survives repeated calls (no qr-JIT NaN)", finite_all)
+    for _ in range(10): st.predict(accel, 0.01, _I3)
+    st.update_with_position(np.array([0.02*k, 0.0, 0.0], np.float32))
+    if not np.isfinite(st.p_w.numpy()).all(): finite_all = False; break
+  _check("position update survives repeated calls", finite_all)
 
-  # A tight pose fix should pull the drifted x back toward the measurement.
   st = MsckfState.init()
-  for _ in range(50): st.predict(accel, gyro, 0.01)   # drifts +x
+  for _ in range(50): st.predict(accel, 0.01, _I3)        # drifts +x
   x_before = float(st.p_w.numpy()[0])
-  st.update_with_pose(np.array([1.0,0,0,0], np.float32), np.zeros(3, np.float32))
+  st.update_with_position(np.zeros(3, np.float32))
   x_after = float(st.p_w.numpy()[0])
-  _check("pose update reduces position error", abs(x_after) < abs(x_before),
+  _check("position update reduces error", abs(x_after) < abs(x_before),
          f"x {x_before:.4f} -> {x_after:.4f}")
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
   test_linalg()
-  test_imu_preint()
+  test_predict()
   test_triangulate()
   test_msckf_endtoend()
-  test_apriltag_pose_update()
+  test_position_update()
   print()
   if _failures:
     print(f"{len(_failures)} FAILURE(S): {_failures}")

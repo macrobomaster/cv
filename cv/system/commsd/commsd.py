@@ -10,6 +10,7 @@ from .protocol import Protocol, Command, State
 
 COMM_RATES_HZ = {
   "gimbal_state": 200.0,
+  "raw_imu": 200.0,
   "aim_error": 200.0,
   "shoot": 20.0,
   "chassis_velocity": 50.0,
@@ -61,7 +62,9 @@ def run():
   protocol = Protocol(port)
 
   pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates"])
-  gimbal_pub = messaging.Pub(["gimbal_state"], conflate=False)
+  # gimbal_state + raw_imu are high-rate streams consumed sample-by-sample
+  # (slamd integrates every IMU sample), so publish non-conflate.
+  gimbal_pub = messaging.Pub(["gimbal_state", "raw_imu"], conflate=False)
   sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "spinning"])
   next_comm_at = {comm: 0.0 for comm in COMM_RATES_HZ}
   comm_counts = {comm: 0 for comm in COMM_RATES_HZ}
@@ -88,6 +91,19 @@ def run():
           "yaw_rate_gi": yaw_rate,
           "pitch_gi": pitch_angle * -1,
           "pitch_rate_gi": pitch_rate * -1,
+        })
+
+    if due(next_comm_at, "raw_imu"):
+      ra = comm_msg(protocol, comm_counts, "raw_imu", Command.RAW_ACCEL)
+      if ra is not None:
+        # RAW_ACCEL returns 6 floats: accel xyz (m/s^2), gyro xyz (rad/s) in
+        # the gimbal-IMU frame. TODO: confirm field order + axis convention
+        # against firmware; SLAM expects +z up / gravity per slam.calib.
+        ax, ay, az, gx, gy, gz = ra
+        gimbal_pub.send("raw_imu", {
+          "t": time.monotonic(),
+          "accel": [ax, ay, az],
+          "gyro": [gx, gy, gz],
         })
 
     aim_error = sub["aim_error"]

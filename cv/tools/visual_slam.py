@@ -116,8 +116,8 @@ def main():
                                                     colors=[(60, 180, 255)],
                                                     radii=[0.01]))
         last_traj_log_t = time.monotonic()
-      cov = np.array(pose["cov_pose"], dtype=np.float32).reshape(6, 6)
-      pos_std = np.sqrt(np.maximum(np.diag(cov)[3:6], 0))
+      cov = np.array(pose["cov_pos"], dtype=np.float32).reshape(3, 3)
+      pos_std = np.sqrt(np.maximum(np.diag(cov), 0))
       rr.log("scalars/pos_std_x", rr.Scalars(float(pos_std[0])))
       rr.log("scalars/pos_std_y", rr.Scalars(float(pos_std[1])))
       rr.log("scalars/pos_std_z", rr.Scalars(float(pos_std[2])))
