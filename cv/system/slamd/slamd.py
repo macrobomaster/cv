@@ -126,6 +126,7 @@ def run():
   # flow diagnostics (logged ~0.5 Hz)
   diag_t = time.monotonic()
   d_imu = d_feat_used = d_tags_seen = d_tags_matched = d_frames = 0
+  d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
 
   kv_put("watchdog", "slamd", time.monotonic())
 
@@ -167,7 +168,12 @@ def run():
       dt = t_imu - last_imu_t if last_imu_t is not None else 0.005
       last_imu_t = t_imu
       if dt <= 0 or dt > 0.5: continue
-      st.predict(np.array(s["accel"], dtype=np.float32), dt, R_wb)
+      accel = np.array(s["accel"], dtype=np.float32)
+      st.predict(accel, dt, R_wb)
+      d_acc_mag += float(np.linalg.norm(accel))            # ≈9.81 if specific force, ≈0 if gravity-removed
+      a_w = R_wb @ accel + (calib.GRAVITY if calib.ACCEL_INCLUDES_GRAVITY else 0.0)
+      d_aw_z += float(a_w[2])                              # net vertical accel driving z (should avg ~0 at rest)
+      d_acc_n += 1
 
     # --- Augment clone (camera position; orientation R_wc is known) --------
     st.augment(t=ct, frame_id=frame_id, R_wc=R_wc, p_offset=p_offset)
@@ -181,11 +187,11 @@ def run():
       if not ok or len(obs_list) < 2: continue
       points.append(pw); obs.append(obs_list)
     if points:
-      st.update_with_features(points, obs)
+      yaw_offset += st.update_with_features(points, obs)   # filter may nudge yaw via covariance
       d_feat_used += len(points)
       for pw in points: recent_points.append(pw.tolist())
 
-    # --- Absolute correction: AprilTag position fixes ---------------------
+    # --- Absolute correction: AprilTag position + yaw fixes ---------------
     seen_tag_p = []
     tags = sub["apriltags"]
     if tags is not None and sub.updated["apriltags"]:
@@ -195,11 +201,12 @@ def run():
                              p_offset, R_ic)
         if res is None: continue
         p_wb, yaw_tag = res
-        st.update_with_position(p_wb)
-        # Anchor the drifting gimbal yaw to the tag's absolute yaw (wrapped).
-        err = yaw_tag - (gimbal_yaw + yaw_offset)
-        err = float(np.arctan2(np.sin(err), np.cos(err)))
-        yaw_offset += calib.YAW_CORRECT_ALPHA * err
+        yaw_offset += st.update_with_position(p_wb)
+        # Kalman yaw update: the residual feeds δψ; the filter (not a fixed
+        # blend) decides the gain, and the δψ increment folds into yaw_offset.
+        err = float(np.arctan2(np.sin(yaw_tag - (gimbal_yaw + yaw_offset)),
+                               np.cos(yaw_tag - (gimbal_yaw + yaw_offset))))
+        yaw_offset += st.update_with_yaw(err)
         n_tags_total += 1
         d_tags_matched += 1
         seen_tag_p.append(p_wb.tolist())
@@ -207,12 +214,15 @@ def run():
     # --- Flow diagnostics --------------------------------------------------
     if now - diag_t > 2.0:
       dt = now - diag_t
+      acc_mag = d_acc_mag / max(d_acc_n, 1)               # ~9.81 → specific force; ~0 → gravity-removed
+      aw_z = d_aw_z / max(d_acc_n, 1)                     # net world +z accel; should be ~0 at rest
       logger.info(
         f"slamd flow: frames {d_frames/dt:.0f}/s  imu {d_imu/dt:.0f}/s  "
-        f"feats_used {d_feat_used/dt:.0f}/s  tags_seen {d_tags_seen/dt:.0f}/s  "
-        f"tags_matched {d_tags_matched/dt:.0f}/s  p_w={st.p_w.numpy().round(3).tolist()}")
+        f"feats_used {d_feat_used/dt:.0f}/s  tags_matched {d_tags_matched/dt:.0f}/s  "
+        f"|accel|~{acc_mag:.2f}  a_w.z~{aw_z:+.2f}  p_w={st.p_w.numpy().round(3).tolist()}")
       diag_t = now
       d_imu = d_feat_used = d_tags_seen = d_tags_matched = d_frames = 0
+      d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
 
     # --- Publish ----------------------------------------------------------
     # Orientation is the gimbal's (known); the filter estimates position.

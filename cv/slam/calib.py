@@ -62,6 +62,13 @@ ACCEL_BIAS_RW = 1.0e-4           # m / s^3 / sqrt(Hz)
 
 # World gravity (we use world frame with +z up).
 GRAVITY = np.array([0.0, 0.0, -9.81], dtype=np.float32)
+# Does RAW_ACCEL report raw specific force (≈9.81 magnitude at rest, includes
+# gravity) or already-gravity-compensated linear acceleration (≈0 at rest)?
+#   True  → predict uses a_w = R_wb·accel + GRAVITY   (raw specific force)
+#   False → predict uses a_w = R_wb·accel             (gravity already removed)
+# Wrong choice makes the robot free-fall ("sink into the floor") or rocket up.
+# Check the slamd flow log's accel magnitude at rest: ~9.81 → True, ~0 → False.
+ACCEL_INCLUDES_GRAVITY = True
 
 # Pixel measurement noise stddev (used for MSCKF update).
 PIXEL_NOISE = 1.0                # px

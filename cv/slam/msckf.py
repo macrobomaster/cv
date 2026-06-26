@@ -46,7 +46,10 @@ MAX_K      = 10
 K_MIN      = 3
 
 # ---- statics (CPU) ----
-_G_W      = Tensor([0.0, 0.0, -9.81], device=_DEV)
+# Gravity added back only if the accelerometer reports raw specific force;
+# zero it if the IMU already removed gravity (else the robot free-falls).
+_G_W      = Tensor(calib.GRAVITY.tolist() if calib.ACCEL_INCLUDES_GRAVITY else [0.0, 0.0, 0.0],
+                   device=_DEV)
 _SIGMA2   = Tensor([calib.ACCEL_NOISE**2]*3 + [calib.ACCEL_BIAS_RW**2]*3, device=_DEV)
 _YAW_RW   = calib.YAW_DRIFT_RW ** 2
 _R_YAW    = calib.TAG_YAW_NOISE ** 2
