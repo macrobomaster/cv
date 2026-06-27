@@ -11,6 +11,7 @@ from .protocol import Protocol, Command, State
 COMM_RATES_HZ = {
   "gimbal_state": 200.0,
   "raw_imu": 200.0,
+  "chassis_odom": 50.0,
   "aim_error": 200.0,
   "shoot": 20.0,
   "chassis_velocity": 50.0,
@@ -61,7 +62,7 @@ def run():
   port = serial.Serial(device, 921600, timeout=1)
   protocol = Protocol(port)
 
-  pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates"])
+  pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates", "chassis_odom"])
   # gimbal_state + raw_imu are high-rate streams consumed sample-by-sample
   # (slamd integrates every IMU sample), so publish non-conflate.
   gimbal_pub = messaging.Pub(["gimbal_state", "raw_imu"], conflate=False)
@@ -101,6 +102,15 @@ def run():
           "t": time.monotonic(),
           "accel": [ax, ay, az],
         })
+
+    # wheel-odometry chassis velocity (gimbal-heading frame, m/s) → slamd fuses it
+    # as a velocity measurement so the estimate stops coasting. slamd takes the
+    # latest per camera frame, so publish conflate (not sample-by-sample).
+    if due(next_comm_at, "chassis_odom"):
+      co = comm_msg(protocol, comm_counts, "chassis_odom", Command.CHASSIS_ODOM)
+      if co is not None:
+        vx, vy = co
+        pub.send("chassis_odom", {"t": time.monotonic(), "vx": vx, "vy": vy})
 
     aim_error = sub["aim_error"]
     shoot = sub["shoot"]

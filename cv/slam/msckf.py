@@ -17,6 +17,7 @@ p_c(3)×N. Error state (10 + 3N): [δp, δv, δb_a, δψ, (δp_c)×N]; δψ's no
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.stats import chi2
 
 from . import common
 
@@ -36,7 +37,14 @@ _R_PIX = common.PIXEL_NOISE**2
 _R_POS = common.TAG_POS_NOISE**2
 _R_YAW = common.TAG_YAW_NOISE**2
 _FX, _FY, _CX, _CY = common.FX, common.FY, common.CX, common.CY
+_R_VEL = common.WHEEL_VEL_NOISE**2
+_VEL_MAX2 = common.WHEEL_SPEED_MAX**2
 _I3 = np.eye(3)
+_I2 = np.eye(2)
+# Mahalanobis gate thresholds (chi-square inverse-CDF) by measurement DOF,
+# computed once. A measurement whose rᵀS⁻¹r exceeds its DOF's threshold is an
+# outlier (wheel slip, degenerate triangulation) and is dropped.
+_CHI2 = {d: float(chi2.ppf(common.GATE_CONFIDENCE, d)) for d in range(1, 2*N_CLONES + 1)}
 
 @dataclass
 class MsckfState:
@@ -118,11 +126,16 @@ class MsckfState:
     self.P = newP
 
   # -- updates ----------------------------------------------------------------
-  def _apply(self, H:np.ndarray, r:np.ndarray, R:np.ndarray) -> float:
-    """EKF update with Joseph form; injects dx, returns the δψ increment."""
+  def _apply(self, H:np.ndarray, r:np.ndarray, R:np.ndarray, gate:float|None=None) -> float:
+    """EKF update with Joseph form; injects dx, returns the δψ increment.
+    If `gate` is given, the Mahalanobis distance rᵀS⁻¹r is checked first and the
+    update is REJECTED (no state change, return 0) when it exceeds the gate — an
+    outlier like wheel slip or a degenerate (zero-baseline) triangulation."""
     PHt = self.P @ H.T
     S = H @ PHt + R
-    K = np.linalg.solve(S, PHt.T).T                    # K = P Hᵀ S⁻¹
+    Sinv = np.linalg.inv(S)
+    if gate is not None and float(r @ Sinv @ r) > gate: return 0.0
+    K = PHt @ Sinv                                     # K = P Hᵀ S⁻¹
     dx = K @ r
     IKH = np.eye(ERR_DIM) - K @ H
     self.P = IKH @ self.P @ IKH.T + K @ R @ K.T
@@ -155,8 +168,34 @@ class MsckfState:
       Q, _ = np.linalg.qr(Hf, mode="complete")         # (2K, 2K)
       N = Q[:, 3:]                                      # (2K, 2K-3)
       H_o = N.T @ Hx; r_o = N.T @ res
-      dpsi += self._apply(H_o, r_o, _R_PIX * np.eye(H_o.shape[0]))
+      # Gated: a degenerate triangulation (no parallax) or a moving-scene point
+      # that slipped past the front-end produces a large residual vs the
+      # IMU-propagated state — drop it instead of injecting a huge correction.
+      dpsi += self._apply(H_o, r_o, _R_PIX * np.eye(H_o.shape[0]), gate=_CHI2[H_o.shape[0]])
     return dpsi
+
+  def update_with_velocity(self, vx:float, vy:float, psi:float) -> float:
+    """Fuse a 2-D horizontal chassis velocity (wheel odometry, m/s) referenced to
+    the gimbal heading `psi` (world yaw): vx=forward, vy=left. This observes v_w
+    directly (the accelerometer can't see constant velocity), killing the coast
+    in both the stationary (v≈0) and moving cases with no separate ZUPT branch.
+    The measurement passes through psi, so it also constrains δψ.
+
+    Slip is treated as measurement noise (WHEEL_VEL_NOISE); only physically-
+    impossible readings (sensor faults) are rejected. NOT Mahalanobis-gated — the
+    accelerometer can't observe DC velocity, so P[v] understates the true
+    uncertainty and a chi-square gate would reject the good wheel readings that
+    make velocity observable in the first place."""
+    if vx*vx + vy*vy > _VEL_MAX2: return 0.0
+    c, s = np.cos(psi), np.sin(psi)
+    e_fwd  = np.array([c, s, 0.0])           # gimbal forward in world = Rz(psi)·x̂
+    e_left = np.array([-s, c, 0.0])          # gimbal left    in world = Rz(psi)·ŷ
+    h1, h2 = float(e_fwd @ self.v_w), float(e_left @ self.v_w)
+    H = np.zeros((2, ERR_DIM))
+    H[0, 3:6] = e_fwd; H[1, 3:6] = e_left
+    H[0, PSI] = h2; H[1, PSI] = -h1          # ∂(Rz(psi)ᵀ v_w)/∂ψ → δψ coupling
+    r = np.array([vx - h1, vy - h2])
+    return self._apply(H, r, _R_VEL * _I2)
 
   def update_with_position(self, p_meas:np.ndarray) -> float:
     H = np.zeros((3, ERR_DIM)); H[:, 0:3] = _I3

@@ -10,6 +10,8 @@ The output point is in the world frame. The MSCKF measurement update in
 `msckf.py` then re-projects the world point into every observing clone and
 computes residuals on those re-projections (Mourikis & Roumeliotis 2007).
 """
+import math
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -103,5 +105,20 @@ def triangulate_feature(uv_obs:NDArray, R_wc:list[NDArray], t_wc:list[NDArray],
   if rho <= 1e-4: return np.zeros(3, dtype=np.float32), False
   depth = 1.0 / rho
   p_anchor = np.array([alpha*depth, beta*depth, depth], dtype=np.float64)
-  p_world = (R_wa @ p_anchor + t_wa).astype(np.float32)
-  return p_world, True
+  p_world = R_wa @ p_anchor + t_wa
+
+  # Parallax gate: with too little camera baseline (e.g. a stationary platform)
+  # inverse-depth is unobservable and p_world is garbage (it collapses toward a
+  # point at infinity, where all bearings are parallel). Require some observing
+  # camera to subtend at least MIN_PARALLAX_DEG to the point, else reject.
+  d0 = p_world - t_wc[0]; n0 = float(np.linalg.norm(d0))
+  if n0 < 1e-6: return np.zeros(3, dtype=np.float32), False
+  d0 /= n0
+  cos_max_angle = 1.0
+  for i in range(1, N):
+    di = p_world - t_wc[i]; ni = float(np.linalg.norm(di))
+    if ni < 1e-6: continue
+    cos_max_angle = min(cos_max_angle, float(d0 @ (di / ni)))
+  if cos_max_angle > math.cos(math.radians(common.MIN_PARALLAX_DEG)):
+    return np.zeros(3, dtype=np.float32), False
+  return p_world.astype(np.float32), True

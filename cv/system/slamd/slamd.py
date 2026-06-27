@@ -106,7 +106,7 @@ def run():
   gc.disable()
   cv2.setNumThreads(OPENCV_THREADS)
   pub = messaging.Pub(["slam_pose", "slam_debug"])
-  sub = messaging.Sub(["camera_feed"], poll="camera_feed")
+  sub = messaging.Sub(["camera_feed", "chassis_odom"], poll="camera_feed")
   # gimbal_state + raw_imu are high-rate; non-conflate + drain so we keep every
   # sample — gimbal for capture-time interpolation, accel for the predict.
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
@@ -123,7 +123,7 @@ def run():
   n_tags_total = 0
   gimbal_yaw = gimbal_pitch = yaw_offset = 0.0
   diag_t = time.monotonic()
-  d_imu = d_feat = d_tags = d_frames = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
+  d_imu = d_feat = d_tags = d_frames = d_vel = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
 
   kv_put("watchdog", "slamd", time.monotonic())
 
@@ -162,8 +162,23 @@ def run():
       d_acc_mag += float(np.linalg.norm(a)); d_acc_n += 1
       d_aw_z += float((R_wb @ a + (common.GRAVITY if common.ACCEL_INCLUDES_GRAVITY else 0.0))[2])
     d_imu += len(accels)
-    if accels:
+    # Skip implausibly long integration windows — the startup raw_imu backlog
+    # (non-conflate, piles up before the first frame) or a post-stall burst.
+    # Integrating seconds of accel in one step just kicks velocity; last_imu_t
+    # already advanced, so the next frame resumes cleanly.
+    if accels and sum(dts) < 0.5:
       st.predict_batch(np.array(accels, np.float32), np.array(dts, np.float32), R_wb)
+
+    # --- Wheel-odometry velocity fusion (gimbal-heading 2-D horizontal, m/s) --
+    # Observes v_w directly — the accelerometer can't see constant velocity, so
+    # without this the estimate coasts (the −700 m stationary drift). v=0 when
+    # stopped is the same update (no ZUPT branch). Filter Mahalanobis-gates it
+    # against the IMU-propagated v, rejecting wheel slip.
+    odom = sub["chassis_odom"]
+    if odom is not None and sub.updated["chassis_odom"]:
+      yaw_offset += st.update_with_velocity(float(odom["vx"]), float(odom["vy"]),
+                                            gimbal_yaw + yaw_offset)
+      d_vel += 1
 
     # --- Front-end: KLT track, then augment this frame's clone ---------------
     img = np.frombuffer(cam["frame"], dtype=np.uint8).reshape(common.IMG_H, common.IMG_W, 3)
@@ -210,9 +225,10 @@ def run():
         f"slamd flow: frames {d_frames/span:.0f}/s  imu {d_imu/span:.0f}/s  "
         f"feats_used {d_feat/span:.0f}/s  tags {d_tags/span:.0f}/s  "
         f"|accel|~{d_acc_mag/max(d_acc_n,1):.2f}  a_w.z~{d_aw_z/max(d_acc_n,1):+.2f}  "
+        f"vel {d_vel/span:.0f}/s  |v|={float(np.linalg.norm(st.v_w)):.2f}  "
         f"p_w={st.p_w.round(3).tolist()}")
       diag_t = now
-      d_imu = d_feat = d_tags = d_frames = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
+      d_imu = d_feat = d_tags = d_frames = d_vel = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
 
     # --- Publish ------------------------------------------------------------
     live_uvs, live_ids, live_ages = [], [], []

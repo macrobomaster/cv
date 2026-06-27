@@ -87,6 +87,31 @@ N_CLONES = 15
 # constraint. One number so the two ends can't disagree (a shorter track would
 # just be triangulated and then rejected).
 MIN_FEATURE_OBS = 3
+# Minimum triangulation parallax. With ~zero camera baseline (e.g. a stationary
+# platform) inverse-depth is unobservable and the triangulated point is garbage;
+# reject features whose observing clones don't subtend at least this angle. This
+# is what stops a still robot from feeding the filter degenerate feature updates.
+MIN_PARALLAX_DEG = 1.0
+
+# --- Wheel-odometry velocity fusion ----------------------------------------
+# Chassis velocity (2-D horizontal, m/s, referenced to the gimbal heading) is
+# fused as a velocity measurement on v_w. The accelerometer can't observe
+# constant velocity (it reads ~0 at steady speed), so without this the estimate
+# coasts/drifts whenever there's no parallax or tag. Because the board gives it
+# in the gimbal frame, it's a full vector (direction + magnitude); the v=0 case
+# (stationary) is just the same update, no special ZUPT branch needed.
+WHEEL_VEL_NOISE = 0.1            # m/s — measurement stddev incl. slip + lever-arm slack; tune
+# Reject wheel readings above this as a sensor fault / garbage. Moderate slip is
+# absorbed by WHEEL_VEL_NOISE instead. Velocity is NOT Mahalanobis-gated: the
+# accelerometer can't observe DC velocity, so P[v] understates the true
+# uncertainty and a chi-square gate would reject the good wheel readings that
+# make velocity observable (the overconfidence trap).
+WHEEL_SPEED_MAX = 5.0            # m/s — above the robot's top speed
+# Mahalanobis gate confidence (chi-square) for the FEATURE update — drops the
+# degenerate / moving-scene outliers that disagree with the propagated state
+# (e.g. what produced the huge position jumps). Absolute AprilTag fixes are NOT
+# gated (they're the ground-truth anchor and must always apply).
+GATE_CONFIDENCE = 0.99
 
 # --- AprilTags (absolute pose correction) ----------------------------------
 # Field has AprilTags at known locations; they replace loop closure. Detection

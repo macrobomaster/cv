@@ -19,21 +19,24 @@ def _check(name:str, ok:bool, detail:str="") -> None:
 
 _I3 = np.eye(3, dtype=np.float64)
 _Z3v = np.zeros(3, dtype=np.float64)
+# Accelerometer reading at rest (so a_w = 0), consistent with the gravity flag:
+# specific force (-g) if the IMU includes gravity, else gravity-removed (0).
+_G = common.GRAVITY.astype(np.float64) if common.ACCEL_INCLUDES_GRAVITY else np.zeros(3)
+_ACC_REST = (-_G).astype(np.float32)
 
 # ---------------------------------------------------------------------------
 def test_predict() -> None:
-  # Orientation is an input now (R_wb). At rest with R_wb=I the accelerometer
-  # reads -g = (0,0,9.81), so a_w=0 → state stays put.
+  # Orientation is an input now (R_wb). At rest the IMU reads _ACC_REST so a_w=0
+  # → state stays put (flag-agnostic: works whether or not accel includes g).
   st = MsckfState.init()
-  accel_rest = np.array([0, 0, 9.81], np.float32)
-  for _ in range(200): st.predict(accel_rest, 0.005, _I3)
+  for _ in range(200): st.predict(_ACC_REST, 0.005, _I3)
   p, v = st.p_w, st.v_w
   _check("stationary stays still", float(np.abs(p).max()) < 1e-4 and float(np.abs(v).max()) < 1e-4,
          f"p={p}, v={v}")
 
   # 1 m/s² along +x for 1 s → p≈0.5, v≈1.0
   st = MsckfState.init()
-  accel_x = np.array([1.0, 0, 9.81], np.float32)
+  accel_x = _ACC_REST + np.array([1.0, 0, 0], np.float32)
   for _ in range(100): st.predict(accel_x, 0.01, _I3)
   p, v = st.p_w, st.v_w
   _check("1 m/s² for 1s", abs(p[0]-0.5) < 1e-3 and abs(v[0]-1.0) < 1e-3,
@@ -61,13 +64,19 @@ def test_triangulate() -> None:
   _check("triangulation noisy", ok and np.linalg.norm(est - pt_w) < 0.05,
          f"err={np.linalg.norm(est - pt_w):.4f}")
 
+  # Zero baseline (stationary cameras, identical views) → no parallax → reject.
+  uv0 = np.array([common.FX*0.1 + common.CX, common.CY], np.float32)
+  _, ok0 = triangulate_feature(np.array([uv0, uv0, uv0], np.float32),
+                               [_I3, _I3, _I3], [_Z3v, _Z3v, _Z3v])
+  _check("triangulation rejects zero parallax", not ok0)
+
 # ---------------------------------------------------------------------------
 def test_msckf_endtoend() -> None:
   """Constant-velocity trajectory + feature observations. Orientation is the
   known input (identity here). Verify stability + reasonable position."""
   st = MsckfState.init()
   st.v_w = np.array([0.5, 0.0, 0.0])
-  accel = np.array([0.0, 0.0, 9.81], dtype=np.float32)   # a_w=0 with R_wb=I → const vel
+  accel = _ACC_REST                                       # a_w=0 with R_wb=I → const vel
 
   pw_true = np.array([3.0, 0.0, 0.5], dtype=np.float32)
   K = 5
@@ -106,7 +115,7 @@ def test_msckf_endtoend() -> None:
 def test_position_update() -> None:
   """Absolute position fix (AprilTag) pulls drift back and survives repeated
   calls (3x3 solve — no qr-replay issues)."""
-  accel = np.array([1.0, 0.0, 9.81], dtype=np.float32)
+  accel = _ACC_REST + np.array([1.0, 0.0, 0.0], np.float32)
   st = MsckfState.init()
   finite_all = True
   for k in range(6):
@@ -127,7 +136,7 @@ def test_position_update() -> None:
 def test_yaw_update() -> None:
   """δψ yaw-bias state: covariance grows under random walk, a yaw residual
   pulls the correction toward it, and repeated updates stay finite."""
-  accel = np.array([0, 0, 9.81], np.float32)
+  accel = _ACC_REST
   st = MsckfState.init()
   psi0 = float(st.P[PSI, PSI])
   for _ in range(50): st.predict(accel, 0.01, _I3)        # random-walk grows δψ var
@@ -150,12 +159,40 @@ def test_yaw_update() -> None:
   _check("yaw update survives repeated calls", finite)
 
 # ---------------------------------------------------------------------------
+def test_velocity_update() -> None:
+  """Wheel-odometry velocity update pins v_w (kills the coast); the gimbal
+  heading psi rotates the measurement; impossible readings are rejected."""
+  # Drifting velocity pulled back toward a zero (stopped) wheel reading.
+  st = MsckfState.init()
+  accel = _ACC_REST + np.array([1.0, 0, 0], np.float32)
+  for _ in range(50): st.predict(accel, 0.01, _I3)         # v drifts +x
+  v_before = float(np.linalg.norm(st.v_w))
+  st.update_with_velocity(0.0, 0.0, 0.0)                    # wheels: stopped (psi=0)
+  v_after = float(np.linalg.norm(st.v_w))
+  _check("zero-velocity update reduces speed", v_after < v_before,
+         f"|v| {v_before:.3f} -> {v_after:.3f}")
+
+  # Impossible wheel speed (sensor fault) is rejected; state untouched.
+  st = MsckfState.init(); st.v_w = np.array([0.2, 0.0, 0.0]); v_pre = st.v_w.copy()
+  dpsi = st.update_with_velocity(1e3, 0.0, 0.0)
+  _check("velocity rejects impossible reading", np.allclose(st.v_w, v_pre) and dpsi == 0.0,
+         f"v={st.v_w}")
+
+  # Heading rotates the measurement: forward speed at psi=90° → world +y.
+  st = MsckfState.init()
+  for _ in range(5): st.predict(_ACC_REST, 0.01, _I3)
+  st.update_with_velocity(1.0, 0.0, np.pi/2)
+  _check("velocity update respects gimbal heading", st.v_w[1] > abs(st.v_w[0]),
+         f"v={st.v_w.round(3).tolist()}")
+
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
   test_predict()
   test_triangulate()
   test_msckf_endtoend()
   test_position_update()
   test_yaw_update()
+  test_velocity_update()
   print()
   if _failures:
     print(f"{len(_failures)} FAILURE(S): {_failures}")

@@ -13,6 +13,7 @@ class Command(Enum):
   CONTROL_SHOOT = 0x04
   RAW_ACCEL = 0x05
   GIMBAL_STATE = 0x08
+  CHASSIS_ODOM = 0x09
 
 COMMAND_FORMATS = {
   Command.CHECK_STATE: '<B',
@@ -22,6 +23,7 @@ COMMAND_FORMATS = {
   Command.CONTROL_SHOOT: '<B',
   Command.RAW_ACCEL: '',
   Command.GIMBAL_STATE: '',
+  Command.CHASSIS_ODOM: '',
 }
 
 RESPONSE_FORMATS = {
@@ -33,6 +35,9 @@ RESPONSE_FORMATS = {
   Command.RAW_ACCEL: '<fffL',
   # fused-IMU absolute angles + rates (no encoders): pitch, yaw, pitch_rate, yaw_rate (rad, rad/s)
   Command.GIMBAL_STATE: '<ffff',
+  # wheel-odometry chassis velocity referenced to gimbal heading: vx (forward),
+  # vy (left), m/s. 2-D horizontal; the board does the chassis→gimbal rotation.
+  Command.CHASSIS_ODOM: '<ff',
 }
 
 CRC8_INIT = 0xff
