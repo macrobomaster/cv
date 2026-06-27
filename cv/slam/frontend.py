@@ -29,6 +29,11 @@ MIN_FEATURE_DISTANCE = 8       # px, between detected corners
 QUALITY_LEVEL = 0.01           # Shi-Tomasi quality threshold
 MIN_TRACK_AGE_FOR_UPDATE = common.MIN_FEATURE_OBS  # don't hand over tracks the filter would reject
 MAX_TRACK_LEN = common.N_CLONES # don't keep tracks longer than the clone window
+# Force-terminate length is staggered per track over [TRACK_LEN_MIN, MAX_TRACK_LEN]
+# so a bulk-seeded cohort doesn't all retire on the same frame — that synchronized
+# batch dumps ~150 feature updates into one frame (periodic position snaps +
+# pipeline stalls). Spreading it keeps a few features retiring every frame.
+TRACK_LEN_MIN = max(MIN_TRACK_AGE_FOR_UPDATE, MAX_TRACK_LEN // 2)
 
 class FeatureFrontend:
   def __init__(self):
@@ -116,9 +121,9 @@ class FeatureFrontend:
         continue
       t = self.live[tid]
       t.append(frame_id, pn[k])
-      # Cap track length to the clone window so triangulation has a finite
-      # window even when a feature is persistent.
-      if len(t) >= MAX_TRACK_LEN:
+      # Cap track length (staggered per track) so triangulation has a finite
+      # window AND cohorts don't all terminate on the same frame.
+      if len(t) >= t.max_len:
         self.live.pop(tid)
         t.alive = False
         terminated.append(t)
@@ -144,8 +149,10 @@ class FeatureFrontend:
     pts = cv2.goodFeaturesToTrack(gray, maxCorners=need, qualityLevel=QUALITY_LEVEL,
                                   minDistance=MIN_FEATURE_DISTANCE, mask=mask)
     if pts is None: return
+    span = MAX_TRACK_LEN - TRACK_LEN_MIN + 1
     for p in pts.reshape(-1, 2):
       t = Track(id=self.next_track_id)
+      t.max_len = TRACK_LEN_MIN + (self.next_track_id % span)   # staggered by id
       t.append(frame_id, p)
       self.live[self.next_track_id] = t
       self.next_track_id += 1

@@ -28,6 +28,9 @@ class Track:
   frame_ids: list[int] = field(default_factory=list)
   uv: list[np.ndarray] = field(default_factory=list)   # each (2,) float32 px
   alive: bool = True
+  max_len: int = 0                                      # front-end-assigned force-terminate length;
+                                                        # staggered per track so cohorts don't all
+                                                        # retire on the same frame (0 = unset)
 
   def append(self, frame_id:int, uv:np.ndarray) -> None:
     self.frame_ids.append(frame_id)
