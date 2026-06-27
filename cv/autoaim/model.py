@@ -289,23 +289,16 @@ class LearnedFourierPosEmb:
 
 class FeatureTokenizer:
   def __init__(self, cstage:list[int], sideband_dim:int, dim:int):
-    self.norm_x2 = RMSNorm(cstage[2])
-    self.proj_x2 = nn.Linear(cstage[2], dim, bias=False)
     self.norm_x3 = RMSNorm(cstage[3])
     self.proj_x3 = nn.Linear(cstage[3], dim, bias=False)
     self.norm_sb = RMSNorm(sideband_dim)
     self.proj_sb = nn.Linear(sideband_dim, dim, bias=False)
     self.pos_emb = LearnedFourierPosEmb(dim)
-    self.coords = Tensor.cat(coord_grid(X3_H, X3_W), coord_grid(X2_H, X2_W), dim=0).is_param_(False)  # [x3 ; x2]
-    self.level = Tensor.randn(2, dim) * 0.02  # [x3, x2]
+    self.coords = coord_grid(X3_H, X3_W).is_param_(False)  # x3 only (/32)
 
   def __call__(self, x2:Tensor, x3:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
-    pos = self.pos_emb(self.coords)
-    x3_pos, x2_pos = pos[:N_X3_TOKENS], pos[N_X3_TOKENS:]
-    x2_tokens = self.proj_x2(self.norm_x2(x2.flatten(2).transpose(1, 2))) + x2_pos + self.level[1]
-    x3_tokens = self.proj_x3(self.norm_x3(x3.flatten(2).transpose(1, 2))) + x3_pos + self.level[0]
+    mem = self.proj_x3(self.norm_x3(x3.flatten(2).transpose(1, 2))) + self.pos_emb(self.coords)  # x3 only (288), single scale
     sb_token = self.proj_sb(self.norm_sb(sb)).unsqueeze(1)  # global register -> decoder query, not memory
-    mem = Tensor.cat(x3_tokens.contiguous(), x2_tokens.contiguous(), dim=1)  # [x3 ; x2] = 1440 (GPU-friendly)
     return mem, sb_token
 
 class DecoderBlock:
@@ -386,7 +379,7 @@ class Decoder:
     cum, cum_layers, qn = None, [], None
     for block in self.blocks:
       center = ref.mean(1, keepdim=True)  # (B, 1, 2) plate center — where the digit (class) lives
-      q_pos = (q[:, :1] * 0).cat(pos_emb(center), pos_emb(ref), q[:, :1] * 0, dim=1)  # class@center, corners@ref (sharding-safe zeros)
+      q_pos = (q[:, :1] * 0).cat(pos_emb(center), pos_emb(ref), q[:, :2] * 0, dim=1)  # class@center, corners@ref; target/sb/id @0 (sharding-safe)
       q = block(q, kv, q_pos)
       qn = self.ln_out(q)
       ct = qn[:, 2:2 + N_CORNERS, :]  # (B, 4, D)
@@ -425,7 +418,7 @@ CLASS_DECODE_TABLE = [
   (1, 2, 6),  # 16: 6_blue
 ]
 
-DFL_WEIGHT = 0.25
+DFL_WEIGHT = 0.5
 L1_WEIGHT = 1.0
 CLASS_WEIGHT = 1.0
 GOLSD_WEIGHT = 0.125
