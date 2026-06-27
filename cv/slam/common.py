@@ -65,6 +65,13 @@ def cam_from_imu(pitch_rad: float) -> tuple[np.ndarray, np.ndarray]:
 # values (e.g. MPU9250 accel ~0.0008 m/s^2/sqrt(Hz)).
 ACCEL_NOISE   = 1.0e-3           # m / s^2 / sqrt(Hz)  — white noise
 ACCEL_BIAS_RW = 1.0e-4           # m / s^3 / sqrt(Hz)  — bias random walk
+# Explicit velocity random-walk process noise. The accel-only process noise above
+# is tiny, so the wheel/planar velocity updates shrink P[v] toward zero and the
+# filter becomes overconfident in its own (coasting) velocity — the updates lose
+# Kalman gain and stop pinning (velocity + the vertical channel drift even though
+# the updates fire). This keeps P[v] from collapsing so the wheel measurements
+# stay authoritative. Tune: too low → drifts when stopped; too high → noisy v.
+VEL_PROCESS_NOISE = 0.3          # m / s / sqrt(s)
 
 # World gravity (we use world frame with +z up).
 GRAVITY = np.array([0.0, 0.0, -9.81], dtype=np.float32)
@@ -124,6 +131,12 @@ GATE_CONFIDENCE = 0.99
 APRILTAG_DICT = "DICT_APRILTAG_36h11"
 TAG_SIZE = 0.15                   # m, side length of the printed tag (black border)
 
+# Fuse AprilTags into the filter (absolute position + yaw). Keep this OFF until
+# TAG_FIELD_MAP holds the real surveyed layout AND the gimbal/camera extrinsics
+# are calibrated — otherwise a tag "fix" snaps to a made-up spot through a wrong
+# R_wb and corrupts the state (esp. vertical). Detection still runs for the viz
+# overlay regardless; this only gates the state update.
+FUSE_APRILTAGS = False
 # Field map: tag id -> world pose (R_world_tag (3x3), t_world_tag (3,)).
 # The tag frame is the standard cv2 convention: origin at tag center, +x right,
 # +y down, +z out of the tag toward the viewer. World frame is +z up.

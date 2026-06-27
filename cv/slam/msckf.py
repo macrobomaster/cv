@@ -32,6 +32,7 @@ K_MIN      = common.MIN_FEATURE_OBS                        # min obs for null-sp
 _GRAV = (common.GRAVITY.astype(np.float64) if common.ACCEL_INCLUDES_GRAVITY
          else np.zeros(3))
 _ACC_N2, _ACCB_N2 = common.ACCEL_NOISE**2, common.ACCEL_BIAS_RW**2
+_VEL_PN2 = common.VEL_PROCESS_NOISE**2
 _YAW_RW2 = common.YAW_DRIFT_RW**2
 _R_PIX = common.PIXEL_NOISE**2
 _R_POS = common.TAG_POS_NOISE**2
@@ -99,6 +100,7 @@ class MsckfState:
     sig = np.array([_ACC_N2]*3 + [_ACCB_N2]*3) * total_dt
     Q = np.zeros((ERR_DIM, ERR_DIM))
     Q[:IMU_ERR_DIM, :IMU_ERR_DIM] = G @ np.diag(sig) @ G.T
+    Q[3:6, 3:6] += _VEL_PN2 * total_dt * _I3   # explicit velocity RW: keeps wheel/planar pins authoritative
     Q[PSI, PSI] += _YAW_RW2 * total_dt
     self.P = F @ self.P @ F.T + Q
 

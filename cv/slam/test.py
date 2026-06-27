@@ -195,6 +195,17 @@ def test_velocity_update() -> None:
   _check("planar constraint pulls down vertical drift", abs(st.v_w[2]) < abs(vz_before),
          f"v_z {vz_before:.3f} -> {float(st.v_w[2]):.3f}")
 
+  # Stopped robot under a persistent accel bias stays put when wheels report 0
+  # each frame — velocity process noise keeps the pin authoritative so P[v]
+  # doesn't collapse (the "stopped but keeps drifting incl. vertical" fix).
+  st = MsckfState.init()
+  bias = _ACC_REST + np.array([0.05, 0.0, 0.05], np.float32)   # x + z accel bias
+  for k in range(300):
+    st.predict(bias, 1/150, _I3)                                # ~2 s of IMU at 150 Hz
+    if k % 10 == 0: st.update_with_velocity(0.0, 0.0, 0.0)      # wheels: stopped @ ~15 Hz
+  _check("stopped stays bounded under accel bias", float(np.linalg.norm(st.p_w)) < 0.3,
+         f"p={st.p_w.round(3).tolist()}")
+
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
   test_predict()

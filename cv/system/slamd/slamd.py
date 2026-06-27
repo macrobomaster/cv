@@ -209,6 +209,7 @@ def run():
         for tag_id, c in zip(ids.flatten(), corners):
           c4 = c.reshape(4, 2)
           tag_dets.append({"id": int(tag_id), "corners": c4.astype(float).tolist()})
+          if not common.FUSE_APRILTAGS: continue   # detect for the viz; don't fuse until map+extrinsics are real
           res = _tag_body_pose(int(tag_id), c4, p_offset, R_ic)
           if res is None: continue
           p_wb, yaw_tag = res
