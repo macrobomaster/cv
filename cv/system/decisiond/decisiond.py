@@ -9,6 +9,8 @@ import numpy as np
 from ..core import messaging
 from ..core.logging import logger
 from ..core.helpers import FrequencyKeeper
+from ..common.geometry import wrap_pi
+from ..common.gimbal import GimbalBuffer
 from ...autoaim.common import (
   MUZZLE_VELOCITY, GRAVITY,
   DELTA_INPUT, DELTA_TRIGGER, GIMBAL_TAU, GIMBAL_OMEGA_MAX,
@@ -33,9 +35,6 @@ BALLISTIC_TOL = 5e-4                   # s, fixed-point convergence
 MUZZLE_OFFSET = np.zeros(3)            # muzzle position in gimbal-inertial. TODO: measure barrel offset.
 
 # --- Math helpers ---
-
-def wrap_pi(x:float) -> float:
-  return (x + math.pi) % (2 * math.pi) - math.pi
 
 def delta_settle(yaw_err:float, pitch_err:float) -> float:
   # Gimbal isn't settled until BOTH axes are → max of the per-axis slew+settle times.
@@ -80,7 +79,7 @@ def solve_with_lead(predict_fn:Callable[[float], np.ndarray], t_now:float, t_sta
 
   t_arrival = t_now + dp_pipeline + t_f
   rel = target - MUZZLE_OFFSET
-  yaw_cmd = math.atan2(-rel[2], rel[0])
+  yaw_cmd = math.atan2(rel[2], rel[0])  # +z = right in the corrected (proper) gimbal frame; was -rel[2] to undo R_MOUNT's mirror
   return yaw_cmd, theta, t_arrival, target
 
 # --- Target trajectory prediction ---
@@ -281,16 +280,11 @@ class AxisPID:
 
 # --- Daemon entry point ---
 
-def _latest_gimbal(gimbal_sub:messaging.Sub) -> Optional[tuple[float, float, float, float]]:
-  msgs = gimbal_sub.drain("gimbal_state")
-  if not msgs: return None
-  last = msgs[-1]
-  return last["yaw_gi"], last["pitch_gi"], last["yaw_rate_gi"], last["pitch_rate_gi"]
-
 def run():
   pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
   sub = messaging.Sub(["plate"], poll="plate")
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
+  gimbal_buf = GimbalBuffer()
 
   trigger = TriggerGate()
   # chassis = ChassisController()
@@ -309,7 +303,8 @@ def run():
     fk.step()
     sub.update(timeout=10)
 
-    gp = _latest_gimbal(gimbal_sub)
+    for m in gimbal_sub.drain("gimbal_state"): gimbal_buf.push(m)
+    gp = gimbal_buf.latest()
     if gp is None:
       if not warned_no_gimbal:
         logger.warning("decisiond: no gimbal_state samples; using zero gimbal pose")
