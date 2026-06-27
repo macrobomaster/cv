@@ -125,6 +125,19 @@ WHEEL_SPEED_MAX = 5.0            # m/s — above the robot's top speed
 # gated (they're the ground-truth anchor and must always apply).
 GATE_CONFIDENCE = 0.99
 
+# --- Bring-up / isolation switches -----------------------------------------
+# Let the wheel-velocity update also correct gimbal-yaw drift (δψ) via its
+# heading coupling. Powerful ONCE the wheel vx/vy axes are verified, but during
+# bring-up an unverified wheel-axis sign feeds wrong yaw corrections and spirals
+# the heading (a straight drive curves into a scribble). Keep OFF until the
+# wheel axes + gimbal-yaw sign are confirmed.
+VEL_OBSERVES_YAW = False
+# Fuse KLT features into the filter. Turn OFF to isolate the wheel+gimbal
+# dead-reckoning: if a straight drive is then a clean back-and-forth line, the
+# scribble was features/extrinsics (R_MOUNT/CAM_BASE_R); if it still scribbles,
+# it's the wheel vx/vy axes or the gimbal-yaw sign.
+FUSE_FEATURES = True
+
 # --- AprilTags (absolute pose correction) ----------------------------------
 # Field has AprilTags at known locations; they replace loop closure. Detection
 # uses cv2.aruco DICT_APRILTAG_36h11 (built into opencv, no extra dependency).

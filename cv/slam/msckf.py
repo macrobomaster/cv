@@ -33,6 +33,7 @@ _GRAV = (common.GRAVITY.astype(np.float64) if common.ACCEL_INCLUDES_GRAVITY
          else np.zeros(3))
 _ACC_N2, _ACCB_N2 = common.ACCEL_NOISE**2, common.ACCEL_BIAS_RW**2
 _VEL_PN2 = common.VEL_PROCESS_NOISE**2
+_VEL_OBSERVES_YAW = common.VEL_OBSERVES_YAW
 _YAW_RW2 = common.YAW_DRIFT_RW**2
 _R_PIX = common.PIXEL_NOISE**2
 _R_POS = common.TAG_POS_NOISE**2
@@ -201,7 +202,8 @@ class MsckfState:
     h1, h2, h3 = float(e_fwd @ self.v_w), float(e_left @ self.v_w), float(self.v_w[2])
     H = np.zeros((3, ERR_DIM))
     H[0, 3:6] = e_fwd; H[1, 3:6] = e_left; H[2, 5] = 1.0   # row 2: world-vertical v_w.z
-    H[0, PSI] = h2; H[1, PSI] = -h1          # ∂(Rz(psi)ᵀ v_w)/∂ψ → δψ coupling (horizontal only)
+    if _VEL_OBSERVES_YAW:
+      H[0, PSI] = h2; H[1, PSI] = -h1        # ∂(Rz(psi)ᵀ v_w)/∂ψ → δψ coupling (horizontal only)
     r = np.array([vx - h1, vy - h2, 0.0 - h3])             # vz measured 0 (planar ground robot)
     return self._apply(H, r, np.diag([_R_VEL, _R_VEL, _R_VZ]))
 

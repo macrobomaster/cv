@@ -187,15 +187,16 @@ def run():
     st.augment(t=ct, frame_id=frame_id, R_wc=R_wc, p_offset=p_offset)
 
     # --- VIO: feature update from terminated tracks --------------------------
-    fid_to_slot = {fid: i for i, fid in enumerate(st.fid_cl) if fid >= 0}
-    points, obs = [], []
-    for tr in terminated:
-      pw, obs_list, ok = _triangulate_track(tr, st.R_cl, st.p_cl, fid_to_slot)
-      if ok: points.append(pw); obs.append(obs_list)
-    if points:
-      yaw_offset += st.update_with_features(points, obs)
-      d_feat += len(points)
-      for pw in points: recent_points.append(pw.tolist())
+    if common.FUSE_FEATURES:
+      fid_to_slot = {fid: i for i, fid in enumerate(st.fid_cl) if fid >= 0}
+      points, obs = [], []
+      for tr in terminated:
+        pw, obs_list, ok = _triangulate_track(tr, st.R_cl, st.p_cl, fid_to_slot)
+        if ok: points.append(pw); obs.append(obs_list)
+      if points:
+        yaw_offset += st.update_with_features(points, obs)
+        d_feat += len(points)
+        for pw in points: recent_points.append(pw.tolist())
 
     # --- AprilTag detection (throttled) → absolute position + yaw fixes ------
     # tag_dets stays None on frames where detection didn't run so the viewer
