@@ -74,7 +74,7 @@ GRAVITY = np.array([0.0, 0.0, -9.81], dtype=np.float32)
 #   False → predict uses a_w = R_wb·accel             (gravity already removed)
 # Wrong choice makes the robot free-fall ("sink into the floor") or rocket up.
 # Check the slamd flow log's accel magnitude at rest: ~9.81 → True, ~0 → False.
-ACCEL_INCLUDES_GRAVITY = True
+ACCEL_INCLUDES_GRAVITY = False
 
 # Pixel measurement noise stddev (used for MSCKF update).
 PIXEL_NOISE = 1.0                # px
