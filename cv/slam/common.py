@@ -101,6 +101,11 @@ MIN_PARALLAX_DEG = 1.0
 # in the gimbal frame, it's a full vector (direction + magnitude); the v=0 case
 # (stationary) is just the same update, no special ZUPT branch needed.
 WHEEL_VEL_NOISE = 0.1            # m/s — measurement stddev incl. slip + lever-arm slack; tune
+# The robot drives on the ground, so its world-vertical velocity is ~0. The wheel
+# update also pins v_w.z to 0 (planar-motion constraint) — wheels only observe the
+# horizontal plane, so without this the vertical channel drifts (the "drifts
+# upward" bug) and b_a.z stays unobservable. Loose enough to allow ramps.
+VERT_VEL_NOISE = 0.05            # m/s — vertical (planar) velocity constraint stddev
 # Reject wheel readings above this as a sensor fault / garbage. Moderate slip is
 # absorbed by WHEEL_VEL_NOISE instead. Velocity is NOT Mahalanobis-gated: the
 # accelerometer can't observe DC velocity, so P[v] understates the true

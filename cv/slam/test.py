@@ -185,6 +185,16 @@ def test_velocity_update() -> None:
   _check("velocity update respects gimbal heading", st.v_w[1] > abs(st.v_w[0]),
          f"v={st.v_w.round(3).tolist()}")
 
+  # Planar constraint: a vertical-velocity drift (which wheels don't observe) is
+  # pulled back toward 0 by the v_w.z=0 row — this is the "drifts upward" fix.
+  st = MsckfState.init()
+  accel_up = _ACC_REST + np.array([0, 0, 1.0], np.float32)  # spurious +z accel
+  for _ in range(50): st.predict(accel_up, 0.01, _I3)        # v_z drifts up
+  vz_before = float(st.v_w[2])
+  st.update_with_velocity(0.0, 0.0, 0.0)
+  _check("planar constraint pulls down vertical drift", abs(st.v_w[2]) < abs(vz_before),
+         f"v_z {vz_before:.3f} -> {float(st.v_w[2]):.3f}")
+
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
   test_predict()

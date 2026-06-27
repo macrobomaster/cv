@@ -38,6 +38,7 @@ _R_POS = common.TAG_POS_NOISE**2
 _R_YAW = common.TAG_YAW_NOISE**2
 _FX, _FY, _CX, _CY = common.FX, common.FY, common.CX, common.CY
 _R_VEL = common.WHEEL_VEL_NOISE**2
+_R_VZ = common.VERT_VEL_NOISE**2
 _VEL_MAX2 = common.WHEEL_SPEED_MAX**2
 _I3 = np.eye(3)
 _I2 = np.eye(2)
@@ -181,6 +182,11 @@ class MsckfState:
     in both the stationary (v≈0) and moving cases with no separate ZUPT branch.
     The measurement passes through psi, so it also constrains δψ.
 
+    Also pins the world-vertical velocity v_w.z to 0 (planar-motion constraint):
+    the robot is on the ground, and wheels only observe the horizontal plane, so
+    without this the vertical channel drifts (the "drifts upward" bug) and b_a.z
+    stays unobservable. VERT_VEL_NOISE is loose enough to allow ramps.
+
     Slip is treated as measurement noise (WHEEL_VEL_NOISE); only physically-
     impossible readings (sensor faults) are rejected. NOT Mahalanobis-gated — the
     accelerometer can't observe DC velocity, so P[v] understates the true
@@ -190,12 +196,12 @@ class MsckfState:
     c, s = np.cos(psi), np.sin(psi)
     e_fwd  = np.array([c, s, 0.0])           # gimbal forward in world = Rz(psi)·x̂
     e_left = np.array([-s, c, 0.0])          # gimbal left    in world = Rz(psi)·ŷ
-    h1, h2 = float(e_fwd @ self.v_w), float(e_left @ self.v_w)
-    H = np.zeros((2, ERR_DIM))
-    H[0, 3:6] = e_fwd; H[1, 3:6] = e_left
-    H[0, PSI] = h2; H[1, PSI] = -h1          # ∂(Rz(psi)ᵀ v_w)/∂ψ → δψ coupling
-    r = np.array([vx - h1, vy - h2])
-    return self._apply(H, r, _R_VEL * _I2)
+    h1, h2, h3 = float(e_fwd @ self.v_w), float(e_left @ self.v_w), float(self.v_w[2])
+    H = np.zeros((3, ERR_DIM))
+    H[0, 3:6] = e_fwd; H[1, 3:6] = e_left; H[2, 5] = 1.0   # row 2: world-vertical v_w.z
+    H[0, PSI] = h2; H[1, PSI] = -h1          # ∂(Rz(psi)ᵀ v_w)/∂ψ → δψ coupling (horizontal only)
+    r = np.array([vx - h1, vy - h2, 0.0 - h3])             # vz measured 0 (planar ground robot)
+    return self._apply(H, r, np.diag([_R_VEL, _R_VEL, _R_VZ]))
 
   def update_with_position(self, p_meas:np.ndarray) -> float:
     H = np.zeros((3, ERR_DIM)); H[:, 0:3] = _I3
