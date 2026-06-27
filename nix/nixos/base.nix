@@ -121,6 +121,10 @@
   # clean tmp on boot
   boot.tmp.cleanOnBoot = true;
 
+  # disable USB autosuspend — USB3 cameras (HikVision MV-CS016) freeze when the
+  # kernel suspends the bus; this is a dedicated robot with no battery concerns
+  boot.kernelParams = [ "usbcore.autosuspend=-1" ];
+
   # networking
   systemd.services.NetworkManager-wait-online.enable = false;
   systemd.network.wait-online.enable = false;
