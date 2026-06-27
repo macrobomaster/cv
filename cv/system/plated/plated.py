@@ -1,7 +1,6 @@
 import math
 import time
 from pathlib import Path
-from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -9,6 +8,8 @@ import cv2
 
 from ..core import messaging
 from ..core.logging import logger
+from ..common.geometry import roty, rotx, wrap_pi
+from ..common.gimbal import GimbalBuffer
 from ...autoaim.common import (R_MOUNT, T_MOUNT, CANONICAL_CAMERA_MATRIX, CANONICAL_DIST_COEFFS,
                                IMG_H, IMG_W, plate_screw_points)
 
@@ -33,9 +34,6 @@ def plate_points(number:int) -> np.ndarray:
   return _PLATE_POINTS_CACHE[number]
 
 # --- plated tuning constants ---
-
-GIMBAL_DEQUE_MAX = 200          # ~1s at 200Hz; lets us tolerate large t_capture lag
-GIMBAL_STALE_GAP = 0.030        # s — if no bracket sample within this, flag stale
 
 T_LOST = 0.300                  # s of consecutive invalid → LOST + retarget on next valid
 T_HANDOFF = 0.150               # s — withhold class after retarget (state not yet settled)
@@ -79,46 +77,42 @@ SPIN_OMEGA_SNR = 1.0            # |omega| must exceed this * sigma_omega to trus
 
 # --- Math helpers ---
 
-def R_yaw(angle:float) -> np.ndarray:
-  c, s = math.cos(angle), math.sin(angle)
-  return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+# gimbal-inertial is y-up: yaw turns about +y, pitch about +x (shared axis primitives, composed here).
+R_yaw, R_pitch = roty, rotx
 
-def R_pitch(angle:float) -> np.ndarray:
-  c, s = math.cos(angle), math.sin(angle)
-  return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+# --- UKF weights / matrix sqrt --------------------------------------------------------------------
+# The robot-body process model is linear, so the predict stays an exact Kalman propagation; only the
+# trig plate-measurement is nonlinear. We replace the EKF measurement Jacobian with an unscented update
+# so curvature over large theta/r uncertainty (bootstrap/acquisition) is captured where the linearized
+# H wasn't. alpha=1, beta=2, kappa=0 → lambda=0: sigma spread sqrt(n), every covariance weight >= 0
+# (no indefinite P from the update), and it reduces EXACTLY to the linear KF when the measurement is
+# linear — so on the position channel nothing regresses; only the trig coupling improves.
+_UKF_N = 7
+_UKF_ALPHA, _UKF_BETA, _UKF_KAPPA = 1.0, 2.0, 0.0
+_UKF_LAMBDA = _UKF_ALPHA ** 2 * (_UKF_N + _UKF_KAPPA) - _UKF_N
+_UKF_GAMMA = math.sqrt(_UKF_N + _UKF_LAMBDA)
+_UKF_WM = np.full(2 * _UKF_N + 1, 1.0 / (2 * (_UKF_N + _UKF_LAMBDA)))
+_UKF_WC = _UKF_WM.copy()
+_UKF_WM[0] = _UKF_LAMBDA / (_UKF_N + _UKF_LAMBDA)
+_UKF_WC[0] = _UKF_LAMBDA / (_UKF_N + _UKF_LAMBDA) + (1 - _UKF_ALPHA ** 2 + _UKF_BETA)
 
-def wrap_pi(x:float) -> float:
-  return (x + math.pi) % (2 * math.pi) - math.pi
+def _chol_psd(M:np.ndarray) -> np.ndarray:
+  """Matrix sqrt (columns = sigma directions) via lower Cholesky; jitter-retry then eigen-clip if M
+  drifts non-PD from update round-off."""
+  M = 0.5 * (M + M.T)
+  for jit in (0.0, 1e-9, 1e-6, 1e-3):
+    try:
+      return np.linalg.cholesky(M + jit * np.eye(M.shape[0]))
+    except np.linalg.LinAlgError:
+      continue
+  w, V = np.linalg.eigh(M)
+  return V @ np.diag(np.sqrt(np.clip(w, 1e-12, None)))
 
-# --- Gimbal sample interpolation ---
-
-class GimbalBuffer:
-  def __init__(self):
-    self.samples: deque = deque(maxlen=GIMBAL_DEQUE_MAX)
-
-  def push(self, msg:dict):
-    self.samples.append((msg["t_stamp"], msg["yaw_gi"], msg["pitch_gi"]))
-
-  def interpolate(self, t:float) -> Optional[tuple[float, float, bool]]:
-    if not self.samples: return None
-    if t <= self.samples[0][0]:
-      ts, y, p = self.samples[0]
-      return y, p, (ts - t) > GIMBAL_STALE_GAP
-    if t >= self.samples[-1][0]:
-      ts, y, p = self.samples[-1]
-      return y, p, (t - ts) > GIMBAL_STALE_GAP
-    # linear bracket — N is small (≤200), linear scan is fine
-    prev_ts, prev_y, prev_p = self.samples[0]
-    for ts, y, p in list(self.samples)[1:]:
-      if prev_ts <= t <= ts:
-        a = (t - prev_ts) / (ts - prev_ts)
-        return prev_y + a * (y - prev_y), prev_p + a * (p - prev_p), False
-      prev_ts, prev_y, prev_p = ts, y, p
-    return None
-
-# --- Robot-body EKF -------------------------------------------------------------------------------
+# --- Robot-body UKF -------------------------------------------------------------------------------
+# Linear-predict / unscented-update filter (predict is an exact KF step; only the trig measurement is
+# unscented — see the UKF-weights note above).
 # State x = [cx, cz, vx, vz, theta, omega, r]:
-#   (cx,cz)  spin-axis position in the horizontal plane (gimbal-inertial x-forward, z-left), m
+#   (cx,cz)  spin-axis position in the horizontal plane (gimbal-inertial x-forward, z-right), m
 #   (vx,vz)  spin-axis velocity, m/s
 #   theta    body heading — the outward bearing of plate 0, rad
 #   omega    heading rate, rad/s  (≈0 static, large when spinning)
@@ -130,7 +124,7 @@ class GimbalBuffer:
 
 IDX_CX, IDX_CZ, IDX_VX, IDX_VZ, IDX_TH, IDX_W, IDX_R = range(7)
 
-class RobotEKF:
+class RobotUKF:
   def __init__(self):
     self.t = 0.0
     self.x = np.zeros(7)
@@ -175,34 +169,40 @@ class RobotEKF:
     phase_res = abs(wrap_pi(psi_obs - self.x[IDX_TH] - k * (math.pi / 2)))
     return k, phase_res
 
-  def _h_H(self, k:int):
-    """Predicted (px, pz, psi) for plate k and the 3x7 Jacobian."""
-    cx, cz, _, _, theta, _, r = self.x
-    phi = theta + k * (math.pi / 2)
-    c, s = math.cos(phi), math.sin(phi)
-    z_pred = np.array([cx + r * c, cz + r * s, phi])
-    H = np.zeros((3, 7))
-    H[0, IDX_CX] = 1; H[0, IDX_TH] = -r * s; H[0, IDX_R] = c
-    H[1, IDX_CZ] = 1; H[1, IDX_TH] = r * c;  H[1, IDX_R] = s
-    H[2, IDX_TH] = 1
-    return z_pred, H
+  def _unscented(self, x:np.ndarray, P:np.ndarray, k:int):
+    """Sigma-point propagation of plate-k's measurement h(x) = [px, pz, psi]. Returns
+    (z_hat[3], Pzz[3,3] WITHOUT measurement noise, Pxz[7,3]). psi (= theta + k·90°) is an angle, so it
+    is meaned/differenced circularly; positions are linear."""
+    A = _UKF_GAMMA * _chol_psd(P)
+    X = np.vstack([x, x + A.T, x - A.T])                                   # (2n+1, 7) sigma points
+    phi = X[:, IDX_TH] + k * (math.pi / 2)
+    Z = np.stack([X[:, IDX_CX] + X[:, IDX_R] * np.cos(phi),
+                  X[:, IDX_CZ] + X[:, IDX_R] * np.sin(phi), phi], axis=1)  # (2n+1, 3)
+    z_hat = np.array([_UKF_WM @ Z[:, 0], _UKF_WM @ Z[:, 1],
+                      math.atan2(_UKF_WM @ np.sin(Z[:, 2]), _UKF_WM @ np.cos(Z[:, 2]))])
+    dz = Z - z_hat; dz[:, 2] = (dz[:, 2] + math.pi) % (2 * math.pi) - math.pi
+    dx = X - x;     dx[:, IDX_TH] = (dx[:, IDX_TH] + math.pi) % (2 * math.pi) - math.pi
+    Pzz = (dz.T * _UKF_WC) @ dz
+    Pxz = (dx.T * _UKF_WC) @ dz
+    return z_hat, Pzz, Pxz
 
   def pos_mahal(self, k:int, p_xz:np.ndarray, R_pos:np.ndarray) -> float:
-    z_pred, H = self._h_H(k)
-    innov = p_xz - z_pred[:2]
-    S = H[:2] @ self.P @ H[:2].T + R_pos
+    z_hat, Pzz, _ = self._unscented(self.x, self.P, k)
+    innov = p_xz - z_hat[:2]
+    S = Pzz[:2, :2] + R_pos
     return float(innov @ np.linalg.solve(S, innov))
 
   def update(self, k:int, p_xz:np.ndarray, y:float, psi_obs:float, R_pos:np.ndarray, R_psi:float):
-    z_pred, H = self._h_H(k)
-    innov = np.array([p_xz[0] - z_pred[0], p_xz[1] - z_pred[1], wrap_pi(psi_obs - z_pred[2])])
+    z_hat, Pzz, Pxz = self._unscented(self.x, self.P, k)
     R = np.zeros((3, 3)); R[:2, :2] = R_pos; R[2, 2] = R_psi
-    S = H @ self.P @ H.T + R
-    K = self.P @ H.T @ np.linalg.inv(S)
+    S = Pzz + R
+    K = Pxz @ np.linalg.inv(S)
+    innov = np.array([p_xz[0] - z_hat[0], p_xz[1] - z_hat[1], wrap_pi(psi_obs - z_hat[2])])
     self.x = self.x + K @ innov
     self.x[IDX_TH] = wrap_pi(self.x[IDX_TH])
     self.x[IDX_R] = min(R_RANGE[1], max(R_RANGE[0], self.x[IDX_R]))
-    self.P = (np.eye(7) - K @ H) @ self.P
+    self.P = self.P - K @ S @ K.T
+    self.P = 0.5 * (self.P + self.P.T)
     np.fill_diagonal(self.P, np.minimum(np.diag(self.P), P_CAP))
     self.h[k] = y if self.h[k] is None else (1 - H_EMA) * self.h[k] + H_EMA * y
     self.last_k = k
@@ -215,10 +215,13 @@ class RobotEKF:
     return float(np.mean(seen)) if seen else 0.0
 
   def plate_state_at(self, k:int, t:float):
-    """Forward-predict plate k's (pos_gi, vel_gi, cov_pos) to t without mutating the filter."""
+    """Forward-predict plate k's (pos_gi, vel_gi, cov_pos) to t without mutating the filter. Predict is
+    exact-linear; pos/vel are the deterministic model at the predicted mean, and the position cov is the
+    unscented map of the trig measurement (no measurement noise added)."""
     dt = max(0.0, t - self.t)
     F, Q = self._F_Q(dt)
     x = F @ self.x
+    x[IDX_TH] = wrap_pi(x[IDX_TH])
     P = F @ self.P @ F.T + Q
     cx, cz, vx, vz, theta, omega, r = x
     phi = theta + k * (math.pi / 2)
@@ -226,12 +229,9 @@ class RobotEKF:
     h = self.h[k] if self.h[k] is not None else self._mean_h()
     pos = np.array([cx + r * c, h, cz + r * s])
     vel = np.array([vx - r * omega * s, 0.0, vz + r * omega * c])
-    Hp = np.zeros((2, 7))
-    Hp[0, IDX_CX] = 1; Hp[0, IDX_TH] = -r * s; Hp[0, IDX_R] = c
-    Hp[1, IDX_CZ] = 1; Hp[1, IDX_TH] = r * c;  Hp[1, IDX_R] = s
-    cov_xz = Hp @ P @ Hp.T
-    cov = np.diag([cov_xz[0, 0], (0.02) ** 2, cov_xz[1, 1]])  # height variance ~ const
-    cov[0, 2] = cov[2, 0] = cov_xz[0, 1]
+    _, Pzz, _ = self._unscented(x, P, k)
+    cov = np.diag([Pzz[0, 0], (0.02) ** 2, Pzz[1, 1]])  # height variance ~ const
+    cov[0, 2] = cov[2, 0] = Pzz[0, 1]
     return pos, vel, cov
 
   def classify(self) -> str:
@@ -262,7 +262,7 @@ class RobotEKF:
 
 class PlatedState:
   def __init__(self):
-    self.ekf = RobotEKF()
+    self.ukf = RobotUKF()
     self.target_id = 0
     self.last_meta: Optional[tuple] = None
     self.last_valid_t: Optional[float] = None
@@ -272,7 +272,7 @@ class PlatedState:
     self.last_psi: float = 0.0                    # raw measured plate facing-yaw, for viz/validation
 
   def _retarget(self, p_xz, y, psi, t):
-    self.ekf.bootstrap(p_xz, y, psi, t)
+    self.ukf.bootstrap(p_xz, y, psi, t)
     self.target_id += 1
     self.handoff_until_t = t + T_HANDOFF
     self.consecutive_jumps = 0
@@ -283,7 +283,7 @@ class PlatedState:
     p_xz = np.array([pos_gi[0], pos_gi[2]])
     y = float(pos_gi[1])
 
-    if not self.ekf.initialized:
+    if not self.ukf.initialized:
       self._retarget(p_xz, y, psi, t_capture)
       self.last_meta = meta
       self.last_valid_t = t_capture
@@ -302,9 +302,9 @@ class PlatedState:
       self.last_valid_t = t_capture
       return
 
-    self.ekf.predict_to(t_capture)
-    k, phase_res = self.ekf.associate(psi)
-    mahal = self.ekf.pos_mahal(k, p_xz, R_pos_xz)
+    self.ukf.predict_to(t_capture)
+    k, phase_res = self.ukf.associate(psi)
+    mahal = self.ukf.pos_mahal(k, p_xz, R_pos_xz)
     # No consistent plate slot (bad facing-yaw AND off-position) → likely a new robot.
     if phase_res > ASSOC_PHASE_TOL and mahal > ASSOC_POS_MAHAL:
       self.consecutive_jumps += 1
@@ -314,7 +314,7 @@ class PlatedState:
         self.last_valid_t = t_capture
       return
     self.consecutive_jumps = 0
-    self.ekf.update(k, p_xz, y, psi, R_pos_xz, R_psi)
+    self.ukf.update(k, p_xz, y, psi, R_pos_xz, R_psi)
     self.last_meta = meta
     self.last_valid_t = t_capture
 
@@ -322,15 +322,15 @@ class PlatedState:
     pass  # LOST is derived from last_valid_t in publish()
 
   def publish(self, t_now:float) -> Optional[dict]:
-    if not self.ekf.initialized:
+    if not self.ukf.initialized:
       return None
     if self.last_valid_t is None or (t_now - self.last_valid_t) > T_LOST:
       cls = "LOST"
     elif t_now < self.handoff_until_t:
       cls = "UNKNOWN"
     else:
-      cls = self.ekf.classify()
-    pos, vel, cov = self.ekf.plate_state_at(self.ekf.last_k, t_now)
+      cls = self.ukf.classify()
+    pos, vel, cov = self.ukf.plate_state_at(self.ukf.last_k, t_now)
     return {
       "t_state": t_now,
       "pos_gi": pos.tolist(),
@@ -338,9 +338,9 @@ class PlatedState:
       "cov_pos": cov.tolist(),
       "pos_meas": self.last_meas.tolist() if self.last_meas is not None else None,
       "psi_meas": float(self.last_psi),
-      "visible_k": int(self.ekf.last_k),
+      "visible_k": int(self.ukf.last_k),
       "class": cls,
-      "spin": self.ekf.to_spin_dict(),
+      "spin": self.ukf.to_spin_dict(),
       "target_id": self.target_id,
     }
 
