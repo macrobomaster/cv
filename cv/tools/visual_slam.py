@@ -3,8 +3,9 @@
 Run with:
   python -m cv.tools.visual_slam <addr>
 
-Subscribes to camera_feed, feature_tracks, slam_pose, slam_debug. Shows:
-  - 2D camera view with live feature tracks (color = track age) — from frontd
+Subscribes to camera_feed, slam_pose, slam_debug. Shows:
+  - 2D camera view with live feature tracks (color = track age) + AprilTag
+    detections — both carried by slam_debug (slamd owns the front-end now)
   - 3D world: robot trajectory, current pose marker, recent clone positions,
     triangulated points (sparse 3D map), known field AprilTags + tags seen
   - Scalars: number of tracks/clones/tags, position-stddev
@@ -17,7 +18,7 @@ import rerun as rr
 
 from ..system.core import messaging
 from ..system.core.helpers import FrequencyKeeper
-from ..slam import calib
+from ..slam import common
 
 # Visual params
 TRAJ_LEN          = 2000
@@ -47,21 +48,21 @@ def main():
 
   # Set up a robot frustum (a tiny pinhole entity attached to the live pose)
   rr.log("world/robot",
-         rr.Pinhole(resolution=(calib.IMG_W, calib.IMG_H),
-                    image_from_camera=calib.K,
+         rr.Pinhole(resolution=(common.IMG_W, common.IMG_H),
+                    image_from_camera=common.K,
                     camera_xyz=rr.ViewCoordinates.RDF,
                     image_plane_distance=ROBOT_FRUSTUM_SCALE),
          static=True)
 
   # Static field tag map — the known AprilTag locations (drift anchors).
-  if calib.TAG_FIELD_MAP:
-    tag_pts = np.array([t for (_, t) in calib.TAG_FIELD_MAP.values()], dtype=np.float32)
-    tag_lbls = [str(i) for i in calib.TAG_FIELD_MAP]
+  if common.TAG_FIELD_MAP:
+    tag_pts = np.array([t for (_, t) in common.TAG_FIELD_MAP.values()], dtype=np.float32)
+    tag_lbls = [str(i) for i in common.TAG_FIELD_MAP]
     rr.log("world/field_tags",
            rr.Points3D(tag_pts, colors=[(200, 200, 200)], radii=0.05, labels=tag_lbls),
            static=True)
 
-  sub = messaging.Sub(["camera_feed", "feature_tracks", "apriltags", "slam_pose", "slam_debug"],
+  sub = messaging.Sub(["camera_feed", "slam_pose", "slam_debug"],
                       poll="camera_feed", addr=addr)
   fk = FrequencyKeeper(30)
 
@@ -85,8 +86,8 @@ def main():
     # Periodic diagnostic on stdout so we can tell which topic is missing.
     now = time.monotonic()
     if now - diag_t > 2.0:
-      _tg = sub["apriltags"]
-      n_tag_det = len(_tg["detections"]) if _tg is not None else 0
+      _dbg = sub["slam_debug"]
+      n_tag_det = len(_dbg.get("tag_dets", []) or []) if _dbg is not None else 0
       print(f"[viz] cam_msgs={n_cam_received} dbg_msgs={n_dbg_received} "
             f"tag_dets={n_tag_det} trails={len(trail_uv)} alive={dict(sub.alive)}")
       diag_t = now
@@ -98,7 +99,7 @@ def main():
     cam = sub["camera_feed"]
     if cam is not None and sub.updated["camera_feed"]:
       n_cam_received += 1
-      last_img = np.frombuffer(cam["frame"], dtype=np.uint8).reshape(calib.IMG_H, calib.IMG_W, 3)
+      last_img = np.frombuffer(cam["frame"], dtype=np.uint8).reshape(common.IMG_H, common.IMG_W, 3)
       rr.log("camera/feed", rr.Image(last_img))
 
     # --- Live pose --------------------------------------------------------
@@ -125,11 +126,19 @@ def main():
       rr.log("scalars/n_clones", rr.Scalars(int(pose["n_clones"])))
       rr.log("scalars/n_tags", rr.Scalars(int(pose["n_tags"])))
 
-    # --- Feature overlay (from frontd) ------------------------------------
-    ft = sub["feature_tracks"]
-    if ft is not None and sub.updated["feature_tracks"]:
-      uvs = np.array(ft["live_uvs"], dtype=np.float32) if ft["live_uvs"] else np.zeros((0, 2), np.float32)
-      ages = np.array(ft["live_ages"], dtype=np.int32) if ft["live_ages"] else np.zeros(0, np.int32)
+    # --- Debug topic: 3D world + 2D overlays (slamd owns the front-end) ----
+    dbg = sub["slam_debug"]
+    if dbg is not None and sub.updated["slam_debug"]:
+      n_dbg_received += 1
+      if n_dbg_received % 30 == 0:
+        print(f"[viz] slam_debug #{n_dbg_received}: "
+              f"clones={len(dbg.get('clone_p', []) or [])} "
+              f"tags_seen={len(dbg.get('seen_tag_p', []) or [])} "
+              f"pts={len(dbg.get('recent_points', []) or [])}")
+
+      # Live feature overlay (color = track age)
+      uvs = np.array(dbg["live_uvs"], dtype=np.float32) if dbg.get("live_uvs") else np.zeros((0, 2), np.float32)
+      ages = np.array(dbg["live_ages"], dtype=np.int32) if dbg.get("live_ages") else np.zeros(0, np.int32)
       if len(uvs):
         max_age = max(int(ages.max()), 1)
         colors = np.zeros((len(uvs), 3), dtype=np.uint8)
@@ -137,7 +146,7 @@ def main():
         colors[:, 0] = ((1 - a01) * 255).astype(np.uint8)
         colors[:, 1] = (a01 * 255).astype(np.uint8)
         rr.log("camera/feed/features", rr.Points2D(uvs, colors=colors, radii=3.0))
-        tids = ft["live_ids"]
+        tids = dbg["live_ids"]
         alive_tids = set(tids)
         for tid in list(trail_uv.keys()):
           if tid not in alive_tids: trail_uv.pop(tid, None)
@@ -149,33 +158,22 @@ def main():
           rr.log("camera/feed/trails",
                  rr.LineStrips2D(strips, radii=1.0, colors=[(255, 220, 60)]))
 
-    # --- AprilTag detections overlay (raw, from frontd) -------------------
-    # Drawn straight from the detector, so it shows even when TAG_FIELD_MAP is
-    # empty (i.e. before the field is surveyed). Green outline + id label.
-    tags = sub["apriltags"]
-    if tags is not None and sub.updated["apriltags"]:
-      dets = tags["detections"]
-      if dets:
-        outlines = [d["corners"] + [d["corners"][0]] for d in dets]  # close the quad
-        centers = [list(np.mean(np.array(d["corners"], np.float32), axis=0)) for d in dets]
-        labels  = [str(d["id"]) for d in dets]
-        rr.log("camera/feed/apriltags",
-               rr.LineStrips2D(outlines, radii=2.0, colors=[(0, 220, 255)]))
-        rr.log("camera/feed/apriltag_ids",
-               rr.Points2D(centers, radii=4.0, colors=[(0, 220, 255)], labels=labels))
-      else:
-        rr.log("camera/feed/apriltags", rr.Clear(recursive=True))
-        rr.log("camera/feed/apriltag_ids", rr.Clear(recursive=True))
-
-    # --- Debug topic (3D world only now) ----------------------------------
-    dbg = sub["slam_debug"]
-    if dbg is not None and sub.updated["slam_debug"]:
-      n_dbg_received += 1
-      if n_dbg_received % 30 == 0:
-        print(f"[viz] slam_debug #{n_dbg_received}: "
-              f"clones={len(dbg.get('clone_p', []) or [])} "
-              f"tags_seen={len(dbg.get('seen_tag_p', []) or [])} "
-              f"pts={len(dbg.get('recent_points', []) or [])}")
+      # AprilTag detections overlay (raw, so it shows even when TAG_FIELD_MAP
+      # is empty). tag_dets is None on throttled frames where detection didn't
+      # run — leave the overlay untouched then so it doesn't blink.
+      dets = dbg.get("tag_dets")
+      if dets is not None:
+        if dets:
+          outlines = [d["corners"] + [d["corners"][0]] for d in dets]  # close the quad
+          centers = [list(np.mean(np.array(d["corners"], np.float32), axis=0)) for d in dets]
+          labels  = [str(d["id"]) for d in dets]
+          rr.log("camera/feed/apriltags",
+                 rr.LineStrips2D(outlines, radii=2.0, colors=[(0, 220, 255)]))
+          rr.log("camera/feed/apriltag_ids",
+                 rr.Points2D(centers, radii=4.0, colors=[(0, 220, 255)], labels=labels))
+        else:
+          rr.log("camera/feed/apriltags", rr.Clear(recursive=True))
+          rr.log("camera/feed/apriltag_ids", rr.Clear(recursive=True))
 
       # 3D clone frustums (recent past poses) — render as small markers
       clone_p = np.array(dbg["clone_p"], dtype=np.float32) if dbg["clone_p"] else np.zeros((0, 3), np.float32)

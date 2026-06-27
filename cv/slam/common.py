@@ -1,4 +1,4 @@
-"""Calibration constants for the SLAM stack.
+"""Shared constants + calibration for the SLAM stack.
 
 Camera intrinsics come from the shared canonical-pinhole convention in
 `autoaim.common` (camerad pre-warps the real sensor into it). IMU noise
@@ -9,15 +9,14 @@ import numpy as np
 
 from ..autoaim.common import CANONICAL_CAMERA_MATRIX, IMG_H as _IMG_H, IMG_W as _IMG_W
 
-# Camera intrinsics + resolution come straight from autoaim.common — frontd/
-# slamd consume camerad's `camera_feed`, which is pre-warped to exactly this
+# Camera intrinsics + resolution come straight from autoaim.common — slamd
+# consumes camerad's `camera_feed`, which is pre-warped to exactly this
 # canonical pinhole. Deriving (not hardcoding) keeps SLAM in lockstep when the
 # canonical resolution/focal changes.
 IMG_W, IMG_H = int(_IMG_W), int(_IMG_H)
 K = CANONICAL_CAMERA_MATRIX.astype(np.float32)
 FX, FY = float(K[0, 0]), float(K[1, 1])
 CX, CY = float(K[0, 2]), float(K[1, 2])
-K_INV = np.linalg.inv(K).astype(np.float32)
 
 # --- Camera <- IMU extrinsic (pitch-dependent) -----------------------------
 # Body frame = the gimbal IMU frame. The gimbal IMU sits on the FULL gimbal
@@ -36,6 +35,16 @@ T_MOUNT = np.zeros(3, dtype=np.float32)
 PITCH_AXIS = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 PITCH_SIGN = 1.0
 
+# Body(camera) orientation at gimbal (yaw=0, pitch=0), as world<-body. The
+# camera is RDF (x-right, y-down, z-forward); the world is z-up. A level,
+# forward-looking camera maps: z(fwd)->world+x, y(down)->world-z, x(right)->-y.
+# WITHOUT this, world<-body at level is identity → the camera "faces straight
+# up" in the world view (RDF z = world z). TODO: verify columns vs hardware
+# (which way is robot-forward, and the yaw/pitch signs in _gimbal_R_wb).
+CAM_BASE_R = np.array([[0, 0, 1],
+                       [-1, 0, 0],
+                       [0, -1, 0]], dtype=np.float32)
+
 def cam_from_imu(pitch_rad: float) -> tuple[np.ndarray, np.ndarray]:
   """Return (R_ic, t_ic): IMU-frame <- camera-frame rotation/translation at the
   given gimbal pitch, i.e. a camera-frame point maps to the IMU frame via
@@ -51,14 +60,11 @@ def cam_from_imu(pitch_rad: float) -> tuple[np.ndarray, np.ndarray]:
   t_ic = (-R_ic @ T_MOUNT).astype(np.float32)
   return R_ic, t_ic
 
-# IMU noise (continuous-time) — measurements `n` model: u_meas = u_true + b + n
-# White-noise stddev per axis. Replace with values from the IMU datasheet
-# (e.g. MPU9250: gyro ~0.01 rad/s/sqrt(Hz), accel ~0.0008 m/s^2/sqrt(Hz)).
-GYRO_NOISE   = 1.0e-2            # rad / s / sqrt(Hz)
-ACCEL_NOISE  = 1.0e-3            # m / s^2 / sqrt(Hz)
-# Bias random walk stddev.
-GYRO_BIAS_RW  = 1.0e-4           # rad / s^2 / sqrt(Hz)
-ACCEL_BIAS_RW = 1.0e-4           # m / s^3 / sqrt(Hz)
+# Accelerometer noise (continuous-time). Orientation comes from the gimbal, so
+# the filter only models the accelerometer (no gyro). Replace with datasheet
+# values (e.g. MPU9250 accel ~0.0008 m/s^2/sqrt(Hz)).
+ACCEL_NOISE   = 1.0e-3           # m / s^2 / sqrt(Hz)  — white noise
+ACCEL_BIAS_RW = 1.0e-4           # m / s^3 / sqrt(Hz)  — bias random walk
 
 # World gravity (we use world frame with +z up).
 GRAVITY = np.array([0.0, 0.0, -9.81], dtype=np.float32)
@@ -73,8 +79,14 @@ ACCEL_INCLUDES_GRAVITY = True
 # Pixel measurement noise stddev (used for MSCKF update).
 PIXEL_NOISE = 1.0                # px
 
-# MSCKF clone window size — fixed for static-shape JIT'd inner kernels.
+# MSCKF sliding-window size. Doubles as the max track length and the max
+# observations used per feature — a track can't outlive the clones it references.
 N_CLONES = 15
+# Minimum observations for a feature to be usable: the front-end won't hand over
+# shorter tracks, and the null-space projection needs this many to leave a
+# constraint. One number so the two ends can't disagree (a shorter track would
+# just be triangulated and then rejected).
+MIN_FEATURE_OBS = 3
 
 # --- AprilTags (absolute pose correction) ----------------------------------
 # Field has AprilTags at known locations; they replace loop closure. Detection

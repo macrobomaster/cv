@@ -13,7 +13,7 @@ computes residuals on those re-projections (Mourikis & Roumeliotis 2007).
 import numpy as np
 from numpy.typing import NDArray
 
-from . import calib
+from . import common
 
 def _se3_inv(R:NDArray, t:NDArray) -> tuple[NDArray, NDArray]:
   Rt = R.T
@@ -44,7 +44,7 @@ def triangulate_feature(uv_obs:NDArray, R_wc:list[NDArray], t_wc:list[NDArray],
   assert N >= 2 and len(R_wc) == N and len(t_wc) == N
 
   # Normalize observations to ideal pinhole coords (drop intrinsics)
-  fx, fy, cx, cy = calib.FX, calib.FY, calib.CX, calib.CY
+  fx, fy, cx, cy = common.FX, common.FY, common.CX, common.CY
   uvn = np.empty_like(uv_obs)
   uvn[:, 0] = (uv_obs[:, 0] - cx) / fx
   uvn[:, 1] = (uv_obs[:, 1] - cy) / fy
@@ -61,7 +61,7 @@ def triangulate_feature(uv_obs:NDArray, R_wc:list[NDArray], t_wc:list[NDArray],
   # mid-range arena depth (1/3 m^-1 ≈ 3 m).
   alpha, beta, rho = float(uvn[0, 0]), float(uvn[0, 1]), 1.0/3.0
 
-  inv_sigma_sq = 1.0 / (calib.PIXEL_NOISE / fx) ** 2
+  inv_sigma_sq = 1.0 / (common.PIXEL_NOISE / fx) ** 2
 
   for _ in range(max_iters):
     H = np.zeros((3, 3), dtype=np.float64)

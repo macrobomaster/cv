@@ -1,8 +1,7 @@
 """Container dataclasses for the SLAM stack.
 
-Filter state (mutable tinygrad buffers) lives in `msckf.MsckfState`.
-Everything here is plain-Python / numpy data passed between the front-end
-and the filter.
+Filter state (numpy arrays) lives in `msckf.MsckfState`. Everything here is
+plain-Python / numpy data passed between the front-end and the filter.
 """
 from dataclasses import dataclass, field
 from typing import Optional

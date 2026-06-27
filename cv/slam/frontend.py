@@ -17,7 +17,7 @@ Per camera frame the front-end:
 import cv2
 import numpy as np
 
-from . import calib
+from . import common
 from .types import Frame, Track
 
 TARGET_TRACK_COUNT = 200
@@ -27,8 +27,8 @@ KLT_MAX_ITERS = 30
 KLT_EPS = 0.01
 MIN_FEATURE_DISTANCE = 8       # px, between detected corners
 QUALITY_LEVEL = 0.01           # Shi-Tomasi quality threshold
-MIN_TRACK_AGE_FOR_UPDATE = 2   # need at least 2 observations to triangulate
-MAX_TRACK_LEN = calib.N_CLONES # don't keep tracks longer than the clone window
+MIN_TRACK_AGE_FOR_UPDATE = common.MIN_FEATURE_OBS  # don't hand over tracks the filter would reject
+MAX_TRACK_LEN = common.N_CLONES # don't keep tracks longer than the clone window
 
 class FeatureFrontend:
   def __init__(self):
@@ -79,8 +79,8 @@ class FeatureFrontend:
     # Drop tracks that fell off the image edge as well
     if pts_next is not None:
       pn = pts_next.reshape(-1, 2)
-      in_bounds = ((pn[:, 0] >= 0) & (pn[:, 0] < calib.IMG_W) &
-                   (pn[:, 1] >= 0) & (pn[:, 1] < calib.IMG_H))
+      in_bounds = ((pn[:, 0] >= 0) & (pn[:, 0] < common.IMG_W) &
+                   (pn[:, 1] >= 0) & (pn[:, 1] < common.IMG_H))
       status &= in_bounds
 
     # RANSAC essential-matrix outlier rejection on the surviving correspondences.
@@ -91,7 +91,7 @@ class FeatureFrontend:
     if status.sum() >= 8:
       prev_ok = pts_prev[status].reshape(-1, 2).astype(np.float64)
       next_ok = pn[status].astype(np.float64)
-      _, mask = cv2.findEssentialMat(prev_ok, next_ok, calib.K,
+      _, mask = cv2.findEssentialMat(prev_ok, next_ok, common.K,
                                      method=cv2.USAC_MAGSAC, prob=0.999, threshold=3.0)
       if mask is not None:
         mask = mask.flatten().astype(bool)
