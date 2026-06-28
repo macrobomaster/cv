@@ -1,33 +1,28 @@
-"""SLAM daemon — numpy MSCKF VIO with AprilTag absolute correction.
+"""Localization daemon — wheel + IMU dead-reckoning anchored to a KNOWN field.
 
-Single process: front-end (KLT + AprilTag detection) and the filter
-(`cv/slam/msckf.py`, pure numpy) run in one loop, so feature observations and
-filter clones share the same frame ids natively (no cross-process plumbing).
+The field is surveyed (AprilTags at known locations), so this is localization to
+a map, not SLAM — no feature tracking, no map building. A plain 10-state EKF
+(`cv/slam/filter.py`) fuses:
+  - IMU accel        → predict (short-term, high-rate, rides out wheel slip/skid)
+  - wheel odometry   → velocity update (observes velocity directly) + planar vz=0
+  - AprilTags        → absolute position + yaw fix (drift-free anchor; bounded
+                       drift between sightings)
 
-Per camera frame:
-  - drain accel samples → predict position/velocity (orientation is input)
-  - KLT track → terminated tracks → triangulate → MSCKF feature update (VIO)
-  - augment a clone (camera position; orientation is the known gimbal pose)
-  - AprilTag detect (throttled) → PnP + known field map → absolute POSITION
-    fix + YAW-bias correction (drift-free global anchor; replaces loop closure)
-
-Orientation is a known input from the gimbal (body = IMU = full gimbal,
-yaw+pitch; pitch gravity-referenced, yaw a drift-bias δψ anchored by tags).
-The SLAM camera is on the yaw-only stage, so the IMU<-camera extrinsic varies
-with gimbal pitch (common.cam_from_imu).
+Orientation is a known input from the gimbal (body = IMU = full gimbal, yaw+pitch;
+pitch gravity-referenced, yaw a drift-bias δψ anchored by tags). The camera (on
+the yaw-only stage) is used ONLY to detect tags here.
 
 Subs:
-  camera_feed:  {ct, st, frame}              (512x256 RGB, canonical pinhole)
-  raw_imu:      {t, accel:[3]}               (gimbal accelerometer; non-conflate)
-  gimbal_state: {yaw_gi, pitch_gi, ...}      (non-conflate; interpolated to ct → orientation)
+  camera_feed:  {ct, st, frame}    (RGB, canonical pinhole — for AprilTag detection)
+  raw_imu:      {t, accel:[3]}     (gimbal accelerometer; non-conflate)
+  gimbal_state: {yaw_gi, ...}      (non-conflate; interpolated to ct → orientation)
+  chassis_odom: {vx, vy}           (wheel velocity, m/s, gimbal-heading frame)
 
 Pubs:
-  slam_pose:  {t, p_w, v_w, q_wb(gimbal), cov_pos(3x3), n_tracks, n_clones, n_tags}
-  slam_debug: {t, clone_p, recent_points, seen_tag_p,    # 3D
-               live_uvs, live_ids, live_ages, tag_dets}  # 2D overlays for the viewer
+  slam_pose:  {t, p_w, v_w, q_wb(gimbal), cov_pos(3x3), n_tags}
+  slam_debug: {t, seen_tag_p, tag_dets}
 """
 import gc, time
-from collections import deque
 
 import cv2
 import numpy as np
@@ -39,14 +34,11 @@ from ..core.keyvalue import kv_put
 from ..common.geometry import rotz, roty, wrap_pi
 from ..common.gimbal import GimbalBuffer
 from ...slam import common
-from ...slam.msckf import MsckfState
-from ...slam.frontend import FeatureFrontend
-from ...slam.triangulate import triangulate_feature
-from ...slam.types import Frame
+from ...slam.filter import PoseEKF
 
-# Cap OpenCV's thread pool: each cv2 call (KLT, goodFeatures, findEssentialMat,
-# ArUco, solvePnP) otherwise spawns an all-core pool, which oversubscribes the
-# cores against camerad and trips its watchdog. One thread keeps them cooperative.
+# Cap OpenCV's thread pool: each cv2 call (ArUco, solvePnP) otherwise spawns an
+# all-core pool, which oversubscribes the cores against camerad and trips its
+# watchdog. One thread keeps them cooperative.
 OPENCV_THREADS = getenv("OPENCV_THREADS", 1)
 # ArUco detection is the heaviest per-frame op and spikes on cluttered scenes;
 # tags are intermittent and only need occasional absolute fixes, so throttle it.
@@ -92,15 +84,6 @@ def _tag_body_pose(tag_id:int, corners:np.ndarray, p_offset:np.ndarray, R_ic:np.
   yaw_tag = float(np.arctan2(R_wb_tag[1, 0], R_wb_tag[0, 0]))  # Rz(yaw)Ry(pitch) → yaw
   return (p_wc - p_offset).astype(np.float32), yaw_tag
 
-def _triangulate_track(tr, R_cl:list, p_cl:np.ndarray, fid_to_slot:dict):
-  obs = [(fid_to_slot[int(f)], np.asarray(uv, np.float32))
-         for f, uv in zip(tr.frame_ids, tr.uv) if int(f) in fid_to_slot]
-  if len(obs) < 2: return None, [], False
-  Rs = [R_cl[s] for s, _ in obs]
-  ts = [p_cl[s] for s, _ in obs]
-  pw, ok = triangulate_feature(np.array([uv for _, uv in obs], np.float32), Rs, ts)
-  return pw, obs, ok
-
 # ---------------------------------------------------------------------------
 def run():
   gc.disable()
@@ -113,17 +96,16 @@ def run():
   gimbal_buf = GimbalBuffer()
   imu_sub = messaging.Sub(["raw_imu"], conflate=False)
 
-  fe = FeatureFrontend()
   tag_detector = _make_tag_detector()
-  st = MsckfState.init()
+  st = PoseEKF.init()
 
   last_imu_t = None
   last_tag_t = last_wd = 0.0
-  recent_points = deque(maxlen=200)
   n_tags_total = 0
   gimbal_yaw = gimbal_pitch = yaw_offset = 0.0
+  last_vx = last_vy = 0.0      # latest wheel-odom reading (for the flow log)
   diag_t = time.monotonic()
-  d_imu = d_feat = d_tags = d_frames = d_vel = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
+  d_imu = d_tags = d_frames = d_vel = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
 
   kv_put("watchdog", "slamd", time.monotonic())
 
@@ -139,16 +121,15 @@ def run():
     if cam is None or not sub.updated["camera_feed"]: continue
     ct = float(cam["ct"]); d_frames += 1
 
-    # Gimbal pose interpolated to the capture instant (not the latest sample), so the
-    # clone orientation + tag PnP use where the camera actually looked at ct.
+    # Gimbal pose interpolated to the capture instant (not the latest sample), so
+    # orientation + tag PnP use where the camera actually looked at ct.
     gp = gimbal_buf.interpolate(ct)
     if gp is not None: gimbal_yaw, gimbal_pitch, _ = gp
 
     # Orientation is the known gimbal pose; yaw_offset is the δψ drift correction.
     R_wb = _gimbal_R_wb(gimbal_yaw + yaw_offset, gimbal_pitch)
     R_ic, t_ic = common.cam_from_imu(gimbal_pitch)
-    R_wc = (R_wb @ R_ic).astype(np.float32)
-    p_offset = (R_wb @ t_ic).astype(np.float32)
+    p_offset = (R_wb @ t_ic).astype(np.float32)          # camera-pos offset from IMU body
 
     # --- Predict over all queued accel samples (one batched covariance step) --
     accels, dts = [], []
@@ -164,39 +145,17 @@ def run():
     d_imu += len(accels)
     # Skip implausibly long integration windows — the startup raw_imu backlog
     # (non-conflate, piles up before the first frame) or a post-stall burst.
-    # Integrating seconds of accel in one step just kicks velocity; last_imu_t
-    # already advanced, so the next frame resumes cleanly.
     if accels and sum(dts) < 0.5:
       st.predict_batch(np.array(accels, np.float32), np.array(dts, np.float32), R_wb)
 
     # --- Wheel-odometry velocity fusion (gimbal-heading 2-D horizontal, m/s) --
-    # Observes v_w directly — the accelerometer can't see constant velocity, so
-    # without this the estimate coasts (the −700 m stationary drift). v=0 when
-    # stopped is the same update (no ZUPT branch). Filter Mahalanobis-gates it
-    # against the IMU-propagated v, rejecting wheel slip.
+    # Observes v_w directly so the estimate doesn't coast; the planar vz=0 row is
+    # inside the update. v=0 when stopped is the same update (no ZUPT branch).
     odom = sub["chassis_odom"]
     if odom is not None and sub.updated["chassis_odom"]:
-      yaw_offset += st.update_with_velocity(float(odom["vx"]), float(odom["vy"]),
-                                            gimbal_yaw + yaw_offset)
+      last_vx, last_vy = float(odom["vx"]), float(odom["vy"])
+      yaw_offset += st.update_with_velocity(last_vx, last_vy, gimbal_yaw + yaw_offset)
       d_vel += 1
-
-    # --- Front-end: KLT track, then augment this frame's clone ---------------
-    img = np.frombuffer(cam["frame"], dtype=np.uint8).reshape(common.IMG_H, common.IMG_W, 3)
-    frame = Frame(t=ct, img=img)
-    terminated, frame_id = fe.process(frame)
-    st.augment(t=ct, frame_id=frame_id, R_wc=R_wc, p_offset=p_offset)
-
-    # --- VIO: feature update from terminated tracks --------------------------
-    if common.FUSE_FEATURES:
-      fid_to_slot = {fid: i for i, fid in enumerate(st.fid_cl) if fid >= 0}
-      points, obs = [], []
-      for tr in terminated:
-        pw, obs_list, ok = _triangulate_track(tr, st.R_cl, st.p_cl, fid_to_slot)
-        if ok: points.append(pw); obs.append(obs_list)
-      if points:
-        yaw_offset += st.update_with_features(points, obs)
-        d_feat += len(points)
-        for pw in points: recent_points.append(pw.tolist())
 
     # --- AprilTag detection (throttled) → absolute position + yaw fixes ------
     # tag_dets stays None on frames where detection didn't run so the viewer
@@ -205,7 +164,9 @@ def run():
     if now - last_tag_t >= 1.0 / TAG_DETECT_HZ:
       last_tag_t = now
       tag_dets = []
-      corners, ids, _ = tag_detector.detectMarkers(frame.gray)
+      gray = cv2.cvtColor(np.frombuffer(cam["frame"], dtype=np.uint8).reshape(
+        common.IMG_H, common.IMG_W, 3), cv2.COLOR_RGB2GRAY)
+      corners, ids, _ = tag_detector.detectMarkers(gray)
       if ids is not None:
         for tag_id, c in zip(ids.flatten(), corners):
           c4 = c.reshape(4, 2)
@@ -215,8 +176,7 @@ def run():
           if res is None: continue
           p_wb, yaw_tag = res
           yaw_offset += st.update_with_position(p_wb)
-          err = wrap_pi(yaw_tag - (gimbal_yaw + yaw_offset))
-          yaw_offset += st.update_with_yaw(err)
+          yaw_offset += st.update_with_yaw(wrap_pi(yaw_tag - (gimbal_yaw + yaw_offset)))
           n_tags_total += 1; d_tags += 1
           seen_tag_p.append(p_wb.tolist())
 
@@ -225,32 +185,19 @@ def run():
       span = now - diag_t
       logger.info(
         f"slamd flow: frames {d_frames/span:.0f}/s  imu {d_imu/span:.0f}/s  "
-        f"feats_used {d_feat/span:.0f}/s  tags {d_tags/span:.0f}/s  "
-        f"|accel|~{d_acc_mag/max(d_acc_n,1):.2f}  a_w.z~{d_aw_z/max(d_acc_n,1):+.2f}  "
-        f"vel {d_vel/span:.0f}/s  |v|={float(np.linalg.norm(st.v_w)):.2f}  "
-        f"p_w={st.p_w.round(3).tolist()}")
+        f"tags {d_tags/span:.0f}/s  |accel|~{d_acc_mag/max(d_acc_n,1):.2f}  "
+        f"a_w.z~{d_aw_z/max(d_acc_n,1):+.2f}  vel {d_vel/span:.0f}/s  "
+        f"|v|={float(np.linalg.norm(st.v_w)):.2f}  gyaw={np.degrees(gimbal_yaw):+.0f}deg  "
+        f"odom=[{last_vx:+.2f},{last_vy:+.2f}]  p_w={st.p_w.round(3).tolist()}")
       diag_t = now
-      d_imu = d_feat = d_tags = d_frames = d_vel = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
+      d_imu = d_tags = d_frames = d_vel = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
 
     # --- Publish ------------------------------------------------------------
-    live_uvs, live_ids, live_ages = [], [], []
-    for tid, tr in fe.live.items():
-      live_uvs.append([float(tr.uv[-1][0]), float(tr.uv[-1][1])])
-      live_ids.append(int(tid)); live_ages.append(int(len(tr)))
-    active = [i for i, fid in enumerate(st.fid_cl) if fid >= 0]
-
     pub.send("slam_pose", {
       "t": ct,
       "p_w": st.p_w.tolist(), "v_w": st.v_w.tolist(),
       "q_wb": _R_to_quat_np(R_wb).tolist(),
       "cov_pos": st.P[0:3, 0:3].flatten().tolist(),
-      "n_tracks": len(fe.live), "n_clones": len(active), "n_tags": n_tags_total,
+      "n_tags": n_tags_total,
     })
-    pub.send("slam_debug", {
-      "t": ct,
-      "clone_p": [st.p_cl[i].tolist() for i in active],
-      "recent_points": list(recent_points),
-      "seen_tag_p": seen_tag_p,
-      "live_uvs": live_uvs, "live_ids": live_ids, "live_ages": live_ages,
-      "tag_dets": tag_dets,
-    })
+    pub.send("slam_debug", {"t": ct, "seen_tag_p": seen_tag_p, "tag_dets": tag_dets})

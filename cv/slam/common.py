@@ -1,4 +1,4 @@
-"""Shared constants + calibration for the SLAM stack.
+"""Shared constants + calibration for the field-localization stack.
 
 Camera intrinsics come from the shared canonical-pinhole convention in
 `autoaim.common` (camerad pre-warps the real sensor into it). IMU noise
@@ -48,9 +48,8 @@ CAM_BASE_R = np.array([[0, 0, 1],
 def cam_from_imu(pitch_rad: float) -> tuple[np.ndarray, np.ndarray]:
   """Return (R_ic, t_ic): IMU-frame <- camera-frame rotation/translation at the
   given gimbal pitch, i.e. a camera-frame point maps to the IMU frame via
-  p_imu = R_ic @ p_cam + t_ic. (This is the "body <- camera" extrinsic the
-  MSCKF clones/updates use; the SLAM camera is the gimbal-yaw frame, the IMU
-  adds pitch on top.)"""
+  p_imu = R_ic @ p_cam + t_ic. (This is the "body <- camera" extrinsic for tag
+  PnP; the SLAM camera is the gimbal-yaw frame, the IMU adds pitch on top.)"""
   a = PITCH_SIGN * pitch_rad
   c, s = np.cos(a), np.sin(a)
   ax = PITCH_AXIS
@@ -83,23 +82,6 @@ GRAVITY = np.array([0.0, 0.0, -9.81], dtype=np.float32)
 # Check the slamd flow log's accel magnitude at rest: ~9.81 → True, ~0 → False.
 ACCEL_INCLUDES_GRAVITY = False
 
-# Pixel measurement noise stddev (used for MSCKF update).
-PIXEL_NOISE = 1.0                # px
-
-# MSCKF sliding-window size. Doubles as the max track length and the max
-# observations used per feature — a track can't outlive the clones it references.
-N_CLONES = 15
-# Minimum observations for a feature to be usable: the front-end won't hand over
-# shorter tracks, and the null-space projection needs this many to leave a
-# constraint. One number so the two ends can't disagree (a shorter track would
-# just be triangulated and then rejected).
-MIN_FEATURE_OBS = 3
-# Minimum triangulation parallax. With ~zero camera baseline (e.g. a stationary
-# platform) inverse-depth is unobservable and the triangulated point is garbage;
-# reject features whose observing clones don't subtend at least this angle. This
-# is what stops a still robot from feeding the filter degenerate feature updates.
-MIN_PARALLAX_DEG = 1.0
-
 # --- Wheel-odometry velocity fusion ----------------------------------------
 # Chassis velocity (2-D horizontal, m/s, referenced to the gimbal heading) is
 # fused as a velocity measurement on v_w. The accelerometer can't observe
@@ -119,24 +101,12 @@ VERT_VEL_NOISE = 0.05            # m/s — vertical (planar) velocity constraint
 # uncertainty and a chi-square gate would reject the good wheel readings that
 # make velocity observable (the overconfidence trap).
 WHEEL_SPEED_MAX = 5.0            # m/s — above the robot's top speed
-# Mahalanobis gate confidence (chi-square) for the FEATURE update — drops the
-# degenerate / moving-scene outliers that disagree with the propagated state
-# (e.g. what produced the huge position jumps). Absolute AprilTag fixes are NOT
-# gated (they're the ground-truth anchor and must always apply).
-GATE_CONFIDENCE = 0.99
-
-# --- Bring-up / isolation switches -----------------------------------------
 # Let the wheel-velocity update also correct gimbal-yaw drift (δψ) via its
 # heading coupling. Powerful ONCE the wheel vx/vy axes are verified, but during
 # bring-up an unverified wheel-axis sign feeds wrong yaw corrections and spirals
 # the heading (a straight drive curves into a scribble). Keep OFF until the
 # wheel axes + gimbal-yaw sign are confirmed.
 VEL_OBSERVES_YAW = False
-# Fuse KLT features into the filter. Turn OFF to isolate the wheel+gimbal
-# dead-reckoning: if a straight drive is then a clean back-and-forth line, the
-# scribble was features/extrinsics (R_MOUNT/CAM_BASE_R); if it still scribbles,
-# it's the wheel vx/vy axes or the gimbal-yaw sign.
-FUSE_FEATURES = True
 
 # --- AprilTags (absolute pose correction) ----------------------------------
 # Field has AprilTags at known locations; they replace loop closure. Detection
