@@ -133,8 +133,8 @@ def run():
     if chassis_velocity is not None and due(next_comm_at, "chassis_velocity"):
       if fresh(sub, "chassis_velocity"):
         x = chassis_velocity["x"]
-        z = chassis_velocity["z"]
-        comm_msg(protocol, comm_counts, "chassis_velocity", Command.MOVE_ROBOT, x, z)
+        y = chassis_velocity["y"]
+        comm_msg(protocol, comm_counts, "chassis_velocity", Command.MOVE_ROBOT, x, y)
       else:
         comm_msg(protocol, comm_counts, "chassis_velocity", Command.MOVE_ROBOT, 0.0, 0.0)
 
