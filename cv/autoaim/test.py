@@ -43,7 +43,7 @@ if __name__ == "__main__":
       # bypass JIT for diagnostic: call model.backbone + tokenizer step-by-step to find where magnitude explodes
       img_t = Tensor(syn_img, device="NPY").to(Device.DEFAULT).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W, 3)
       x0_d, x1_d, x2_d, x3_d, sb_d = model.backbone(img_t)
-      feat_diag, fine_diag = model.feature_tokenizer(x2_d, x3_d, sb_d)
+      feat_diag, fine_diag = model.feature_tokenizer(x3_d, sb_d)
       print(f"  {plate_name} (target={target_color}):")
       print(f"    x0: mean={x0_d.mean().item():.3f}, std={x0_d.std().item():.3f}, absmax={x0_d.abs().max().item():.3f}")
       print(f"    x1: mean={x1_d.mean().item():.3f}, std={x1_d.std().item():.3f}, absmax={x1_d.abs().max().item():.3f}")
