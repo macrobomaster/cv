@@ -296,22 +296,6 @@ def _plate_image_velocity(dyn, dt, fx):
             dyn["cz"] + dyn["r"] * math.cos(th) + dyn["dvz"] * d)
   return _estimate_plate_center_px(*xyz(dt + 0.5), 0, 0, 0, fx) - _estimate_plate_center_px(*xyz(dt - 0.5), 0, 0, 0, fx)
 
-def random_plate(plate, plate_alpha, plate_kps_local, img, plate_w, plate_h, fx=None):
-  """Sample random pose, project plate, return (projected_kps, pose_tuple, rot_tuple, H)."""
-  # log-uniform z so apparent plate size is roughly uniformly distributed; linear-z over-samples
-  # far plates because apparent size ∝ 1/z. z_lo=200mm because below that a near plate's apparent
-  # width exceeds the trainable [-0.5, 1.5] bin range at CANONICAL_FX_FY and the sample gets
-  # rejected; z_hi=6000mm covers long-range (~6m) targets — a 135mm plate there is ~16px wide.
-  x, y = random.uniform(-400, 400), random.uniform(-200, 200)
-  z = math.exp(random.uniform(math.log(200), math.log(6000)))
-  # rz (in-plane roll) widened so the model sees plates tilted by gimbal jitter, robot tilt, and
-  # off-axis viewing — previously locked to ±1° which left the head fragile to any image rotation.
-  rx, ry, rz = random.uniform(-5, 5), random.uniform(-60, 60), random.uniform(-30, 30)
-  ret = project_plate(plate, plate_alpha, plate_kps_local, img, x, y, z, rx, ry, rz, plate_w, plate_h, fx)
-  if ret is None: return None, (x, y, z), (rx, ry, rz), None
-  kps, H, _ = ret
-  return kps, (x, y, z), (rx, ry, rz), H
-
 def _normalize_and_validate_corners(projected_kps):
   """Returns (corners_8, has_corners) where corners_8 is a flat list of 8 normalized coords (NOT
   clipped — partial plates carry corners in [BIN_LO, BIN_HI] so the model can learn off-frame
@@ -409,76 +393,10 @@ plate_images = {}
 plate_corners = {}
 background_images = []
 def generate_sample(file, target_color:str|None=None) -> tuple[cv2.Mat, int, list[float], int]:
-  """Returns (image, class_id, corners_8, target_color_id).
-  - target_color: "red" or "blue" — color the bot is hunting. None → random 50/50.
-  - target_color_id: 0=red, 1=blue.
-  - Label is the closest-to-center plate matching target_color (blanks never targeted). If no
-    matching plate is centrally placed, class_id=0 and corners_8=zeros.
-  - 20% of samples include 1-2 distractor plates (mixed colors) so the model learns to pick
-    the right one instead of any visible plate."""
-  global plate_images, plate_corners, background_images
-
-  seed_plate_name = file.split(":")[1]
-  target_color = _resolve_target_color(seed_plate_name, target_color)
-  target_color_id = 0 if target_color == "red" else 1
-  scene_plate_names = _build_scene_plates(seed_plate_name, target_color)
-
-  # Lazy-load any plates we haven't seen yet
-  for name in scene_plate_names:
-    if name not in plate_images:
-      logger.debug(f"loading plate {name}")
-      plate_img = cv2.imread(str(BASE_PATH / "armor_plate" / f"{name}.png"), cv2.IMREAD_UNCHANGED)
-      plate_img = cv2.cvtColor(plate_img, cv2.COLOR_BGRA2RGBA)
-      with open(str(BASE_PATH / "armor_plate" / f"{name}.json"), "r") as f:
-        keypoints = json.load(f)
-      resized = RESIZE_PIPELINE(image=plate_img, keypoints=keypoints)
-      plate_images[name] = resized["image"]
-      plate_corners[name] = resized["keypoints"]
-
-  if len(background_images) == 0:
-    bg_files = glob.glob(str(BASE_PATH / "background" / "*"))
-    logger.debug(f"loading {len(bg_files)} background images")
-    for f in bg_files:
-      bg_img = cv2.imread(f, cv2.IMREAD_UNCHANGED)
-      bg_img = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
-      background_images.append(bg_img)
-
-  # Background (shared across all plates in the scene)
-  use_procedural = len(background_images) == 0 or random.random() < 0.5
-  if use_procedural:
-    img = generate_procedural_background()
-  else:
-    raw_background = random.choice(background_images)
-    img = BACKGROUND_PIPELINE(image=raw_background)["image"]
-  img = A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=30, val_shift_limit=20, p=0.7)(image=img)["image"]
-
-  # Place each plate at a random pose; collect projections for target selection
-  fx = _sample_focal()  # one camera per scene
-  projections = []  # list of (color, number, projected_kps, center_px)
-  for name in scene_plate_names:
-    raw_plate = plate_images[name]
-    kps_local = plate_corners[name]
-    number = int(name.split("_")[0])
-    color = name.split("_")[1]
-    plate_w, plate_h = plate_dims(number)
-    plate_rgba = PLATE_PIPELINE_2(image=raw_plate[:, :, :3])["image"]
-    plate_alpha = raw_plate[:, :, 3]
-
-    projected_kps, _, _, H = random_plate(plate_rgba, plate_alpha, kps_local, img, plate_w, plate_h, fx=fx)
-    if projected_kps is not None and H is not None:
-      _apply_emissive_leds(img, plate_rgba, plate_alpha, color, H)
-      projections.append((color, number, projected_kps, projected_kps.mean(axis=0)))
-
-  img = apply_highlight_desat(img)
-
-  target = _select_target(projections, target_color)
-  if target is None:
-    return img, 0, [0.0] * 8, target_color_id
-  color, number, target_kps, _ = target
-  corners_8, has_corners = _normalize_and_validate_corners(target_kps)
-  if has_corners == 0.0:
-    return img, 0, [0.0] * 8, target_color_id
-  return img, encode_unified_class(color, number), corners_8, target_color_id
+  """Single-frame sample = generate_sequence at T=1 — one generator, no train/eval drift.
+  Returns (image, class_id, corners_8, target_color_id)."""
+  images, class_id, corners_8, target_color_id = generate_sequence(file, T=1, target_color=target_color)
+  return images[0], class_id, corners_8, target_color_id
 
 def _make_background(fx=None):
   """Create a background image (shared across sequence frames)."""
