@@ -3,10 +3,10 @@
 Run with:
   python -m cv.tools.visual_slam <addr>
 
-Subscribes to camera_feed, slam_pose, slam_debug. Shows:
-  - 2D camera view with AprilTag detections (carried by slam_debug)
+Subscribes to camera_feed, apriltags, slam_pose, slam_debug. Shows:
+  - 2D camera view with AprilTag detections (from tagd's apriltags topic)
   - 3D world: robot trajectory, current pose marker, known field AprilTags,
-    and tags actually used for a fix this frame
+    and tags actually used for a fix this frame (slam_debug.seen_tag_p)
   - Scalars: number of tags fixed, position-stddev
 """
 import sys, gc, time
@@ -58,7 +58,7 @@ def main():
            rr.Points3D(tag_pts, colors=[(200, 200, 200)], radii=0.05, labels=tag_lbls),
            static=True)
 
-  sub = messaging.Sub(["camera_feed", "slam_pose", "slam_debug"],
+  sub = messaging.Sub(["camera_feed", "slam_pose", "slam_debug", "apriltags"],
                       poll="camera_feed", addr=addr)
   fk = FrequencyKeeper(30)
 
@@ -78,8 +78,8 @@ def main():
     # Periodic diagnostic on stdout so we can tell which topic is missing.
     now = time.monotonic()
     if now - diag_t > 2.0:
-      _dbg = sub["slam_debug"]
-      n_tag_det = len(_dbg.get("tag_dets", []) or []) if _dbg is not None else 0
+      _tg = sub["apriltags"]
+      n_tag_det = len(_tg["detections"]) if _tg is not None else 0
       print(f"[viz] cam_msgs={n_cam_received} dbg_msgs={n_dbg_received} "
             f"tag_dets={n_tag_det} alive={dict(sub.alive)}")
       diag_t = now
@@ -108,28 +108,25 @@ def main():
       rr.log("scalars/pos_std_z", rr.Scalars(float(pos_std[2])))
       rr.log("scalars/n_tags", rr.Scalars(int(pose["n_tags"])))
 
-    # --- Debug topic: tag overlays ----------------------------------------
+    # --- AprilTag detections overlay (2D, straight from tagd) -------------
+    tg = sub["apriltags"]
+    if tg is not None and sub.updated["apriltags"]:
+      dets = tg["detections"]
+      if dets:
+        outlines = [d["corners"] + [d["corners"][0]] for d in dets]  # close the quad
+        centers = [list(np.mean(np.array(d["corners"], np.float32), axis=0)) for d in dets]
+        labels  = [str(d["id"]) for d in dets]
+        rr.log("camera/feed/apriltags", rr.LineStrips2D(outlines, radii=2.0, colors=[(0, 220, 255)]))
+        rr.log("camera/feed/apriltag_ids",
+               rr.Points2D(centers, radii=4.0, colors=[(0, 220, 255)], labels=labels))
+      else:
+        rr.log("camera/feed/apriltags", rr.Clear(recursive=True))
+        rr.log("camera/feed/apriltag_ids", rr.Clear(recursive=True))
+
+    # --- Debug topic: tags actually fused this frame (3D) -----------------
     dbg = sub["slam_debug"]
     if dbg is not None and sub.updated["slam_debug"]:
       n_dbg_received += 1
-
-      # AprilTag detections overlay (raw, so it shows even when FUSE_APRILTAGS is
-      # off). tag_dets is None on throttled frames where detection didn't run —
-      # leave the overlay untouched then so it doesn't blink.
-      dets = dbg.get("tag_dets")
-      if dets is not None:
-        if dets:
-          outlines = [d["corners"] + [d["corners"][0]] for d in dets]  # close the quad
-          centers = [list(np.mean(np.array(d["corners"], np.float32), axis=0)) for d in dets]
-          labels  = [str(d["id"]) for d in dets]
-          rr.log("camera/feed/apriltags", rr.LineStrips2D(outlines, radii=2.0, colors=[(0, 220, 255)]))
-          rr.log("camera/feed/apriltag_ids",
-                 rr.Points2D(centers, radii=4.0, colors=[(0, 220, 255)], labels=labels))
-        else:
-          rr.log("camera/feed/apriltags", rr.Clear(recursive=True))
-          rr.log("camera/feed/apriltag_ids", rr.Clear(recursive=True))
-
-      # AprilTags used for a fix this frame (world positions the absolute fix used).
       seen = np.array(dbg["seen_tag_p"], dtype=np.float32) if dbg.get("seen_tag_p") else np.zeros((0, 3), np.float32)
       if len(seen):
         rr.log("world/seen_tags", rr.Points3D(seen, colors=[(80, 240, 120)], radii=0.06))
