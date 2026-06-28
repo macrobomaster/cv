@@ -138,7 +138,7 @@
           hardware.enableAllHardware = lib.mkForce false;
           # partition + install onto NVMe from the ISO; disko CLI from the same input as the module
           environment.systemPackages = [
-            inputs.disko.packages.${pkgs.system}.default
+            inputs.disko.packages.${pkgs.stdenv.hostPlatform.system}.default
             pkgs.git
           ];
         };
@@ -172,6 +172,9 @@
             modesetting.enable = true;
           };
 
+          # preload the cv devshell's full build closure so `nix develop` at boot is no-build
+          system.extraDependencies = [ orinDevShell.inputDerivation ];
+
           systemd.services.cv = {
             description = "cv service";
             wantedBy = [ "multi-user.target" ];
@@ -200,6 +203,74 @@
           ]
           ++ extra;
         };
+
+      # bake a target system's full closure + its disko partition script into the
+      # installer ISO, so provisioning is a copy (no rebuild/eval/network) on the slow Orin
+      embedSystem =
+        sys:
+        { pkgs, ... }:
+        {
+          isoImage.storeContents = [ sys.config.system.build.toplevel ];
+          environment.systemPackages = [
+            (pkgs.writeShellScriptBin "install-orin" ''
+              set -euo pipefail
+              echo ">>> partitioning + formatting nvme (disko, DESTRUCTIVE) ..."
+              ${sys.config.system.build.diskoScript}
+              echo ">>> installing pre-built system (copy, no build) ..."
+              nixos-install --system ${sys.config.system.build.toplevel} --no-root-passwd
+              echo ">>> done — reboot"
+            '')
+          ];
+        };
+
+      orinNano = mkOrin "orin-nano" [ orinSystem ];
+      orinNx = mkOrin "orin-nx" [ orinSystem ];
+
+      # the aarch64 cv runtime shell (tinygrad+CUDA, opencv, aravis, …); exposed as the
+      # devShell AND preloaded into the system closure via .inputDerivation (see orinSystem)
+      orinDevShell = pkgs-aarch64-linux.mkShell {
+        packages =
+          let
+            python-packages =
+              p:
+              with p;
+              [
+                (
+                  (tinygrad.override {
+                    cudaSupport = true;
+                  }).overridePythonAttrs
+                  (old: {
+                    doCheck = false;
+                    nativeCheckInputs = [ ];
+                    # orin NVRTC (cuda 12, aarch64) rejects the union-based tg_bitcast when a
+                    # union member is __half ("disallowed member function"), and has no
+                    # __builtin_memcpy; bitcast via a pointer reinterpret instead.
+                    postPatch = (old.postPatch or "") + ''
+                      substituteInPlace tinygrad/renderer/cstyle.py \
+                        --replace-fail \
+                          "union U { F f; T t; }; U u; u.f = v; return u.t;" \
+                          "return *(T*)(&v);"
+                    '';
+                  })
+                )
+              ]
+              ++ common-python-packages p;
+            python = pkgs-aarch64-linux.python313;
+          in
+          with pkgs-aarch64-linux;
+          [
+            (python.withPackages python-packages)
+            aravis
+            aravis.lib
+            gobject-introspection
+            llvmPackages_latest.clang-unwrapped
+            tmux
+            bash
+          ];
+        shellHook = ''
+          export CC=${pkgs-aarch64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
+        '';
+      };
     in
     {
       devShells = {
@@ -259,57 +330,14 @@
               source ${pythonCapWrapper.setup}
             '';
           };
-        aarch64-linux.default = pkgs-aarch64-linux.mkShell {
-          packages =
-            let
-              python-packages =
-                p:
-                with p;
-                [
-                  (
-                    (tinygrad.override {
-                      cudaSupport = true;
-                    }).overridePythonAttrs
-                    (old: {
-                      doCheck = false;
-                      nativeCheckInputs = [ ];
-                      # orin NVRTC (cuda 12, aarch64) rejects the union-based tg_bitcast when a
-                      # union member is __half ("disallowed member function"), and has no
-                      # __builtin_memcpy; bitcast via a pointer reinterpret instead.
-                      postPatch = (old.postPatch or "") + ''
-                        substituteInPlace tinygrad/renderer/cstyle.py \
-                          --replace-fail \
-                            "union U { F f; T t; }; U u; u.f = v; return u.t;" \
-                            "return *(T*)(&v);"
-                      '';
-                    })
-                  )
-                ]
-                ++ common-python-packages p;
-              python = pkgs-aarch64-linux.python313;
-            in
-            with pkgs-aarch64-linux;
-            [
-              (python.withPackages python-packages)
-              aravis
-              aravis.lib
-              gobject-introspection
-              llvmPackages_latest.clang-unwrapped
-              tmux
-              bash
-            ];
-
-          shellHook = ''
-            export CC=${pkgs-aarch64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
-          '';
-        };
+        aarch64-linux.default = orinDevShell;
       };
 
       nixosConfigurations = {
-        orin-nano = mkOrin "orin-nano" [ orinSystem ];
-        orin-nx = mkOrin "orin-nx" [ orinSystem ];
-        orin-nano-installer = mkOrin "orin-nano" [ orinInstaller ];
-        orin-nx-installer = mkOrin "orin-nx" [ orinInstaller ];
+        orin-nano = orinNano;
+        orin-nx = orinNx;
+        orin-nano-installer = mkOrin "orin-nano" [ orinInstaller (embedSystem orinNano) ];
+        orin-nx-installer = mkOrin "orin-nx" [ orinInstaller (embedSystem orinNx) ];
       };
     };
 }
