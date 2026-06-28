@@ -1,11 +1,15 @@
 """AprilTag detection daemon.
 
-Isolates the slow, scene-variable `cv2.aruco.detectMarkers` from slamd's fusion
-loop. Running it inline dragged slamd down to detection rate (~7 Hz) and stuttered
-the pose; in its own process it uses its own cores and never blocks the estimate.
-It only DETECTS — slamd does the PnP + field-map fix (so all the geometry/calib
-stays in one place). Tags carry the frame capture time `ct`; slamd interpolates
-the gimbal pose to `ct`, so detection latency is handled correctly.
+Isolates the slow, scene-variable detector from slamd's fusion loop. Running it
+inline dragged slamd to detection rate (~7 Hz) and stuttered the pose; in its own
+process it never blocks the estimate. It only DETECTS — slamd does the PnP +
+field-map fix on the published corners. Tags carry the frame capture time `ct`;
+slamd interpolates the gimbal pose to `ct`, so detection latency is handled.
+
+Detector: AprilTag 3 (the AprilRobotics C lib via `apriltag3.py` ctypes wrapper)
+when available — better quads, subpixel corners, multithreaded, `quad_decimate`
+speed knob. Falls back to cv2.aruco (subpixel corners) if libapriltag isn't on
+the system. Both return cv2.aruco-order corners, so slamd is detector-agnostic.
 
 Subs:  camera_feed: {ct, st, frame}     (RGB, canonical pinhole)
 Pubs:  apriltags:   {ct, detections:[{id, corners:[[u,v]*4]}]}
@@ -17,27 +21,45 @@ import numpy as np
 from tinygrad.helpers import getenv
 
 from ..core import messaging
+from ..core.logging import logger
 from ..core.keyvalue import kv_put
 from ...slam import common
 
-# Dedicated process → let ArUco use several cores (camerad is pinned/RT, so this
-# won't starve it). detectMarkers is the whole job here.
+# Dedicated process → let the detector use several cores (camerad is pinned/RT,
+# so this won't starve it). Detection is the whole job here.
 OPENCV_THREADS = getenv("OPENCV_THREADS", 4)
-# Rate cap; the real rate is min(this, camera rate, detectMarkers speed). Now that
-# detection is isolated, only detection speed limits it — so this is generous.
+# Rate cap; real rate is min(this, camera rate, detector speed).
 TAG_DETECT_HZ = getenv("TAG_DETECT_HZ", 30)
+# AprilTag 3 quad-detection decimation (>1 = faster, slight corner-accuracy cost;
+# 1 = full res, lowest noise).
+AT3_QUAD_DECIMATE = getenv("AT3_QUAD_DECIMATE", 1.0)
+
+def _make_detect():
+  """detect(gray) -> [(id, corners (4,2) cv2-order)]. AprilTag 3 if libapriltag is
+  available, else cv2.aruco with subpixel corner refinement."""
+  try:
+    from .apriltag3 import Detector
+    at = Detector(nthreads=OPENCV_THREADS, quad_decimate=float(AT3_QUAD_DECIMATE))
+    logger.info("tagd: using AprilTag 3 (libapriltag)")
+    return at.detect
+  except Exception as e:                       # lib missing / load error → cv2.aruco
+    logger.warning(f"tagd: AprilTag 3 unavailable ({e}); falling back to cv2.aruco")
+    d = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, common.APRILTAG_DICT))
+    params = cv2.aruco.DetectorParameters()
+    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    aruco = cv2.aruco.ArucoDetector(d, params)
+    def detect(gray):
+      corners, ids, _ = aruco.detectMarkers(gray)
+      if ids is None: return []
+      return [(int(i), c.reshape(4, 2)) for i, c in zip(ids.flatten(), corners)]
+    return detect
 
 def run():
   gc.disable()
   cv2.setNumThreads(OPENCV_THREADS)
   pub = messaging.Pub(["apriltags"])
   sub = messaging.Sub(["camera_feed"], poll="camera_feed")
-  d = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, common.APRILTAG_DICT))
-  params = cv2.aruco.DetectorParameters()
-  # Subpixel corner refinement — raw ArUco corners are ~1 px (integer-ish), which
-  # is the dominant PnP position/yaw noise. Refining to subpixel cuts it sharply.
-  params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-  detector = cv2.aruco.ArucoDetector(d, params)
+  detect = _make_detect()
   last_tag_t = last_wd = 0.0
 
   kv_put("watchdog", "tagd", time.monotonic())
@@ -55,9 +77,5 @@ def run():
 
     gray = cv2.cvtColor(np.frombuffer(cam["frame"], dtype=np.uint8).reshape(
       common.IMG_H, common.IMG_W, 3), cv2.COLOR_RGB2GRAY)
-    corners, ids, _ = detector.detectMarkers(gray)
-    dets = []
-    if ids is not None:
-      for tag_id, c in zip(ids.flatten(), corners):
-        dets.append({"id": int(tag_id), "corners": c.reshape(4, 2).astype(float).tolist()})
+    dets = [{"id": tid, "corners": c.astype(float).tolist()} for tid, c in detect(gray)]
     pub.send("apriltags", {"ct": float(cam["ct"]), "detections": dets})

@@ -28,6 +28,12 @@
         (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
       ];
 
+      # aarch64 (jetson) only — kept off x86_64 so it doesn't churn the x86 devshell
+      aarch64_overlays = common_overlays ++ [
+        # SDL3's checkPhase runs an SDL_CreateProcess test that asserts wrong in the build sandbox
+        (final: prev: { sdl3 = prev.sdl3.overrideAttrs (old: { doCheck = false; }); })
+      ];
+
       pkgs-x86_64-linux = import nixpkgs ({
         system = "x86_64-linux";
         overlays = [
@@ -52,7 +58,7 @@
             "8.7"
           ];
         };
-        overlays = common_overlays ++ [
+        overlays = aarch64_overlays ++ [
           inputs.jetpack-nixos.overlays.default
           (final: prev: {
             pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
@@ -153,7 +159,7 @@
             hostPlatform = "aarch64-linux";
             config = pkgs-aarch64-linux.config;
           };
-          nixpkgs.overlays = common_overlays ++ [
+          nixpkgs.overlays = aarch64_overlays ++ [
             (final: _: { inherit (final.nvidia-jetpack) cudaPackages; })
           ];
 
@@ -260,6 +266,7 @@
           with pkgs-aarch64-linux;
           [
             (python.withPackages python-packages)
+            apriltag                       # AprilTag 3 C lib (ctypes-wrapped by tagd)
             aravis
             aravis.lib
             gobject-introspection
@@ -269,6 +276,8 @@
           ];
         shellHook = ''
           export CC=${pkgs-aarch64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
+          # tagd ctypes-loads libapriltag directly from this absolute store path
+          export APRILTAG_LIB=${pkgs-aarch64-linux.apriltag}/lib/libapriltag.so
         '';
       };
     in
@@ -305,6 +314,7 @@
               [
                 rerun
                 pythonEnv
+                apriltag                       # AprilTag 3 C lib (ctypes-wrapped by tagd)
                 aravis
                 aravis.lib
                 gobject-introspection
@@ -321,6 +331,8 @@
 
             shellHook = ''
               export CC=${pkgs-x86_64-linux.llvmPackages_latest.clang-unwrapped}/bin/clang
+              # tagd ctypes-loads libapriltag directly from this absolute store path
+              export APRILTAG_LIB=${pkgs-x86_64-linux.apriltag}/lib/libapriltag.so
 
               # Set up python environment from withPackages
               export NIX_PYTHONPREFIX='${pythonEnv}'
