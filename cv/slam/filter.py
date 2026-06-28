@@ -130,13 +130,18 @@ class PoseEKF:
     r = np.array([vx - h1, vy - h2, 0.0 - h3])             # vz measured 0 (planar ground robot)
     return self._apply(H, r, np.diag([_R_VEL, _R_VEL, _R_VZ]))
 
-  def update_with_position(self, p_meas:np.ndarray) -> float:
-    """Absolute position fix from an AprilTag (known field map)."""
+  def update_with_position(self, p_meas:np.ndarray, pos_std:float|None=None) -> float:
+    """Absolute position fix from an AprilTag (known field map). pos_std overrides
+    the measurement stddev — slamd scales it with the tag's range, since far PnP
+    is much noisier (a fixed small stddev makes every jittery fix yank p_w)."""
+    var = pos_std*pos_std if pos_std is not None else _R_POS
     H = np.zeros((3, ERR_DIM)); H[:, 0:3] = _I3
     r = np.asarray(p_meas, np.float64) - self.p_w
-    return self._apply(H, r, _R_POS * _I3)
+    return self._apply(H, r, var * _I3)
 
-  def update_with_yaw(self, r_yaw:float) -> float:
-    """Absolute yaw fix from an AprilTag → corrects the δψ gimbal-yaw drift bias."""
+  def update_with_yaw(self, r_yaw:float, yaw_std:float|None=None) -> float:
+    """Absolute yaw fix from an AprilTag → corrects the δψ gimbal-yaw drift bias.
+    yaw_std overrides the measurement stddev (range-scaled in slamd)."""
+    var = yaw_std*yaw_std if yaw_std is not None else _R_YAW
     H = np.zeros((1, ERR_DIM)); H[0, PSI] = 1.0
-    return self._apply(H, np.array([r_yaw]), np.array([[_R_YAW]]))
+    return self._apply(H, np.array([r_yaw]), np.array([[var]]))

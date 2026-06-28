@@ -67,9 +67,10 @@ def _gimbal_R_wb(yaw:float, pitch:float) -> np.ndarray:
   return (rotz(yaw) @ roty(pitch) @ common.CAM_BASE_R).astype(np.float32)
 
 def _tag_body_pose(tag_id:int, corners:np.ndarray, p_offset:np.ndarray, R_ic:np.ndarray):
-  """PnP a single tag + field map → (p_wb, yaw_tag) or None. p_wb is the IMU
-  body position in world; yaw_tag the absolute body yaw (for δψ correction).
-  Pitch/roll are NOT taken from the tag — the gimbal owns them."""
+  """PnP a single tag + field map → (p_wb, yaw_tag, range) or None. p_wb is the
+  IMU body position in world; yaw_tag the absolute body yaw (for δψ correction);
+  range = tag distance (slamd scales the measurement noise by it). Pitch/roll are
+  NOT taken from the tag — the gimbal owns them."""
   entry = common.TAG_FIELD_MAP.get(tag_id)
   if entry is None: return None
   R_wt, t_wt = entry
@@ -77,12 +78,18 @@ def _tag_body_pose(tag_id:int, corners:np.ndarray, p_offset:np.ndarray, R_ic:np.
                                 common.K, _DIST_ZERO, flags=cv2.SOLVEPNP_IPPE_SQUARE)
   if not ok: return None
   t_ct = tvec.reshape(3)
-  if float(np.linalg.norm(t_ct)) > common.TAG_MAX_RANGE: return None
+  rng = float(np.linalg.norm(t_ct))
+  if rng > common.TAG_MAX_RANGE: return None
   R_wc = R_wt @ cv2.Rodrigues(rvec)[0].T               # world <- camera
   p_wc = t_wt - R_wc @ t_ct                            # camera origin in world
   R_wb_tag = R_wc @ R_ic.T                             # world <- IMU body (from tag)
-  yaw_tag = float(np.arctan2(R_wb_tag[1, 0], R_wb_tag[0, 0]))  # Rz(yaw)Ry(pitch) → yaw
-  return (p_wc - p_offset).astype(np.float32), yaw_tag
+  # Extract gimbal yaw the SAME way _gimbal_R_wb defines it. R_wb_tag =
+  # Rz(yaw)·Ry(pitch)·CAM_BASE_R, so its raw first column is the camera-RIGHT
+  # axis — 90° off from world-forward. Undo CAM_BASE_R first, else the yaw fix
+  # injects a spurious 90° (the "frustum snaps 90° CW on a tag" bug).
+  R_yaw = R_wb_tag @ common.CAM_BASE_R.T               # = Rz(yaw)·Ry(pitch)
+  yaw_tag = float(np.arctan2(R_yaw[1, 0], R_yaw[0, 0]))
+  return (p_wc - p_offset).astype(np.float32), yaw_tag, rng
 
 # ---------------------------------------------------------------------------
 def run():
@@ -174,9 +181,12 @@ def run():
           if not common.FUSE_APRILTAGS: continue   # detect for the viz; don't fuse until map+extrinsics are real
           res = _tag_body_pose(int(tag_id), c4, p_offset, R_ic)
           if res is None: continue
-          p_wb, yaw_tag = res
-          yaw_offset += st.update_with_position(p_wb)
-          yaw_offset += st.update_with_yaw(wrap_pi(yaw_tag - (gimbal_yaw + yaw_offset)))
+          p_wb, yaw_tag, rng = res
+          # noise grows with tag range — far PnP is much noisier (see common.py)
+          pos_std = common.TAG_POS_NOISE + common.TAG_POS_NOISE_PER_M * rng
+          yaw_std = common.TAG_YAW_NOISE + common.TAG_YAW_NOISE_PER_M * rng
+          yaw_offset += st.update_with_position(p_wb, pos_std)
+          yaw_offset += st.update_with_yaw(wrap_pi(yaw_tag - (gimbal_yaw + yaw_offset)), yaw_std)
           n_tags_total += 1; d_tags += 1
           seen_tag_p.append(p_wb.tolist())
 

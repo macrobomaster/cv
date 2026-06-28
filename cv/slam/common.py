@@ -121,7 +121,7 @@ TAG_SIZE = 0.15                   # m, side length of the printed tag (black bor
 # are calibrated — otherwise a tag "fix" snaps to a made-up spot through a wrong
 # R_wb and corrupts the state (esp. vertical). Detection still runs for the viz
 # overlay regardless; this only gates the state update.
-FUSE_APRILTAGS = False
+FUSE_APRILTAGS = True
 def wall_tag(x:float, y:float, z:float, facing_deg:float) -> tuple[np.ndarray, np.ndarray]:
   """(R_world_tag, t_world_tag) for a tag mounted vertically + upright on a wall,
   its FACE pointing along facing_deg in the field horizontal plane (0°=+x, 90°=+y,
@@ -156,13 +156,18 @@ TAG_FIELD_MAP: dict[int, tuple[np.ndarray, np.ndarray]] = {
   9: wall_tag(1.000, 7.999, 0.288, facing_deg=-90),
 }
 
-# Measurement noise stddev for an AprilTag absolute pose fix.
-TAG_POS_NOISE = 0.05             # m
-TAG_ROT_NOISE = 0.05            # rad
-# Reject tag detections whose PnP reprojection is implausible / too far.
-TAG_MAX_RANGE = 8.0              # m
+# AprilTag PnP noise grows with range — a 0.15 m tag spans fewer pixels far away,
+# so the depth solve degrades ~quadratically. Model the measurement stddev as
+# base + per-metre·range so far/noisy tags are down-weighted and the wheel+IMU
+# smooths between fixes (a fixed small stddev makes every jittery fix yank the
+# position at the detect rate). Tune against measured jitter-vs-distance.
+TAG_POS_NOISE = 0.03             # m   — base position stddev (close range)
+TAG_POS_NOISE_PER_M = 0.04       # m   per metre of tag range
+TAG_YAW_NOISE = 0.02             # rad — base yaw stddev
+TAG_YAW_NOISE_PER_M = 0.02       # rad per metre of tag range
+# Reject tag detections beyond this range (PnP too noisy to help).
+TAG_MAX_RANGE = 6.0              # m
 # Gimbal yaw is gyro-integrated and drifts (no absolute yaw reference); the
 # filter carries a yaw-bias state δψ that random-walks at this rate and is
-# corrected by the tag's absolute yaw (a Kalman update with TAG_YAW_NOISE).
+# corrected by the tag's absolute yaw (TAG_YAW_NOISE above).
 YAW_DRIFT_RW = 5.0e-3            # rad / s / sqrt(Hz) — gimbal yaw drift rate
-TAG_YAW_NOISE = 0.03            # rad — AprilTag yaw measurement stddev
