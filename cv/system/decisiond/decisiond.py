@@ -173,6 +173,7 @@ class TriggerGate:
     self.last_target_id = -1
     self.last_burst_idx: Optional[int] = None
     self.last_spin_t_arrival: float = 0.0
+    self.reason = "init"                  # why the last evaluate() did/didn't fire (diagnostics)
 
   def _reset_for_new_target(self):
     self.consecutive_in_tol = 0
@@ -188,6 +189,7 @@ class TriggerGate:
     cls = plate["class"]
     if cls in ("LOST", "UNKNOWN"):
       self.consecutive_in_tol = 0
+      self.reason = f"class={cls}"
       return False
 
     aim_err = math.hypot(yaw_err, pitch_err)
@@ -197,32 +199,53 @@ class TriggerGate:
         self.consecutive_in_tol += 1
       else:
         self.consecutive_in_tol = 0
-      if self.consecutive_in_tol < N_TICKS_FIRE: return False
-      if t_now - self.last_fire_t < COOLDOWN_STATIC: return False
+      if self.consecutive_in_tol < N_TICKS_FIRE:
+        self.reason = f"aim {math.degrees(aim_err):.2f}°≥{math.degrees(TOL_STATIC):.1f}° (n={self.consecutive_in_tol}/{N_TICKS_FIRE})"
+        return False
+      if t_now - self.last_fire_t < COOLDOWN_STATIC:
+        self.reason = "cooldown"
+        return False
       self.last_fire_t = t_now
+      self.reason = "FIRE"
       return True
 
     if cls == "SPIN":
       spin = plate["spin"]
-      if spin is None: return False
-      if aim_err > TOL_SPIN: return False
+      if spin is None:
+        self.reason = "spin=None"
+        return False
+      if aim_err > TOL_SPIN:
+        self.reason = f"aim {math.degrees(aim_err):.2f}°>{math.degrees(TOL_SPIN):.1f}°"
+        return False
       hit = best_visible_plate(spin, t_arrival)
-      if hit is None: return False
+      if hit is None:
+        self.reason = "no plate facing"
+        return False
       omega = abs(spin["omega"])
-      if omega < 1e-3: return False
+      if omega < 1e-3:
+        self.reason = "ω≈0"
+        return False
       # Hit window shrinks under ω uncertainty over the flight time.
       t_f = t_arrival - t_now
       known = [p for p in spin["plates"] if p["known"]]
       r_mean = float(np.mean([p["r"] for p in known])) if known else 0.15
       e_window_eff = E_WINDOW - E_WINDOW_OMEGA_K * r_mean * SIGMA_OMEGA * max(0.0, t_f)
-      if e_window_eff <= 0: return False
-      if hit.e_perp > e_window_eff: return False
+      if e_window_eff <= 0:
+        self.reason = "window collapsed (range/σω)"
+        return False
+      if hit.e_perp > e_window_eff:
+        self.reason = f"e_perp {hit.e_perp*1000:.0f}>{e_window_eff*1000:.0f}mm (k={hit.k})"
+        return False
       # Cooldown: one shot per plate-window (T_period/4 for a 4-plate spinner).
       T_period = 2 * math.pi / omega
-      if t_now - self.last_fire_t < T_period / 4.0: return False
+      if t_now - self.last_fire_t < T_period / 4.0:
+        self.reason = "spin cooldown"
+        return False
       self.last_fire_t = t_now
+      self.reason = "FIRE"
       return True
 
+    self.reason = f"class={cls}?"
     return False
 
 # --- Chassis chase (preserve previous behavior, retarget to gimbal-inertial pos) ---
@@ -298,6 +321,7 @@ def run():
   last_target_id = -1
   fk = FrequencyKeeper(200)
   warned_no_gimbal = False
+  last_diag = 0.0                         # throttle for the trigger-reason diagnostic
 
   while True:
     fk.step()
@@ -312,6 +336,7 @@ def run():
     else:
       yaw_gi_now, pitch_gi_now, yaw_rate_now, pitch_rate_now = gp
 
+    t_now = time.monotonic()
     plate = sub["plate"]
     if plate is None: continue
     if not sub.updated["plate"]: continue
@@ -328,6 +353,8 @@ def run():
       pub.send("aim_error", {"x": 0.0, "y": 0.0})
       pub.send("shoot", False)
       pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
+      if t_now - last_diag > 1.0:
+        logger.info(f"no-fire: class={cls} (no targetable plate)"); last_diag = t_now
       continue
 
     predict = make_predict_fn(plate)
@@ -336,11 +363,12 @@ def run():
       pub.send("shoot", False)
       continue
 
-    t_now = time.monotonic()
     sol = solve_with_lead(predict, t_now, plate["t_state"], d_yaw_prev, d_pitch_prev)
     if sol is None:
       pub.send("aim_error", {"x": 0.0, "y": 0.0})
       pub.send("shoot", False)
+      if t_now - last_diag > 1.0:
+        logger.info(f"no-fire: {cls} no ballistic solution (out of range?)"); last_diag = t_now
       continue
     yaw_gi_cmd, pitch_cmd, t_arrival, target_at_arrival = sol
 
@@ -365,6 +393,10 @@ def run():
     aim_y = pitch_pid.update(pitch_err, pitch_ff, pitch_rate_now, dt)
 
     fire = trigger.evaluate(plate, yaw_err, pitch_err, t_arrival, t_now)
+    if fire or t_now - last_diag > 1.0:
+      logger.info(f"{'FIRE' if fire else 'no-fire'}: {cls} "
+                  f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° → {trigger.reason}")
+      last_diag = t_now
 
     pub.send("aim_error", {"x": aim_x, "y": aim_y})
     pub.send("aim_angle", {"x": math.degrees(yaw_gi_cmd), "y": math.degrees(pitch_cmd)})
