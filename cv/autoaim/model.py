@@ -10,7 +10,7 @@ from ..common.nn import Attention, FFN, MLP, LayerScale, LayerScale2d
 from ..common.nn.fuse import FusedBlock
 from ..common.nn.norm import GRN, RMSNorm, RMSNorm2d
 from ..common.losses import mal_loss
-from .common import IMG_H, IMG_W, N_X2_TOKENS, N_X3_TOKENS, X2_H, X2_W, X3_H, X3_W, T, BIN_LO, BIN_HI, CANONICAL_CAMERA_MATRIX
+from .common import IMG_H, IMG_W, N_X3_TOKENS, X3_H, X3_W, T, BIN_LO, BIN_HI, CANONICAL_CAMERA_MATRIX
 
 class ChannelMixer:
   def __init__(self, cin:int, cout:int=0, exp:int=2):
@@ -296,7 +296,7 @@ class FeatureTokenizer:
     self.pos_emb = LearnedFourierPosEmb(dim)
     self.coords = coord_grid(X3_H, X3_W).is_param_(False)  # x3 only (/32)
 
-  def __call__(self, x2:Tensor, x3:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
+  def __call__(self, x3:Tensor, sb:Tensor) -> tuple[Tensor, Tensor]:
     mem = self.proj_x3(self.norm_x3(x3.flatten(2).transpose(1, 2))) + self.pos_emb(self.coords)  # x3 only (288), single scale
     sb_token = self.proj_sb(self.norm_sb(sb)).unsqueeze(1)  # global register -> decoder query, not memory
     return mem, sb_token
@@ -350,13 +350,13 @@ class Decoder:
     self.corner_mlp = MLP(dim, 2 * n_bins, dim // 2, blocks=1)  # shared residual head over absolute bins
 
   def __call__(self, mem:Tensor, sb:Tensor, target_color:Tensor, pos_emb, coords:Tensor) -> tuple[Tensor, list, Tensor]:
-    # mem: (B, N_X3_TOKENS+N_X2_TOKENS, D) spatial memory [x3 ; x2]; sb: (B, 1, D) global token (last query)
+    # mem: (B, N_X3_TOKENS, D) spatial memory [x3]; sb: (B, 1, D) global token (last query)
     # target_color: (B,) int32; pos_emb/coords shared with FeatureTokenizer (same Fourier space as mem).
     # Returns (class_logits, [cum_logits per layer], obj_logit) — obj_logit scores tokens for query selection.
     B, _, D = mem.shape
 
     target_tok = self.target_color_embed(target_color).reshape(B, 1, D)  # (B, 1, D)
-    kv = self.kv_proj.kv_cache(self.ca_norm_kv(mem))  # cross-attn still reads BOTH levels [x3 ; x2]
+    kv = self.kv_proj.kv_cache(self.ca_norm_kv(mem))  # project the x3 memory to shared K/V once
 
     # position-only query selection on the COARSE level only (x3 @ /32): propose coarse, refine fine.
     # x3 has the largest receptive field -> best for "where is the plate + how big"; its coarse coordinate is
@@ -468,8 +468,8 @@ class Model:
     self.decoder = Decoder(dim, n_layers=3, dropout=dropout)
 
   def encode(self, img:Tensor) -> tuple[Tensor, Tensor]:
-    x0, x1, x2, x3, sb = self.backbone(img)
-    return self.feature_tokenizer(x2, x3, sb)
+    *_, x3, sb = self.backbone(img)
+    return self.feature_tokenizer(x3, sb)
 
   def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     # img: (B, T, IMG_H, IMG_W, 3)
