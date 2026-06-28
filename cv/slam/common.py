@@ -5,6 +5,8 @@ Camera intrinsics come from the shared canonical-pinhole convention in
 parameters and the camera<-body extrinsic are bench measurements with TODO
 markers where a proper calibration tool would supersede them.
 """
+import math
+
 import numpy as np
 
 from ..autoaim.common import CANONICAL_CAMERA_MATRIX, IMG_H as _IMG_H, IMG_W as _IMG_W
@@ -120,12 +122,38 @@ TAG_SIZE = 0.15                   # m, side length of the printed tag (black bor
 # R_wb and corrupts the state (esp. vertical). Detection still runs for the viz
 # overlay regardless; this only gates the state update.
 FUSE_APRILTAGS = False
-# Field map: tag id -> world pose (R_world_tag (3x3), t_world_tag (3,)).
-# The tag frame is the standard cv2 convention: origin at tag center, +x right,
-# +y down, +z out of the tag toward the viewer. World frame is +z up.
-# TODO: fill in with the real surveyed field tag layout.
+def wall_tag(x:float, y:float, z:float, facing_deg:float) -> tuple[np.ndarray, np.ndarray]:
+  """(R_world_tag, t_world_tag) for a tag mounted vertically + upright on a wall,
+  its FACE pointing along facing_deg in the field horizontal plane (0°=+x, 90°=+y,
+  CCW). cv2's tag frame is +x right, +y down, +z out of the face — so here tag +z
+  = facing direction and tag +y = world-down. Floor/tilted/rotated tags need a
+  hand-built R instead.
+
+  Survey each tag off the field drawing: (x, y) = its centre in your chosen field
+  frame, z = mounting height above the floor, facing = the way the face points
+  INTO the play area (the side a robot sees it from)."""
+  a = math.radians(facing_deg)
+  z_axis = np.array([math.cos(a), math.sin(a), 0.0])   # tag +z (out of the face)
+  y_axis = np.array([0.0, 0.0, -1.0])                  # tag +y (down)
+  x_axis = np.cross(y_axis, z_axis)                    # tag +x = +y × +z (right-handed)
+  R = np.column_stack([x_axis, y_axis, z_axis]).astype(np.float32)
+  return R, np.array([x, y, z], dtype=np.float32)
+
+# Field map: tag id -> (R_world_tag, t_world_tag) in YOUR field frame (z up, RH).
+# Build each with wall_tag(...). TODO: survey the 9 tags from the field drawings.
+# Empty until then — no tag fuses (and FUSE_APRILTAGS is gated off above anyway).
 TAG_FIELD_MAP: dict[int, tuple[np.ndarray, np.ndarray]] = {
-  0: (np.eye(3, dtype=np.float32), np.array([0.0, 0.0, 0.5], dtype=np.float32)),
+  # 0: wall_tag(0.0, 4.0, 0.30, facing_deg=-90),   # e.g. on the +y wall, facing -y
+  0: wall_tag(2.250, 3.679, 0.288, facing_deg=180),
+  1: wall_tag(2.420, 2.666, 0.288, facing_deg=0),
+  2: wall_tag(4.999, 1.200, 0.288, facing_deg=180),
+  3: wall_tag(7.001, 1.200, 0.288, facing_deg=0),
+  4: wall_tag(9.580, 2.666, 0.288, facing_deg=180),
+  5: wall_tag(9.750, 3.679, 0.288, facing_deg=0),
+  6: wall_tag(11.000, 7.999, 0.288, facing_deg=-90),
+  7: wall_tag(6.000, 1.701, 0.288, facing_deg=90),
+  8: wall_tag(6.000, 6.9839, 0.288, facing_deg=-90),
+  9: wall_tag(1.000, 7.999, 0.288, facing_deg=-90),
 }
 
 # Measurement noise stddev for an AprilTag absolute pose fix.
