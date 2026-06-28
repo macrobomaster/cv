@@ -23,8 +23,9 @@ from ...slam import common
 # Dedicated process → let ArUco use several cores (camerad is pinned/RT, so this
 # won't starve it). detectMarkers is the whole job here.
 OPENCV_THREADS = getenv("OPENCV_THREADS", 4)
-# Tags are intermittent and only feed occasional absolute fixes; cap the rate.
-TAG_DETECT_HZ = 10.0
+# Rate cap; the real rate is min(this, camera rate, detectMarkers speed). Now that
+# detection is isolated, only detection speed limits it — so this is generous.
+TAG_DETECT_HZ = getenv("TAG_DETECT_HZ", 30)
 
 def run():
   gc.disable()
@@ -32,7 +33,11 @@ def run():
   pub = messaging.Pub(["apriltags"])
   sub = messaging.Sub(["camera_feed"], poll="camera_feed")
   d = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, common.APRILTAG_DICT))
-  detector = cv2.aruco.ArucoDetector(d, cv2.aruco.DetectorParameters())
+  params = cv2.aruco.DetectorParameters()
+  # Subpixel corner refinement — raw ArUco corners are ~1 px (integer-ish), which
+  # is the dominant PnP position/yaw noise. Refining to subpixel cuts it sharply.
+  params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+  detector = cv2.aruco.ArucoDetector(d, params)
   last_tag_t = last_wd = 0.0
 
   kv_put("watchdog", "tagd", time.monotonic())
