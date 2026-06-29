@@ -9,10 +9,10 @@ from ..system.core import messaging
 from ..system.core.helpers import FrequencyKeeper
 from ..autoaim.common import IMG_H, IMG_W
 
-# Gimbal-inertial → Rerun FLU axis swap (x=forward, y=left, z=up).
+# Gimbal-inertial is z-up RH (x=forward, y=left, z=up) — already Rerun FLU, so this is identity.
 def gi_to_flu(p) -> list:
   p = np.asarray(p, dtype=float)
-  return [float(p[0]), float(p[2]), float(p[1])]
+  return [float(p[0]), float(p[1]), float(p[2])]
 
 CLASS_COLOR = {
   "STATIC":  [0,   255, 0,   200],
@@ -63,15 +63,15 @@ def predict_plate(spin:dict, k:int, t:float):
   v_c = np.array(spin["v_c"])
   dt = t - spin["t_ref"]
   cx = c_0[0] + v_c[0] * dt
-  cz = c_0[2] + v_c[1] * dt
+  cy = c_0[1] + v_c[1] * dt
   theta_k = spin["omega"] * dt + spin["theta_body_0"] + k * (math.pi / 2)
-  return np.array([cx + r * math.cos(theta_k), h, cz + r * math.sin(theta_k)]), meta["known"]
+  return np.array([cx + r * math.cos(theta_k), cy + r * math.sin(theta_k), h]), meta["known"]
 
 def spin_visible(spin:dict, k:int, t:float, muzzle=np.zeros(3)) -> bool:
   c_0 = np.array(spin["c_0"]); v_c = np.array(spin["v_c"])
   dt = t - spin["t_ref"]
-  c = np.array([c_0[0] + v_c[0]*dt, c_0[1], c_0[2] + v_c[1]*dt])
-  theta_los = math.atan2(muzzle[2] - c[2], muzzle[0] - c[0])
+  c = np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])
+  theta_los = math.atan2(muzzle[1] - c[1], muzzle[0] - c[0])
   theta_k = spin["omega"] * dt + spin["theta_body_0"] + k * (math.pi / 2)
   diff = (theta_k - theta_los + math.pi) % (2 * math.pi) - math.pi
   return abs(diff) < spin["theta_facing"]
@@ -111,7 +111,7 @@ rr.send_blueprint(rrb.Blueprint(
   collapse_panels=False,
 ))
 
-# Gimbal-inertial world: +x forward, +y up, +z left → FLU at log time.
+# Gimbal-inertial world: z-up RH (+x forward, +y left, +z up) = Rerun FLU.
 rr.log("gi", rr.ViewCoordinates.FLU, static=True)
 rr.log("gi/origin", axis_arrows(length=0.5), static=True)
 
@@ -166,9 +166,9 @@ while True:
     rr.log("scalars/gimbal_pitch_gi", rr.Scalars(math.degrees(gimbal_state["pitch_gi"])))
     rr.log("scalars/gimbal_yaw_rate", rr.Scalars(math.degrees(gimbal_state["yaw_rate_gi"])))
     rr.log("scalars/gimbal_pitch_rate", rr.Scalars(math.degrees(gimbal_state["pitch_rate_gi"])))
-    # Aim direction in gi: rotate +x by yaw then pitch.
+    # Aim direction in gi (z-up RH): +x rotated by yaw about +z (rotz), elevated by pitch about +z.
     yaw, pitch = gimbal_state["yaw_gi"], gimbal_state["pitch_gi"]
-    aim_dir = np.array([math.cos(yaw)*math.cos(pitch), math.sin(pitch), -math.sin(yaw)*math.cos(pitch)])
+    aim_dir = np.array([math.cos(yaw)*math.cos(pitch), math.sin(yaw)*math.cos(pitch), math.sin(pitch)])
     rr.log("gi/gimbal_aim", rr.Arrows3D(origins=[gi_to_flu([0, 0, 0])],
                                          vectors=[gi_to_flu(aim_dir.tolist())],
                                          colors=[[255, 255, 0]]))
@@ -225,18 +225,18 @@ while True:
       r = float(spin["plates"][0]["r"])
       c_0 = np.array(spin["c_0"]); v_c = np.array(spin["v_c"])
       dt = t_eval - spin["t_ref"]
-      c = np.array([c_0[0] + v_c[0]*dt, c_0[1], c_0[2] + v_c[1]*dt])
+      c = np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])
 
-      # Spin axis: vertical line through the current center.
-      rr.log("gi/spin/axis", rr.LineStrips3D([[gi_to_flu(c + [0, -0.20, 0]), gi_to_flu(c + [0, 0.20, 0])]],
+      # Spin axis: vertical (world-z) line through the current center.
+      rr.log("gi/spin/axis", rr.LineStrips3D([[gi_to_flu(c + [0, 0, -0.20]), gi_to_flu(c + [0, 0, 0.20])]],
                                               colors=[[255, 200, 0]], radii=[0.005]))
       # Heading: arrow from center along plate-0's outward bearing θ (so you see body orientation).
       theta = spin["omega"] * dt + spin["theta_body_0"]
-      head = np.array([math.cos(theta), 0.0, math.sin(theta)]) * (r * 1.4)
+      head = np.array([math.cos(theta), math.sin(theta), 0.0]) * (r * 1.4)
       rr.log("gi/spin/heading", rr.Arrows3D(origins=[gi_to_flu(c)], vectors=[gi_to_flu(head.tolist())],
                                             colors=[[255, 200, 0]]))
       # Orbit ring the 4 plates ride on.
-      ring = [gi_to_flu([c[0] + r*math.cos(a), c[1], c[2] + r*math.sin(a)])
+      ring = [gi_to_flu([c[0] + r*math.cos(a), c[1] + r*math.sin(a), c[2]])
               for a in np.linspace(0, 2*math.pi, 33)]
       rr.log("gi/spin/ring", rr.LineStrips3D([ring], colors=[[120, 120, 60]], radii=[0.002]))
 
@@ -255,7 +255,7 @@ while True:
       psi_meas = plate.get("psi_meas")
       vk = plate.get("visible_k", 0)
       if psi_meas is not None and pos_meas is not None:
-        n = np.array([math.cos(psi_meas), 0.0, math.sin(psi_meas)]) * (r * 0.8)
+        n = np.array([math.cos(psi_meas), math.sin(psi_meas), 0.0]) * (r * 0.8)
         rr.log("gi/spin/psi_meas", rr.Arrows3D(origins=[gi_to_flu(pos_meas)], vectors=[gi_to_flu(n.tolist())],
                                                colors=[[0, 200, 255]]))
         wrap = lambda a: (a + math.pi) % (2*math.pi) - math.pi
@@ -319,7 +319,8 @@ while True:
   chassis_velocity = sub["chassis_velocity"]
   if sub.updated["chassis_velocity"] and chassis_velocity is not None:
     last = chassis_pos[-1] if chassis_pos else (0.0, 0.0, 0.0)
-    new = (last[0] + chassis_velocity["x"] * 0.05, 0.0, last[2] + chassis_velocity["z"] * 0.05)
+    # chassis_velocity {x:forward, y:left} integrated in the z-up gi ground plane (z=0).
+    new = (last[0] + chassis_velocity["x"] * 0.05, last[1] + chassis_velocity["y"] * 0.05, 0.0)
     chassis_pos.append(new)
     if len(chassis_pos) >= 2:
       rr.log("gi/chassis_trail",

@@ -42,8 +42,10 @@ def main():
   # `camera` is a 2D image space — do NOT set ViewCoordinates on it; that
   # would tell rerun to treat the subtree as 3D and hide the 2D overlays.
 
-  # Robot frustum (a tiny pinhole entity attached to the live pose).
-  rr.log("world/robot",
+  # SLAM-camera frustum (the real, yaw-only camera): it sits a lever arm off the
+  # robot/yaw-axis centre and swings as the gimbal pans. Positioned each frame at
+  # slam_debug.p_cam with slam_pose.q_wb (= the SLAM-cam orientation).
+  rr.log("world/slam_cam",
          rr.Pinhole(resolution=(common.IMG_W, common.IMG_H),
                     image_from_camera=common.K,
                     camera_xyz=rr.ViewCoordinates.RDF,
@@ -69,6 +71,7 @@ def main():
   n_dbg_received = 0
   n_cam_received = 0
   last_traj_log_t = 0.0
+  last_p_w = last_q = None      # carried from slam_pose into the slam_debug block (same tick)
   diag_t = time.monotonic()
 
   while True:
@@ -89,14 +92,17 @@ def main():
     if cam is not None and sub.updated["camera_feed"]:
       n_cam_received += 1
       img = np.frombuffer(cam["frame"], dtype=np.uint8).reshape(common.IMG_H, common.IMG_W, 3)
-      rr.log("camera/feed", rr.Image(img))
+      rr.log("camera/feed", rr.Image(img).compress(70))
 
     # --- Live pose --------------------------------------------------------
     pose = sub["slam_pose"]
     if pose is not None and sub.updated["slam_pose"]:
-      p = pose["p_w"]; q = pose["q_wb"]
+      p = pose["p_w"]
       traj.append(p)
-      rr.log("world/robot", rr.Transform3D(translation=p, quaternion=_q_wxyz_to_scipy(q)))
+      last_p_w, last_q = p, pose["q_wb"]           # for the camera frustum + lever line below
+      # Robot centre = the yaw axis (what the filter tracks); the camera frustum is
+      # drawn separately at slam_debug.p_cam, a lever arm away.
+      rr.log("world/robot", rr.Points3D([p], colors=[(60, 180, 255)], radii=0.05))
       # Re-logging the whole growing strip every pose is the biggest redundant
       # payload to rerun — throttle it; the path doesn't need full rate.
       if time.monotonic() - last_traj_log_t >= 1.0 / TRAJ_LOG_HZ:
@@ -130,6 +136,14 @@ def main():
       seen = np.array(dbg["seen_tag_p"], dtype=np.float32) if dbg.get("seen_tag_p") else np.zeros((0, 3), np.float32)
       if len(seen):
         rr.log("world/seen_tags", rr.Points3D(seen, colors=[(80, 240, 120)], radii=0.06))
+      # Real SLAM camera (frustum at the optical centre) + the lever arm from the
+      # yaw axis to it: when the gimbal pans in place this swings while the robot
+      # centre stays put. Orientation from slam_pose.q_wb (= SLAM-cam frame).
+      pc = dbg.get("p_cam")
+      if pc is not None and last_q is not None:
+        rr.log("world/slam_cam", rr.Transform3D(translation=pc, quaternion=_q_wxyz_to_scipy(last_q)))
+        if last_p_w is not None:
+          rr.log("world/lever_arm", rr.LineStrips3D([[last_p_w, pc]], colors=[(255, 160, 0)], radii=[0.012]))
 
     for k, v in sub.alive.items():
       rr.log(f"alive/{k}", rr.Scalars(int(v)))
