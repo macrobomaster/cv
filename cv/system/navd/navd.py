@@ -34,6 +34,7 @@ from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_put
 from ..common.geometry import wrap_pi
+from ..common.gimbal import GimbalBuffer
 from ...slam import common
 
 NAV_TAG_ID = 6
@@ -131,17 +132,20 @@ def best_tag_to_view(p_xy:np.ndarray):
     if score > best_score: best, best_score = (tid, t_xy, rng), score
   return best
 
-def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_now:float):
+def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_at_pose:float):
   """Gimbal setpoint (gimbal-inertial yaw) to point at the best tag, or None.
-  Computes the bearing error in WORLD (frame-offset-free) and adds it to the
-  current gimbal yaw, so it's robust to the slam yaw-drift bias."""
+  Computes the bearing error in WORLD (frame-offset-free) and adds it to the gimbal
+  yaw, so it's robust to the slam yaw-drift bias. yaw_gi_at_pose MUST be the gimbal yaw
+  at the pose's capture time (same instant as `fwd`/`psi`) — `(yaw_gi − psi)` is the
+  slowly-drifting world↔gimbal offset, and sampling the two at different times corrupts
+  it by the gimbal's slew during the slam lag → the setpoint overshoots the tag."""
   bt = best_tag_to_view(p_xy)
   if bt is None: return None
   tid, t_xy, rng = bt
   los = t_xy - p_xy                                  # robot → tag (world)
   bearing = math.atan2(los[1], los[0])               # desired gimbal world heading
-  psi = math.atan2(fwd[1], fwd[0])                   # current gimbal world heading
-  yaw_sp = yaw_gi_now + wrap_pi(bearing - psi)       # absolute gimbal-inertial yaw target
+  psi = math.atan2(fwd[1], fwd[0])                   # gimbal world heading at the pose's capture time
+  yaw_sp = yaw_gi_at_pose + wrap_pi(bearing - psi)   # absolute gimbal-inertial yaw target
   # Feedforward: driving past a static tag drifts its bearing at
   # β̇ = (los_y·v_x − los_x·v_y)/range² — feed it so the gimbal doesn't lag.
   yaw_ff = float((los[1] * v_xy[0] - los[0] * v_xy[1]) / (rng * rng))
@@ -150,9 +154,12 @@ def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_now:float):
 def run():
   gc.disable()
   pub = messaging.Pub(["chassis_velocity", "nav_setpoint"])
-  # gimbal_state is non-polled (latest only) — we just need the current yaw_gi to
-  # turn the world bearing error into an absolute gimbal-inertial yaw setpoint.
-  sub = messaging.Sub(["slam_pose", "gimbal_state"], poll="slam_pose")
+  sub = messaging.Sub(["slam_pose"], poll="slam_pose")
+  # gimbal_state non-conflated + buffered so we can sample yaw_gi at the slam pose's
+  # capture time — the SAME instant as q_wb/psi. (Latest yaw_gi vs a lagged q_wb-heading
+  # corrupts the world↔gimbal offset during a slew → the look-at setpoint overshoots.)
+  gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
+  gimbal_buf = GimbalBuffer()
   # A drawn path (NAV_PATH) overrides the tag-standoff MISSION. Curve paths flow
   # without dwelling at each sampled point (dwell=0); the trapezoid still slows
   # near each. (Smooth pure-pursuit following is the natural next step.)
@@ -176,6 +183,7 @@ def run():
     sub.update(timeout=100)
     now = time.monotonic()
     dt = min(now - last_t, MAX_DT); last_t = now
+    for m in gimbal_sub.drain("gimbal_state"): gimbal_buf.push(m)
     if now - last_wd > 1.0:
       kv_put("watchdog", "navd", now); last_wd = now
 
@@ -196,10 +204,10 @@ def run():
     # --- Gimbal look-at: point at the best face-on tag to keep SLAM anchored.
     # Runs whether or not the chassis is moving; stays silent (→ gimbald holds /
     # yields) when there's no good tag or no gimbal feedback yet.
-    gs = sub["gimbal_state"]
+    gp = gimbal_buf.interpolate(pose["t"])     # yaw_gi at the pose's capture time (consistent with fwd)
     look_tag = None
-    if LOOK_AT_TAG and fwd is not None and gs is not None:
-      res = look_at_setpoint(p_xy, np.asarray(pose["v_w"], np.float64)[:2], fwd, float(gs["yaw_gi"]))
+    if LOOK_AT_TAG and fwd is not None and gp is not None:
+      res = look_at_setpoint(p_xy, np.asarray(pose["v_w"], np.float64)[:2], fwd, gp[0])
       if res is not None:
         sp, look_tag = res
         pub.send("nav_setpoint", sp)
