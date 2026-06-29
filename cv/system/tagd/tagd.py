@@ -33,13 +33,17 @@ TAG_DETECT_HZ = getenv("TAG_DETECT_HZ", 30)
 # AprilTag 3 quad-detection decimation (>1 = faster, slight corner-accuracy cost;
 # 1 = full res, lowest noise).
 AT3_QUAD_DECIMATE = getenv("AT3_QUAD_DECIMATE", 1.0)
+# Gaussian blur (px stddev) before quad detection. 0 = off; ~0.8 denoises the
+# corners on sharp/noisy frames → steadier pose. Raise if the pose is jittery.
+AT3_QUAD_SIGMA = getenv("AT3_QUAD_SIGMA", 0.8)
 
 def _make_detect():
   """detect(gray) -> [(id, corners (4,2) cv2-order)]. AprilTag 3 if libapriltag is
   available, else cv2.aruco with subpixel corner refinement."""
   try:
     from .apriltag3 import Detector
-    at = Detector(nthreads=OPENCV_THREADS, quad_decimate=float(AT3_QUAD_DECIMATE))
+    at = Detector(nthreads=OPENCV_THREADS, quad_decimate=float(AT3_QUAD_DECIMATE),
+                  quad_sigma=float(AT3_QUAD_SIGMA))
     logger.info("tagd: using AprilTag 3 (libapriltag)")
     return at.detect
   except Exception as e:                       # lib missing / load error → cv2.aruco
