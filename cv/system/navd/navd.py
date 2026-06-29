@@ -1,11 +1,11 @@
 """Navigation daemon — drive the chassis to an injected goal via a planned, obstacle-aware path.
 
-The goal is a world point set by `nav_goal` (decisiond / the state machine deciding "go home",
-"center", a tag standoff, …; latest wins, sticky), with an optional startup seed. navd plans an
+The goal is a world point set by fresh `nav_goal` messages (the state machine deciding "go home",
+"center", a tag standoff, ...). navd plans an
 any-angle path to it around static walls — and dynamic obstacles like other robots, TODO — on an
 occupancy grid (`cv/nav`), and follows it with pure pursuit, REPLANNING each cycle (receding
 horizon) so it reacts to a new goal or a changed map. With no map configured it drives straight
-to the goal. No goal ⇒ idle.
+to the goal. No fresh goal => idle.
 
 navd reads the robot's localized pose from slamd (`slam_pose`); no camera/PnP here —
 detection feeds slamd's localization, navd just consumes the pose.
@@ -22,7 +22,7 @@ ego-motion makes localization drift matter. navd publishes `nav_setpoint` and gi
 gimbal is free for decisiond's aim or the state machine's scan.
 
 Subs:  slam_pose:        {t, p_w, v_w, q_wb, cov_pos, n_tags}   (from slamd)
-       nav_goal:         {x, y, label?}                         (injected goal; latest wins, sticky)
+       nav_goal:         {x, y, label?}                         (fresh-only injected goal)
        plate:            {class, pos_gi, spin, ...}             (enemy robot → dynamic obstacle)
        gimbal_state:     {yaw_gi, ...}                          (latest; for the absolute yaw setpoint)
 Pubs:  chassis_velocity: {x, y}   (x = forward, y = left, m/s; commsd → MOVE_ROBOT)
@@ -44,7 +44,7 @@ from ...nav.occupancy import OccupancyGrid
 from ...nav import planner
 from ...nav.obstacles import RobotObstacles
 
-# No default goal → navd HOLDS POSITION (idle, zero chassis velocity) until the state machine
+# No default goal -> navd HOLDS POSITION (idle, zero chassis velocity) until the state machine
 # injects a nav_goal. Set to a (tag_id, standoff_m) tuple, e.g. (6, 2.5), only to drive somewhere
 # standalone for testing.
 DEFAULT_GOAL = None
@@ -54,6 +54,7 @@ V_MAX = 1.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
 ACCEL = 0.6                  # m/s², trapezoid accel = decel ramp rate
 MAX_DT = 0.2                 # s, clamp on the loop dt used for the accel ramp (guards stalls)
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
+NAV_GOAL_TIMEOUT = 0.25      # s without fresh nav_goal before clearing the current destination
 LOOKAHEAD = 0.4              # m, pure-pursuit lookahead (larger = smoother, cuts corners more)
 PROJECT_WINDOW = 1.5         # m, forward arc-length window when re-projecting progress onto the path
 ROBOT_RADIUS = 0.28          # m, obstacle inflation (RoboMaster half-footprint) for planning
@@ -228,6 +229,7 @@ def run():
 
   pursuit = last_goal = None
   last_wd = last_diag = last_pose_t = last_plan = 0.0
+  last_goal_t = time.monotonic() if injected is not None else -math.inf
   v_prev = 0.0                                                # last commanded speed (for the accel ramp)
   last_t = time.monotonic()
 
@@ -275,6 +277,9 @@ def run():
     ng = sub["nav_goal"]
     if ng is not None and sub.updated["nav_goal"]:
       injected = np.array([float(ng["x"]), float(ng["y"])]); inj_label = ng.get("label", "goal")
+      last_goal_t = now
+    if now - last_goal_t > NAV_GOAL_TIMEOUT:
+      injected = None; pursuit = last_goal = None
     goal_xy = injected
     robots = [(x, y, ENEMY_RADIUS + ENEMY_AGE_GROWTH * age) for x, y, age in obstacles.active(now)]
     if goal_xy is not None and (last_goal is None or pursuit is None
