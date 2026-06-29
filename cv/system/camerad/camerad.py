@@ -19,8 +19,6 @@ def _build_undistort_maps(src_w, src_h):
   K = REAL_CAMERA_MATRIX.copy()
   K[:2] *= src_w / REAL_CALIB_W
   map1, map2 = cv2.initUndistortRectifyMap(K, REAL_DIST_COEFFS, None, CANONICAL_CAMERA_MATRIX, (IMG_W, IMG_H), cv2.CV_32FC1)
-  map1 = (src_w - 1) - map1
-  map2 = (src_h - 1) - map2
   return cv2.convertMaps(map1, map2, cv2.CV_16SC2)
 
 def run():
