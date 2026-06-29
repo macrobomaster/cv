@@ -20,25 +20,6 @@ SCAN_PITCH = 0.0
 ACQUIRE_HOLD_DT = 0.8
 NAV_ARRIVE_RADIUS = 0.25
 
-def _xy_env(name:str, default:tuple[float, float]|None=None) -> tuple[float, float]|None:
-  raw = os.environ.get(name)
-  if not raw: return default
-  try:
-    x, y = raw.split(",", 1)
-    return float(x), float(y)
-  except ValueError:
-    logger.warning(f"stated: {name}={raw!r} invalid; expected x,y")
-    return default
-
-def _field_center() -> tuple[float, float]:
-  x0, y0, x1, y1 = common.FIELD_BOUNDS
-  return (0.5 * (x0 + x1), 0.5 * (y0 + y1))
-
-CENTER_GOAL = _xy_env("CENTER_GOAL", _field_center())
-
-def center_goal_msg() -> dict:
-  return {"x": CENTER_GOAL[0], "y": CENTER_GOAL[1], "label": "center"}
-
 def scan_setpoint(t:float, center:float, start_t:float) -> dict:
   cycle_dt = SCAN_SWEEP_DT + SCAN_TURN_DT
   t_scan = t - start_t
@@ -71,8 +52,10 @@ class IdleState(StateBase):
       reset = getattr(state, "reset", None)
       if reset is not None: reset()
 
-class NavToCenterState(StateBase):
-  name = "nav_to_center"
+class NavToGoalState(StateBase):
+  name = "nav_to_goal"
+  goal_label = "goal"
+  goal_xy: tuple[float, float]|None = None
 
   def __init__(self):
     self.done = False
@@ -81,13 +64,14 @@ class NavToCenterState(StateBase):
     self.done = False
 
   def arrived(self, ctx) -> bool:
+    if self.goal_xy is None: return True
     pose = ctx["slam_pose"]
     if pose is None: return False
     px, py = pose["p_w"][:2]
-    return math.hypot(float(px) - CENTER_GOAL[0], float(py) - CENTER_GOAL[1]) < NAV_ARRIVE_RADIUS
+    return math.hypot(float(px) - self.goal_xy[0], float(py) - self.goal_xy[1]) < NAV_ARRIVE_RADIUS
 
   def should_transition(self, current:StateBase, ctx) -> bool:
-    return bool(ctx["game_running"]) and not self.done
+    return bool(ctx["game_running"]) and not self.done and self.goal_xy is not None
 
   def can_transition(self, ctx) -> bool:
     if not bool(ctx["game_running"]): return True
@@ -97,8 +81,13 @@ class NavToCenterState(StateBase):
     return False
 
   def run(self, ctx, pub):
-    if ctx.entered: logger.info("stated: navigating to center")
-    pub.send("nav_goal", center_goal_msg())
+    if ctx.entered: logger.info(f"stated: navigating to {self.goal_label}")
+    pub.send("nav_goal", {"x": self.goal_xy[0], "y": self.goal_xy[1], "label": self.goal_label})
+
+class NavToCenterState(NavToGoalState):
+  name = "nav_to_center"
+  goal_label = "center"
+  goal_xy = (11.02, 6.98)
 
 class AcquireState(StateBase):
   name = "acquire"
