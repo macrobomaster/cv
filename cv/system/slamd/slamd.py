@@ -60,30 +60,43 @@ def _gimbal_R_wb(yaw:float, pitch:float) -> np.ndarray:
   TODO: confirm yaw/pitch axis order + signs against the gimbal firmware."""
   return (rotz(yaw) @ roty(pitch) @ common.CAM_BASE_R).astype(np.float32)
 
-def _tag_body_pose(tag_id:int, corners:np.ndarray, p_offset:np.ndarray, R_ic:np.ndarray):
-  """PnP a single tag + field map → (p_wb, yaw_tag, range) or None. p_wb is the
-  IMU body position in world; yaw_tag the absolute body yaw (for δψ correction);
-  range = tag distance (slamd scales the measurement noise by it). Pitch/roll are
-  NOT taken from the tag — the gimbal owns them."""
+def _tag_body_pose(tag_id:int, corners:np.ndarray, heading:float):
+  """Position-only tag fix using the KNOWN camera orientation → (p_axis_w,
+  yaw_meas, range) or None. The SLAM camera is yaw-only, so its world orientation
+  R_wc = Rz(heading)·R_CAM is known from the gimbal; the camera centre is then the
+  least-squares meet of the 4 back-projected corner rays — far steadier than 6-DoF
+  solvePnP, which lets noisy corners wobble the rotation and jitter the position.
+  A cheap solvePnP is kept ONLY to read the tag's absolute heading (anchors δψ).
+  The T_CAM lever arm is undone to return the yaw-axis (robot) position the filter
+  tracks. range scales the measurement noise. heading = gimbal_yaw + yaw_offset."""
   entry = common.TAG_FIELD_MAP.get(tag_id)
   if entry is None: return None
   R_wt, t_wt = entry
-  ok, rvec, tvec = cv2.solvePnP(_TAG_OBJ_PTS, corners.astype(np.float32),
-                                common.K, _DIST_ZERO, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-  if not ok: return None
-  t_ct = tvec.reshape(3)
-  rng = float(np.linalg.norm(t_ct))
+  cor = corners.astype(np.float32)
+  h = -heading if common.YAW_FLIPPED else heading
+  R_wc = (rotz(h) @ common.R_CAM).astype(np.float32)            # world <- camera (known)
+  # back-project the 4 corners to world rays (all share the camera centre)
+  uv1 = np.concatenate([cor, np.ones((4, 1), np.float32)], axis=1)
+  d_w = (R_wc @ (common.K_INV @ uv1.T)).T                       # (4,3) world rays
+  d_w /= np.linalg.norm(d_w, axis=1, keepdims=True)
+  P = (R_wt @ _TAG_OBJ_PTS.T).T + t_wt                          # (4,3) world corner positions
+  # camera centre = point nearest all 4 rays:  Σ(I - d dᵀ)·p = Σ(I - d dᵀ)·P
+  A = np.zeros((3, 3), np.float32); b = np.zeros(3, np.float32)
+  for d, Pi in zip(d_w, P):
+    M = np.eye(3, dtype=np.float32) - np.outer(d, d)
+    A += M; b += M @ Pi
+  p_cam_w = np.linalg.solve(A, b)
+  rng = float(np.linalg.norm(P.mean(0) - p_cam_w))
   if rng > common.TAG_MAX_RANGE: return None
-  R_wc = R_wt @ cv2.Rodrigues(rvec)[0].T               # world <- camera
-  p_wc = t_wt - R_wc @ t_ct                            # camera origin in world
-  R_wb_tag = R_wc @ R_ic.T                             # world <- IMU body (from tag)
-  # Extract gimbal yaw the SAME way _gimbal_R_wb defines it. R_wb_tag =
-  # Rz(yaw)·Ry(pitch)·CAM_BASE_R, so its raw first column is the camera-RIGHT
-  # axis — 90° off from world-forward. Undo CAM_BASE_R first, else the yaw fix
-  # injects a spurious 90° (the "frustum snaps 90° CW on a tag" bug).
-  R_yaw = R_wb_tag @ common.CAM_BASE_R.T               # = Rz(yaw)·Ry(pitch)
-  yaw_tag = float(np.arctan2(R_yaw[1, 0], R_yaw[0, 0]))
-  return (p_wc - p_offset).astype(np.float32), yaw_tag, rng
+  # absolute heading from a rotation-only PnP:  Rz(h_meas) = R_wc_meas · R_CAMᵀ
+  ok, rvec, _ = cv2.solvePnP(_TAG_OBJ_PTS, cor, common.K, _DIST_ZERO,
+                             flags=cv2.SOLVEPNP_IPPE_SQUARE)
+  if not ok: return None
+  R_yaw = (R_wt @ cv2.Rodrigues(rvec)[0].T) @ common.R_CAM.T
+  h_meas = float(np.arctan2(R_yaw[1, 0], R_yaw[0, 0]))
+  yaw_meas = -h_meas if common.YAW_FLIPPED else h_meas
+  p_axis_w = p_cam_w - rotz(h) @ common.T_CAM                   # undo lever arm → yaw axis
+  return p_axis_w.astype(np.float32), yaw_meas, rng
 
 # ---------------------------------------------------------------------------
 def run():
@@ -157,13 +170,10 @@ def run():
         and tags["detections"]):
       gp = gimbal_buf.interpolate(float(tags["ct"]))
       if gp is not None:
-        gy_d, gp_d, _ = gp
-        R_wb_d = _gimbal_R_wb(gy_d + yaw_offset, gp_d)
-        R_ic_d, t_ic_d = common.cam_from_imu(gp_d)
-        p_offset_d = (R_wb_d @ t_ic_d).astype(np.float32)
+        gy_d = gp[0]                                  # SLAM cam is yaw-only — pitch unused
         for det in tags["detections"]:
-          res = _tag_body_pose(int(det["id"]), np.array(det["corners"], np.float32),
-                               p_offset_d, R_ic_d)
+          heading_d = gy_d + yaw_offset               # latest heading estimate, per tag
+          res = _tag_body_pose(int(det["id"]), np.array(det["corners"], np.float32), heading_d)
           if res is None: continue
           p_wb, yaw_tag, rng = res
           # noise grows with tag range — far PnP is much noisier (see common.py)

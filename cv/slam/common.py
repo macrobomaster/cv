@@ -17,49 +17,44 @@ from ..autoaim.common import CANONICAL_CAMERA_MATRIX, IMG_H as _IMG_H, IMG_W as 
 # canonical resolution/focal changes.
 IMG_W, IMG_H = int(_IMG_W), int(_IMG_H)
 K = CANONICAL_CAMERA_MATRIX.astype(np.float32)
+K_INV = np.linalg.inv(K).astype(np.float32)   # back-project pixels → camera rays (position-only PnP)
 FX, FY = float(K[0, 0]), float(K[1, 1])
 CX, CY = float(K[0, 2]), float(K[1, 2])
 
-# --- Camera <- IMU extrinsic (pitch-dependent) -----------------------------
-# Body frame = the gimbal IMU frame. The gimbal IMU sits on the FULL gimbal
-# (yaw+pitch, with the autoaim camera); the SLAM camera is on the YAW-ONLY
-# stage. So the IMU frame is the camera/yaw frame with the gimbal PITCH added
-# on top — to go from the IMU frame to the SLAM-camera frame you undo pitch,
-# then apply a fixed mount offset.
+# --- SLAM camera <- yaw-stage extrinsic (R_CAM, T_CAM) ---------------------
+# The SLAM camera rides the gimbal YAW stage only (the autoaim cam has pitch),
+# so its world orientation is pitch-independent and its optical centre sits a
+# fixed lever arm off the yaw axis:
+#   R_wc    = Rz(gimbal_yaw + δψ) · R_CAM
+#   p_cam_w = p_axis_w + Rz(gimbal_yaw + δψ) · T_CAM
+# slamd uses these for position-only tag PnP (with R_wc known, the camera centre
+# is the least-squares meet of the 4 corner rays — far steadier than 6-DoF PnP,
+# which lets noisy corners wobble the rotation and jitter the position) and undoes
+# the lever arm to return the yaw-axis (robot) position the filter tracks.
 #
-# R_MOUNT / T_MOUNT: fixed SLAM-camera <- yaw-stage mount (measure with
-# calib_handeye). p_cam = R_MOUNT @ p_yawstage + T_MOUNT.
-# TODO: fill in from calibration; identity placeholder for now.
-R_MOUNT = np.eye(3, dtype=np.float32)
-T_MOUNT = np.zeros(3, dtype=np.float32)
-# Pitch rotation axis in the IMU frame and sign (TODO: verify against hardware;
-# pitch about the camera x-axis is the usual convention).
-PITCH_AXIS = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-PITCH_SIGN = 1.0
+# From cv/tools/calib_slam_cam.py (bench: checkerboard + gimbal yaw sweep). Use
+# the R_CAM and T_CAM from the SAME run together — the bench can't see the
+# absolute heading about world-up (same unobservable as δψ), so both share one
+# heading gauge that the runtime δψ (yaw_offset, from tags) removes. T_CAM's
+# vertical part is unobservable on a yaw-only sweep (it doesn't move under yaw)
+# → 0; it doesn't affect planar position.
+R_CAM = np.array([[ 0.99582, -0.06652,  0.06261],
+                  [-0.06652, -0.0583 ,  0.99608],
+                  [-0.06261, -0.99608, -0.06248]], dtype=np.float32)
+T_CAM = np.array([0.18632, -0.02918, 0.0], dtype=np.float32)   # m; lever arm ≈ 189 mm (~19 cm right)
+# Set True only if calib reported "gimbal-yaw sign FLIPPED vs Rz" (negates yaw in
+# R_wc). This calibration run was not flipped.
+YAW_FLIPPED = False
 
-# Body(camera) orientation at gimbal (yaw=0, pitch=0), as world<-body. The
-# camera is RDF (x-right, y-down, z-forward); the world is z-up. A level,
-# forward-looking camera maps: z(fwd)->world+x, y(down)->world-z, x(right)->-y.
-# WITHOUT this, world<-body at level is identity → the camera "faces straight
-# up" in the world view (RDF z = world z). TODO: verify columns vs hardware
-# (which way is robot-forward, and the yaw/pitch signs in _gimbal_R_wb).
+# world<-IMU(body) orientation at gimbal (yaw=0, pitch=0). The gimbal IMU (on the
+# autoaim FULL gimbal, yaw+pitch) drives the filter PREDICT; this is its level
+# base orientation. RDF camera (x-right, y-down, z-forward) into z-up world:
+# z(fwd)->world+x, y(down)->world-z, x(right)->-y. Without it, world<-body at
+# level is identity → "faces straight up". TODO: verify columns vs hardware
+# (robot-forward direction, and the yaw/pitch signs in _gimbal_R_wb).
 CAM_BASE_R = np.array([[0, 0, 1],
                        [-1, 0, 0],
                        [0, -1, 0]], dtype=np.float32)
-
-def cam_from_imu(pitch_rad: float) -> tuple[np.ndarray, np.ndarray]:
-  """Return (R_ic, t_ic): IMU-frame <- camera-frame rotation/translation at the
-  given gimbal pitch, i.e. a camera-frame point maps to the IMU frame via
-  p_imu = R_ic @ p_cam + t_ic. (This is the "body <- camera" extrinsic for tag
-  PnP; the SLAM camera is the gimbal-yaw frame, the IMU adds pitch on top.)"""
-  a = PITCH_SIGN * pitch_rad
-  c, s = np.cos(a), np.sin(a)
-  ax = PITCH_AXIS
-  K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]], np.float32)
-  R_pitch = (np.eye(3, dtype=np.float32) + s*K + (1-c)*(K@K)).astype(np.float32)  # IMU <- yaw-stage
-  R_ic = (R_pitch @ R_MOUNT.T).astype(np.float32)                          # IMU <- camera
-  t_ic = (-R_ic @ T_MOUNT).astype(np.float32)
-  return R_ic, t_ic
 
 # Accelerometer noise (continuous-time). Orientation comes from the gimbal, so
 # the filter only models the accelerometer (no gyro). Replace with datasheet
