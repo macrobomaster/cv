@@ -26,6 +26,14 @@
       common_overlays = [
         inputs.tinygrad.overlays.default
         (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
+        # we only ctypes-load libapriltag.so; drop the opencv_demo examples so apriltag
+        # doesn't drag in a second full opencv build
+        (final: prev: {
+          apriltag = prev.apriltag.overrideAttrs (old: {
+            cmakeFlags = [ "-DBUILD_EXAMPLES:BOOL=FALSE" ];
+            buildInputs = lib.filter (x: !(lib.hasPrefix "opencv" (x.pname or x.name or ""))) (old.buildInputs or [ ]);
+          });
+        })
       ];
 
       pkgs-x86_64-linux = import nixpkgs ({
