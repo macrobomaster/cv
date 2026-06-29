@@ -192,14 +192,11 @@ def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_at_pose:float
   los = t_xy - p_xy                                  # robot → tag (world)
   bearing = math.atan2(los[1], los[0])               # desired gimbal world heading
   psi = math.atan2(fwd[1], fwd[0])                   # gimbal world heading at the pose's capture time
-  # MINUS = RH↔LH handedness flip (confirmed on hardware). slam's world is RH z-up
-  # (yaw CCW+), but the gimbal-inertial yaw_gi frame gimbald closes on is LEFT-handed
-  # (x-fwd, y-up, z-left → yaw runs the other way; see plated / world_frame_conventions).
-  # The look-at is the ONLY place that converts a slam-world bearing into a yaw_gi
-  # setpoint, so it alone eats the flip. NOT YAW_FLIPPED (slam heading is faithful with
-  # that False); the chassis (world direction vectors) and decisiond (stays in the
-  # gimbal frame) never cross this boundary, so neither is affected.
-  yaw_sp = yaw_gi_at_pose - wrap_pi(bearing - psi)   # absolute gimbal-inertial yaw target
+  # PLUS: ψ tracks +yaw_gi (slam rotz, faithful) so the world bearing error adds straight
+  # to the gimbal yaw. (This was −sign while the gimbal yaw DRIVE polarity was inverted in
+  # commsd — the − accidentally stabilized gimbald's then-positive-feedback loop. With the
+  # commsd aim_error.x flip fixing the drive at the source, it's the plain +.)
+  yaw_sp = yaw_gi_at_pose + wrap_pi(bearing - psi)   # absolute gimbal-inertial yaw target
   # Feedforward: driving past a static tag drifts its bearing at
   # β̇ = (los_y·v_x − los_x·v_y)/range² — feed it so the gimbal doesn't lag.
   yaw_ff = float((los[1] * v_xy[0] - los[0] * v_xy[1]) / (rng * rng))

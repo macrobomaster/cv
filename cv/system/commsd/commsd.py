@@ -118,7 +118,12 @@ def run():
 
     if aim_error is not None and due(next_comm_at, "aim_error"):
       if fresh(sub, "aim_error"):
-        x = aim_error["x"]
+        # Both axes: the board's gimbal-rate command runs OPPOSITE to gimbald's sign convention
+        # (a positive command lowers the angle). Without the YAW flip gimbald is a positive-feedback
+        # loop, so any fixed aim setpoint (decisiond) runs away; navd's look-at only "worked" before
+        # because its −sign accidentally compensated. HW-confirmed via that. Reading (gimbal_state) is
+        # NOT flipped — only the command — so slam/viz heading stays faithful.
+        x = aim_error["x"] * -1
         y = aim_error["y"] * -1
         comm_msg(protocol, comm_counts, "aim_error", Command.AIM_ERROR, x, y)
       else:
