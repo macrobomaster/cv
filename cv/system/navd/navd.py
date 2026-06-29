@@ -49,6 +49,8 @@ V_MAX = 1.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
 ACCEL = 0.6                  # m/s², trapezoid accel = decel ramp rate
 MAX_DT = 0.2                 # s, clamp on the loop dt used for the accel ramp (guards stalls)
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
+LOOKAHEAD = 0.4              # m, pure-pursuit lookahead (larger = smoother, cuts corners more)
+PROJECT_WINDOW = 1.5         # m, forward arc-length window when re-projecting progress onto the path
 
 LOOK_AT_TAG = True           # point the gimbal at the best face-on tag to keep SLAM anchored
 VIEW_MIN_ALIGN = 0.2         # min cos(tag-normal vs line-of-sight): skip tags seen too obliquely (poor PnP)
@@ -103,6 +105,51 @@ class WaypointPlayer:
       self.since = None
     return self.goal()
 
+class PurePursuit:
+  """Follows a polyline path by chasing a lookahead point that slides along it.
+  Holonomic → we just drive straight at the lookahead and cross-track error self-
+  corrects. Progress `s` (arc length) only advances (monotonic), so it never snaps
+  back to an earlier crossing. update() returns (lookahead_xy, brake_dist), where
+  brake_dist = arc length left to the path end (∞ when looping → no end-braking, so
+  it cruises). loop=True restarts at the end — use a CLOSED path so the seam sits at
+  the start. done() = within POS_DEADBAND of the final point."""
+  def __init__(self, path, lookahead=LOOKAHEAD, loop=False):
+    self.P = np.asarray(path, np.float64)
+    seg = np.linalg.norm(np.diff(self.P, axis=0), axis=1)
+    self.cum = np.concatenate([[0.0], np.cumsum(seg)])     # arc length at each vertex
+    self.total = float(self.cum[-1])
+    self.lookahead, self.loop = lookahead, loop
+    self.s = 0.0
+
+  def _point_at(self, s):
+    s = s % self.total if self.loop else min(max(s, 0.0), self.total)
+    j = max(0, min(int(np.searchsorted(self.cum, s)) - 1, len(self.P) - 2))
+    seglen = self.cum[j + 1] - self.cum[j]
+    t = 0.0 if seglen < 1e-9 else (s - self.cum[j]) / seglen
+    return self.P[j] + t * (self.P[j + 1] - self.P[j])
+
+  def update(self, p_xy):
+    # Advance progress to the nearest path point ahead of `s`, within a forward
+    # window (monotonic — ignore closer points behind us or far ahead).
+    end = self.s + max(2.0 * self.lookahead, PROJECT_WINDOW)
+    best_s, best_d2 = self.s, float("inf")
+    for j in range(max(0, int(np.searchsorted(self.cum, self.s)) - 1), len(self.P) - 1):
+      if self.cum[j] > end: break
+      a, ab = self.P[j], self.P[j + 1] - self.P[j]
+      L2 = float(ab @ ab)
+      t = 0.0 if L2 < 1e-12 else max(0.0, min(1.0, float((p_xy - a) @ ab) / L2))
+      s_proj = self.cum[j] + t * math.sqrt(L2)
+      if s_proj < self.s: continue
+      d2 = float(np.sum((p_xy - (a + t * ab)) ** 2))
+      if d2 < best_d2: best_d2, best_s = d2, s_proj
+    self.s = best_s
+    if self.loop and self.s >= self.total - 1e-3: self.s = 0.0           # restart the lap
+    brake = math.inf if self.loop else (self.total - self.s)
+    return self._point_at(self.s + self.lookahead), brake
+
+  def done(self, p_xy):
+    return (not self.loop) and float(np.hypot(*(self.P[-1] - p_xy))) < POS_DEADBAND
+
 def gimbal_heading(q_wb):
   """Horizontal unit forward vector of the gimbal in world, from q_wb=[w,x,y,z]
   (world<-body). forward = R_wb @ camera_z; returns None if it points ~straight
@@ -134,9 +181,9 @@ def best_tag_to_view(p_xy:np.ndarray):
 
 def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_at_pose:float):
   """Gimbal setpoint (gimbal-inertial yaw) to point at the best tag, or None.
-  Computes the bearing error in WORLD (frame-offset-free) and adds it to the gimbal
-  yaw, so it's robust to the slam yaw-drift bias. yaw_gi_at_pose MUST be the gimbal yaw
-  at the pose's capture time (same instant as `fwd`/`psi`) — `(yaw_gi − psi)` is the
+  Computes the bearing error in WORLD (frame-offset-free) and combines it with the
+  gimbal yaw, so it's robust to the slam yaw-drift bias. yaw_gi_at_pose MUST be the gimbal
+  yaw at the pose's capture time (same instant as `fwd`/`psi`) — `(yaw_gi − psi)` is the
   slowly-drifting world↔gimbal offset, and sampling the two at different times corrupts
   it by the gimbal's slew during the slam lag → the setpoint overshoots the tag."""
   bt = best_tag_to_view(p_xy)
@@ -145,7 +192,14 @@ def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_at_pose:float
   los = t_xy - p_xy                                  # robot → tag (world)
   bearing = math.atan2(los[1], los[0])               # desired gimbal world heading
   psi = math.atan2(fwd[1], fwd[0])                   # gimbal world heading at the pose's capture time
-  yaw_sp = yaw_gi_at_pose + wrap_pi(bearing - psi)   # absolute gimbal-inertial yaw target
+  # MINUS = RH↔LH handedness flip (confirmed on hardware). slam's world is RH z-up
+  # (yaw CCW+), but the gimbal-inertial yaw_gi frame gimbald closes on is LEFT-handed
+  # (x-fwd, y-up, z-left → yaw runs the other way; see plated / world_frame_conventions).
+  # The look-at is the ONLY place that converts a slam-world bearing into a yaw_gi
+  # setpoint, so it alone eats the flip. NOT YAW_FLIPPED (slam heading is faithful with
+  # that False); the chassis (world direction vectors) and decisiond (stays in the
+  # gimbal frame) never cross this boundary, so neither is affected.
+  yaw_sp = yaw_gi_at_pose - wrap_pi(bearing - psi)   # absolute gimbal-inertial yaw target
   # Feedforward: driving past a static tag drifts its bearing at
   # β̇ = (los_y·v_x − los_x·v_y)/range² — feed it so the gimbal doesn't lag.
   yaw_ff = float((los[1] * v_xy[0] - los[0] * v_xy[1]) / (rng * rng))
@@ -160,14 +214,16 @@ def run():
   # corrupts the world↔gimbal offset during a slew → the look-at setpoint overshoots.)
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
-  # A drawn path (NAV_PATH) overrides the tag-standoff MISSION. Curve paths flow
-  # without dwelling at each sampled point (dwell=0); the trapezoid still slows
-  # near each. (Smooth pure-pursuit following is the natural next step.)
+  # A drawn path (NAV_PATH, ≥2 pts) is followed smoothly with PurePursuit. The
+  # tag-standoff MISSION uses WaypointPlayer instead — it WANTS to stop and hold at
+  # each standoff, whereas pure pursuit flows straight through to the path end.
   np_path = load_nav_path()
-  if np_path is not None:
+  player = pursuit = None
+  if np_path is not None and len(np_path[0]) >= 2:
     waypoints, is_curve = np_path
-    player = WaypointPlayer(waypoints, dwell=0.0 if is_curve else ARRIVE_DWELL, loop=LOOP)
-    logger.info(f"navd: following NAV_PATH — {len(waypoints)} wp ({'curve' if is_curve else 'straight'})")
+    pursuit = PurePursuit(waypoints, loop=LOOP)
+    logger.info(f"navd: pure-pursuit NAV_PATH — {len(waypoints)} pts, {pursuit.total:.1f} m "
+                f"({'curve' if is_curve else 'straight'}{', loop' if LOOP else ''})")
   else:
     player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION], loop=LOOP)
     logger.info("navd: mission " + " → ".join(
@@ -212,36 +268,45 @@ def run():
         sp, look_tag = res
         pub.send("nav_setpoint", sp)
 
-    # --- Chassis waypoint nav ---
-    goal = player.update(p_xy, now)
-    if player.idx != last_idx:
-      logger.info(f"navd: waypoint {player.idx}/{len(MISSION)} " +
-                  ("complete, holding" if goal is None else f"→ {goal.round(2).tolist()}"))
-      last_idx = player.idx
+    # --- Chassis nav: pick the target point to drive at + the distance to brake
+    # against. PurePursuit → a lookahead point sliding along the path, braking on the
+    # remaining arc length (stops only at the path end). WaypointPlayer → the active
+    # waypoint, braking on straight-line distance (stops and holds at each).
+    if pursuit is not None:
+      target, brake = (None, 0.0) if pursuit.done(p_xy) else pursuit.update(p_xy)
+      prog = f"path {100.0 * pursuit.s / pursuit.total:.0f}%" if pursuit.total > 0 else "path"
+    else:
+      goal = player.update(p_xy, now)
+      if player.idx != last_idx:
+        logger.info(f"navd: waypoint {player.idx}/{len(MISSION)} " +
+                    ("complete, holding" if goal is None else f"→ {goal.round(2).tolist()}"))
+        last_idx = player.idx
+      target = goal
+      brake = float(math.hypot(*(goal - p_xy))) if goal is not None else 0.0
+      prog = f"wp{player.idx}"
 
-    if goal is None or fwd is None:                          # mission done, or gimbal ~vertical
+    if target is None or fwd is None:                        # arrived/finished, or gimbal ~vertical
       pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0
       continue
     left = (-fwd[1], fwd[0])
 
-    # Trapezoidal speed profile along the straight line to the waypoint: cap at
-    # V_MAX (cruise), brake on √(2·a·d) so we can always stop at the deadband, and
-    # limit the rise to ACCEL (accel ramp). Recomputed from the live distance each
-    # tick → self-correcting, and triangular automatically when the move is short.
-    e = goal - p_xy                                          # world position error to the waypoint
-    d = float(math.hypot(e[0], e[1]))
-    v_target = min(V_MAX, math.sqrt(2.0 * ACCEL * max(0.0, d - POS_DEADBAND)))
+    # Trapezoidal speed profile on the brake distance: cap at V_MAX (cruise), brake on
+    # √(2·a·d) so we can always stop at the deadband, and limit the rise to ACCEL.
+    # Recomputed each tick → self-correcting (brake=∞ on a loop ⇒ steady cruise).
+    v_target = min(V_MAX, math.sqrt(2.0 * ACCEL * max(0.0, brake - POS_DEADBAND)))
     v_cmd = max(0.0, min(v_target, v_prev + ACCEL * dt))
     v_prev = v_cmd
-    if v_cmd <= 0.0 or d < 1e-6:
+    to = target - p_xy                                       # world vector toward the target point
+    dist = float(math.hypot(to[0], to[1]))
+    if v_cmd <= 0.0 or dist < 1e-6:
       x = y = 0.0
     else:
-      vx, vy = v_cmd * e[0] / d, v_cmd * e[1] / d            # world-frame velocity toward the goal
+      vx, vy = v_cmd * to[0] / dist, v_cmd * to[1] / dist    # world-frame velocity toward the target
       x = vx * fwd[0] + vy * fwd[1]                          # → gimbal forward
       y = vx * left[0] + vy * left[1]                        # → gimbal left
     pub.send("chassis_velocity", {"x": x, "y": y})
 
     if now - last_diag > 1.0:
-      logger.info(f"navd: wp{player.idx} d={d:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}"
+      logger.info(f"navd: {prog} brake={brake:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}"
                   + (f"  look@tag{look_tag}" if look_tag is not None else "  look:none"))
       last_diag = now
