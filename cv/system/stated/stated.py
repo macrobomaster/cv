@@ -14,8 +14,8 @@ from ..core.logging import logger
 from ..common.geometry import wrap_pi
 
 SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
-SCAN_SWEEP_DT = 2.0
-SCAN_TURN_DT = 1.0
+SCAN_SWEEP_DT = 1.0
+SCAN_TURN_DT = 0.5
 SCAN_PITCH = 0.0
 ACQUIRE_HOLD_DT = 0.8
 
