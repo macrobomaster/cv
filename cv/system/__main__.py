@@ -13,13 +13,15 @@ ON_ORIN = on_orin()
 
 PROCS = [
   SupervisedProcess("commsd", "cv.system.commsd.commsd", on_orin, watchdog_dt=5),
-  SupervisedProcess("camerad", "cv.system.camerad.camerad", watchdog_dt=5,
+  SupervisedProcess("camerad", "cv.system.camerad.camerad", watchdog_dt=10,
                     cpu_affinity=2 if ON_ORIN else None, rt_priority=80 if ON_ORIN else None),
-  SupervisedProcess("autoaimd", "cv.system.autoaimd.autoaimd",
-                    cpu_affinity=3 if ON_ORIN else None, rt_priority=80 if ON_ORIN else None),
+  SupervisedProcess("gimbald", "cv.system.gimbald.gimbald"),
+  SupervisedProcess("autoaimd", "cv.system.autoaimd.autoaimd"),
   SupervisedProcess("plated", "cv.system.plated.plated"),
-  # SupervisedProcess("frontd", "cv.system.frontd.frontd"),
-  # SupervisedProcess("slamd", "cv.system.slamd.slamd"),
+  SupervisedProcess("stated", "cv.system.stated.stated"),
+  SupervisedProcess("tagd", "cv.system.tagd.tagd"),
+  SupervisedProcess("slamd", "cv.system.slamd.slamd"),
+  SupervisedProcess("navd", "cv.system.navd.navd"),
   SupervisedProcess("decisiond", "cv.system.decisiond.decisiond"),
 ]
 

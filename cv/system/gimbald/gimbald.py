@@ -1,19 +1,19 @@
 """Gimbal control daemon — owns the single gimbal tracking loop (velocity feedforward + PID → aim_error).
 
-Multiple controllers want to point the gimbal: decisiond (aim at a target) and navd (scan / point for
-navigation). Rather than have them fight over aim_error or read each other's state, each publishes a
+Multiple controllers want to point the gimbal: decisiond (aim at a target), stated (search scan),
+and navd (scan / point for navigation). Rather than have them fight over aim_error or read each other's state, each publishes a
 gimbal SETPOINT on its own topic, and gimbald arbitrates and runs the one control loop that closes on
 gimbal_state and emits aim_error to commsd.
 
-Setpoint contract (both topics): {yaw, pitch, yaw_ff, pitch_ff}
+Setpoint contract (all topics): {yaw, pitch, yaw_ff, pitch_ff}
   yaw, pitch        absolute gimbal target — gimbal-inertial yaw, gravity-relative pitch (rad)
   yaw_ff, pitch_ff  feedforward angular rate of the aim point (rad/s); 0 if unknown
 
 Arbitration: aim_setpoint wins while fresh (decisiond only publishes it when it has a target);
-otherwise nav_setpoint; otherwise hold (zero rate). The PID is reset on every source switch so its
+otherwise state_setpoint, otherwise nav_setpoint, otherwise hold (zero rate). stated only publishes while searching. The PID is reset on every source switch so its
 integral/derivative don't carry across a setpoint discontinuity.
 
-Subs:  aim_setpoint, nav_setpoint, gimbal_state
+Subs:  aim_setpoint, state_setpoint, nav_setpoint, gimbal_state
 Pubs:  aim_error: {x, y}   (rate/joystick command to commsd)
 """
 import time
@@ -27,7 +27,7 @@ from ..common.gimbal import GimbalBuffer
 from ...autoaim.common import AIM_GAINS, AIM_I_CLAMP, AIM_D_TAU
 
 # Setpoint sources in PRIORITY order — first one with a fresh sample wins the gimbal.
-SOURCES = ["aim_setpoint", "nav_setpoint"]
+SOURCES = ["aim_setpoint", "nav_setpoint", "state_setpoint"]
 SETPOINT_TIMEOUT = 0.1   # s — a setpoint older than this is stale; its source yields to the next
 
 class AxisPID:
