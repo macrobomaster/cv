@@ -28,12 +28,6 @@
         (final: prev: { makeModulesClosure = x: prev.makeModulesClosure (x // { allowMissing = true; }); })
       ];
 
-      # aarch64 (jetson) only — kept off x86_64 so it doesn't churn the x86 devshell
-      aarch64_overlays = common_overlays ++ [
-        # SDL3's checkPhase runs an SDL_CreateProcess test that asserts wrong in the build sandbox
-        (final: prev: { sdl3 = prev.sdl3.overrideAttrs (old: { doCheck = false; }); })
-      ];
-
       pkgs-x86_64-linux = import nixpkgs ({
         system = "x86_64-linux";
         overlays = [
@@ -58,7 +52,7 @@
             "8.7"
           ];
         };
-        overlays = aarch64_overlays ++ [
+        overlays = common_overlays ++ [
           inputs.jetpack-nixos.overlays.default
           (final: prev: {
             pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
@@ -159,7 +153,7 @@
             hostPlatform = "aarch64-linux";
             config = pkgs-aarch64-linux.config;
           };
-          nixpkgs.overlays = aarch64_overlays ++ [
+          nixpkgs.overlays = common_overlays ++ [
             (final: _: { inherit (final.nvidia-jetpack) cudaPackages; })
           ];
 
@@ -177,9 +171,6 @@
             firmware.autoUpdate = true;
             modesetting.enable = true;
           };
-
-          # preload the cv devshell's full build closure so `nix develop` at boot is no-build
-          system.extraDependencies = [ orinDevShell.inputDerivation ];
 
           systemd.services.cv = {
             description = "cv service";
