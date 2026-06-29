@@ -8,10 +8,11 @@ import cv2
 
 from ..core import messaging
 from ..core.logging import logger
-from ..common.geometry import roty, rotx, wrap_pi
+from ..common.geometry import rotz, wrap_pi
 from ..common.gimbal import GimbalBuffer
-from ...autoaim.common import (R_MOUNT, T_MOUNT, CANONICAL_CAMERA_MATRIX, CANONICAL_DIST_COEFFS,
+from ...autoaim.common import (CANONICAL_CAMERA_MATRIX, CANONICAL_DIST_COEFFS,
                                IMG_H, IMG_W, plate_screw_points)
+from ...slam.common import R_CAM, T_CAM   # calibrated yaw-only camera↔yaw-stage mount (z-up, shared)
 
 # loaded camera calibration for warp
 def _load_real_calib():
@@ -77,8 +78,9 @@ SPIN_OMEGA_SNR = 1.0            # |omega| must exceed this * sigma_omega to trus
 
 # --- Math helpers ---
 
-# gimbal-inertial is y-up: yaw turns about +y, pitch about +x (shared axis primitives, composed here).
-R_yaw, R_pitch = roty, rotx
+# gimbal-inertial is z-up RH (shared with slam): +x forward, +y left, +z up; yaw turns about +z (rotz).
+# The autoaim camera is on the gimbal YAW stage only (it does NOT pitch), so camera→gimbal-inertial is
+# yaw-only: pos_gi = rotz(yaw_gi) @ (R_CAM @ pos_cam + T_CAM), reusing slam's calibrated yaw-only mount.
 
 # --- UKF weights / matrix sqrt --------------------------------------------------------------------
 # The robot-body process model is linear, so the predict stays an exact Kalman propagation; only the
@@ -111,18 +113,18 @@ def _chol_psd(M:np.ndarray) -> np.ndarray:
 # --- Robot-body UKF -------------------------------------------------------------------------------
 # Linear-predict / unscented-update filter (predict is an exact KF step; only the trig measurement is
 # unscented — see the UKF-weights note above).
-# State x = [cx, cz, vx, vz, theta, omega, r]:
-#   (cx,cz)  spin-axis position in the horizontal plane (gimbal-inertial x-forward, z-right), m
-#   (vx,vz)  spin-axis velocity, m/s
+# State x = [cx, cy, vx, vy, theta, omega, r]:
+#   (cx,cy)  spin-axis position in the horizontal plane (gimbal-inertial z-up: x-forward, y-left), m
+#   (vx,vy)  spin-axis velocity, m/s
 #   theta    body heading — the outward bearing of plate 0, rad
 #   omega    heading rate, rad/s  (≈0 static, large when spinning)
 #   r        shared plate radius from the axis, m
-# Per-plate heights h_k are tracked as side params (plate-y is measured directly). A robot is 4 plates
+# Per-plate heights h_k are tracked as side params (plate height = world-z, measured directly). A robot is 4 plates
 # at theta + k·90°; the visible plate's position stays well-observed even when center/theta/r don't,
 # so aiming never degrades — the geometry only sharpens (and helps association/spin) once rotation is
 # seen. STATIC / LINEAR / SPIN are just regions of (|v|, |omega|).
 
-IDX_CX, IDX_CZ, IDX_VX, IDX_VZ, IDX_TH, IDX_W, IDX_R = range(7)
+IDX_CX, IDX_CY, IDX_VX, IDX_VY, IDX_TH, IDX_W, IDX_R = range(7)
 
 class RobotUKF:
   def __init__(self):
@@ -133,14 +135,14 @@ class RobotUKF:
     self.h: list[Optional[float]] = [None, None, None, None]   # per-plate heights
     self.last_k = 0                                            # most-recently-seen plate slot
 
-  def bootstrap(self, p_xz:np.ndarray, y:float, psi:float, t:float):
+  def bootstrap(self, p_xy:np.ndarray, h:float, psi:float, t:float):
     # First sighting → call it plate 0: theta = its outward bearing, center one radius inward.
-    cx = p_xz[0] - R_DEFAULT * math.cos(psi)
-    cz = p_xz[1] - R_DEFAULT * math.sin(psi)
-    self.x = np.array([cx, cz, 0.0, 0.0, psi, 0.0, R_DEFAULT])
+    cx = p_xy[0] - R_DEFAULT * math.cos(psi)
+    cy = p_xy[1] - R_DEFAULT * math.sin(psi)
+    self.x = np.array([cx, cy, 0.0, 0.0, psi, 0.0, R_DEFAULT])
     self.P = np.diag([INIT_C, INIT_C, INIT_V, INIT_V, INIT_TH, INIT_W, INIT_R])
     self.h = [None, None, None, None]
-    self.h[0] = y
+    self.h[0] = h
     self.last_k = 0
     self.t = t
     self.initialized = True
@@ -148,7 +150,7 @@ class RobotUKF:
   def _F_Q(self, dt:float):
     F = np.eye(7)
     F[IDX_CX, IDX_VX] = dt
-    F[IDX_CZ, IDX_VZ] = dt
+    F[IDX_CY, IDX_VY] = dt
     F[IDX_TH, IDX_W] = dt
     Q = np.diag([Q_CENTER*dt, Q_CENTER*dt, Q_VEL*dt, Q_VEL*dt, Q_THETA*dt, Q_OMEGA*dt, Q_R*dt])
     return F, Q
@@ -163,11 +165,11 @@ class RobotUKF:
     np.fill_diagonal(self.P, np.minimum(np.diag(self.P), P_CAP))
     self.t = t
 
-  def associate(self, p_xz:np.ndarray, R_pos:np.ndarray) -> tuple[int, float]:
+  def associate(self, p_xy:np.ndarray, R_pos:np.ndarray) -> tuple[int, float]:
     """Position-based association: the 4 slots are distinct points (a square around the center), so the
     visible plate is the slot whose PREDICTED position is closest. Returns (k, that slot's Mahalanobis
     distance — the min also gates retargeting). Independent of ψ, so a PnP flip can't mis-assign a slot."""
-    mahals = [self.pos_mahal(k, p_xz, R_pos) for k in range(4)]
+    mahals = [self.pos_mahal(k, p_xy, R_pos) for k in range(4)]
     k = int(np.argmin(mahals))
     return k, mahals[k]
 
@@ -179,7 +181,7 @@ class RobotUKF:
     X = np.vstack([x, x + A.T, x - A.T])                                   # (2n+1, 7) sigma points
     phi = X[:, IDX_TH] + k * (math.pi / 2)
     Z = np.stack([X[:, IDX_CX] + X[:, IDX_R] * np.cos(phi),
-                  X[:, IDX_CZ] + X[:, IDX_R] * np.sin(phi), phi], axis=1)  # (2n+1, 3)
+                  X[:, IDX_CY] + X[:, IDX_R] * np.sin(phi), phi], axis=1)  # (2n+1, 3)
     z_hat = np.array([_UKF_WM @ Z[:, 0], _UKF_WM @ Z[:, 1],
                       math.atan2(_UKF_WM @ np.sin(Z[:, 2]), _UKF_WM @ np.cos(Z[:, 2]))])
     dz = Z - z_hat; dz[:, 2] = (dz[:, 2] + math.pi) % (2 * math.pi) - math.pi
@@ -188,13 +190,13 @@ class RobotUKF:
     Pxz = (dx.T * _UKF_WC) @ dz
     return z_hat, Pzz, Pxz
 
-  def pos_mahal(self, k:int, p_xz:np.ndarray, R_pos:np.ndarray) -> float:
+  def pos_mahal(self, k:int, p_xy:np.ndarray, R_pos:np.ndarray) -> float:
     z_hat, Pzz, _ = self._unscented(self.x, self.P, k)
-    innov = p_xz - z_hat[:2]
+    innov = p_xy - z_hat[:2]
     S = Pzz[:2, :2] + R_pos
     return float(innov @ np.linalg.solve(S, innov))
 
-  def update(self, k:int, p_xz:np.ndarray, y:float, psi_obs:float, R_pos:np.ndarray, R_psi:float):
+  def update(self, k:int, p_xy:np.ndarray, h:float, psi_obs:float, R_pos:np.ndarray, R_psi:float):
     z_hat, Pzz, Pxz = self._unscented(self.x, self.P, k)
     innov_psi = wrap_pi(psi_obs - z_hat[2])
     if abs(innov_psi) > PSI_FLIP_GATE:
@@ -202,19 +204,19 @@ class RobotUKF:
       # the tight position update, so the flip can't corrupt theta (position association already chose k).
       S = Pzz[:2, :2] + R_pos
       K = Pxz[:, :2] @ np.linalg.inv(S)
-      innov = p_xz - z_hat[:2]
+      innov = p_xy - z_hat[:2]
     else:
       R = np.zeros((3, 3)); R[:2, :2] = R_pos; R[2, 2] = R_psi
       S = Pzz + R
       K = Pxz @ np.linalg.inv(S)
-      innov = np.array([p_xz[0] - z_hat[0], p_xz[1] - z_hat[1], innov_psi])
+      innov = np.array([p_xy[0] - z_hat[0], p_xy[1] - z_hat[1], innov_psi])
     self.x = self.x + K @ innov
     self.x[IDX_TH] = wrap_pi(self.x[IDX_TH])
     self.x[IDX_R] = min(R_RANGE[1], max(R_RANGE[0], self.x[IDX_R]))
     self.P = self.P - K @ S @ K.T
     self.P = 0.5 * (self.P + self.P.T)
     np.fill_diagonal(self.P, np.minimum(np.diag(self.P), P_CAP))
-    self.h[k] = y if self.h[k] is None else (1 - H_EMA) * self.h[k] + H_EMA * y
+    self.h[k] = h if self.h[k] is None else (1 - H_EMA) * self.h[k] + H_EMA * h
     self.last_k = k
 
   def n_seen(self) -> int:
@@ -233,21 +235,21 @@ class RobotUKF:
     x = F @ self.x
     x[IDX_TH] = wrap_pi(x[IDX_TH])
     P = F @ self.P @ F.T + Q
-    cx, cz, vx, vz, theta, omega, r = x
+    cx, cy, vx, vy, theta, omega, r = x
     phi = theta + k * (math.pi / 2)
     c, s = math.cos(phi), math.sin(phi)
     h = self.h[k] if self.h[k] is not None else self._mean_h()
-    pos = np.array([cx + r * c, h, cz + r * s])
-    vel = np.array([vx - r * omega * s, 0.0, vz + r * omega * c])
+    pos = np.array([cx + r * c, cy + r * s, h])                 # z-up: (x, y, height=z)
+    vel = np.array([vx - r * omega * s, vy + r * omega * c, 0.0])
     _, Pzz, _ = self._unscented(x, P, k)
-    cov = np.diag([Pzz[0, 0], (0.02) ** 2, Pzz[1, 1]])  # height variance ~ const
-    cov[0, 2] = cov[2, 0] = Pzz[0, 1]
+    cov = np.diag([Pzz[0, 0], Pzz[1, 1], (0.02) ** 2])          # horizontal x,y; height variance ~ const
+    cov[0, 1] = cov[1, 0] = Pzz[0, 1]
     return pos, vel, cov
 
   def classify(self) -> str:
     omega = self.x[IDX_W]
     sigma_w = math.sqrt(max(self.P[IDX_W, IDX_W], 0.0))
-    speed = math.hypot(self.x[IDX_VX], self.x[IDX_VZ])
+    speed = math.hypot(self.x[IDX_VX], self.x[IDX_VY])
     if abs(omega) > OMEGA_SPIN and abs(omega) > SPIN_OMEGA_SNR * sigma_w and self.n_seen() >= 2:
       return "SPIN"
     if speed < V_STATIC and abs(omega) < OMEGA_STATIC:
@@ -255,11 +257,11 @@ class RobotUKF:
     return "LINEAR"
 
   def to_spin_dict(self) -> dict:
-    cx, cz, vx, vz, theta, omega, r = self.x
+    cx, cy, vx, vy, theta, omega, r = self.x
     mean_h = self._mean_h()
     return {
-      "c_0": [float(cx), mean_h, float(cz)],
-      "v_c": [float(vx), float(vz)],
+      "c_0": [float(cx), float(cy), mean_h],          # z-up: (x, y, height=z)
+      "v_c": [float(vx), float(vy)],                  # horizontal velocity (x, y)
       "omega": float(omega),
       "theta_body_0": float(theta),
       "t_ref": float(self.t),
@@ -281,49 +283,49 @@ class PlatedState:
     self.last_meas: Optional[np.ndarray] = None   # raw PnP plate position (pre-EKF), for viz
     self.last_psi: float = 0.0                    # raw measured plate facing-yaw, for viz/validation
 
-  def _retarget(self, p_xz, y, psi, t):
-    self.ukf.bootstrap(p_xz, y, psi, t)
+  def _retarget(self, p_xy, h, psi, t):
+    self.ukf.bootstrap(p_xy, h, psi, t)
     self.target_id += 1
     self.handoff_until_t = t + T_HANDOFF
     self.consecutive_jumps = 0
 
-  def push_measurement(self, t_capture, pos_gi, psi, meta, R_pos_xz, R_psi):
+  def push_measurement(self, t_capture, pos_gi, psi, meta, R_pos_xy, R_psi):
     self.last_meas = pos_gi
     self.last_psi = wrap_pi(psi)
-    p_xz = np.array([pos_gi[0], pos_gi[2]])
-    y = float(pos_gi[1])
+    p_xy = np.array([pos_gi[0], pos_gi[1]])     # z-up: horizontal plane is x-y
+    h = float(pos_gi[2])                         # z-up: height is the world-z component
 
     if not self.ukf.initialized:
-      self._retarget(p_xz, y, psi, t_capture)
+      self._retarget(p_xy, h, psi, t_capture)
       self.last_meta = meta
       self.last_valid_t = t_capture
       return
 
     # A different color/number is unambiguously a different robot.
     if self.last_meta is not None and meta != self.last_meta:
-      self._retarget(p_xz, y, psi, t_capture)
+      self._retarget(p_xy, h, psi, t_capture)
       self.last_meta = meta
       self.last_valid_t = t_capture
       return
 
     if self.last_valid_t is not None and (t_capture - self.last_valid_t) > T_LOST:
-      self._retarget(p_xz, y, psi, t_capture)
+      self._retarget(p_xy, h, psi, t_capture)
       self.last_meta = meta
       self.last_valid_t = t_capture
       return
 
     self.ukf.predict_to(t_capture)
-    k, mahal = self.ukf.associate(p_xz, R_pos_xz)
+    k, mahal = self.ukf.associate(p_xy, R_pos_xy)
     # The detection matches no predicted plate position → likely a new robot.
     if mahal > ASSOC_POS_MAHAL:
       self.consecutive_jumps += 1
       if self.consecutive_jumps >= RETARGET_JUMP_FRAMES:
-        self._retarget(p_xz, y, psi, t_capture)
+        self._retarget(p_xy, h, psi, t_capture)
         self.last_meta = meta
         self.last_valid_t = t_capture
       return
     self.consecutive_jumps = 0
-    self.ukf.update(k, p_xz, y, psi, R_pos_xz, R_psi)
+    self.ukf.update(k, p_xy, h, psi, R_pos_xy, R_psi)
     self.last_meta = meta
     self.last_valid_t = t_capture
 
@@ -425,7 +427,7 @@ def run():
       if out is not None: pub.send("plate", out)
       continue
 
-    pos_cam, normal_cam, R_cam = _pnp_pos_cov(autoaim["corners"], autoaim.get("corner_lo"),
+    pos_cam, normal_cam, cov_cam = _pnp_pos_cov(autoaim["corners"], autoaim.get("corner_lo"),
                                               autoaim.get("corner_hi"), autoaim["number"])
     if pos_cam is None:
       state.push_invalid(t_capture)
@@ -435,25 +437,26 @@ def run():
 
     gp = gimbal_buf.interpolate(t_capture)
     if gp is None:
-      yaw_gi_cap, pitch_gi_cap, stale = 0.0, 0.0, True
+      yaw_gi_cap, stale = 0.0, True
       if not warned_no_gimbal:
         logger.warning("plated: no gimbal_state samples; running in degraded mode")
         warned_no_gimbal = True
     else:
-      yaw_gi_cap, pitch_gi_cap, stale = gp
+      yaw_gi_cap, _, stale = gp                       # pitch unused — camera is yaw-only
 
-    # camera→gimbal-inertial. T_MOUNT (camera optical center in the gimbal-end-effector frame) rotates
-    # WITH the gimbal: pos_gi = G·(R_MOUNT·pos_cam + T_MOUNT). (No-op while T_MOUNT=0.)
-    G = R_yaw(yaw_gi_cap) @ R_pitch(pitch_gi_cap)
-    rot = G @ R_MOUNT
-    pos_gi = G @ (R_MOUNT @ pos_cam + T_MOUNT)
+    # camera→gimbal-inertial (z-up RH). The camera rides the YAW stage only, so this is YAW-ONLY (no
+    # pitch). T_CAM (optical centre off the yaw axis) rotates with the stage: pos_gi = Rz·(R_CAM·pos_cam
+    # + T_CAM), reusing slam's calibrated yaw-only mount. pos_gi is the target relative to the yaw axis.
+    G = rotz(yaw_gi_cap)
+    rot = G @ R_CAM
+    pos_gi = G @ (R_CAM @ pos_cam + T_CAM)
     normal_gi = rot @ normal_cam
-    psi = math.atan2(normal_gi[2], normal_gi[0])     # plate outward bearing in the horizontal plane
-    cov_gi = rot @ R_cam @ rot.T * (MEAS_NOISE_STALE_MULT if stale else 1.0)
-    R_pos_xz = cov_gi[np.ix_([0, 2], [0, 2])]
+    psi = math.atan2(normal_gi[1], normal_gi[0])     # plate outward bearing in the x-y horizontal plane
+    cov_gi = rot @ cov_cam @ rot.T * (MEAS_NOISE_STALE_MULT if stale else 1.0)
+    R_pos_xy = cov_gi[np.ix_([0, 1], [0, 1])]
     R_psi = PSI_NOISE * (MEAS_NOISE_STALE_MULT if stale else 1.0)
 
-    state.push_measurement(t_capture, pos_gi, psi, meta, R_pos_xz, R_psi)
+    state.push_measurement(t_capture, pos_gi, psi, meta, R_pos_xy, R_psi)
 
     out = state.publish(time.monotonic())
     if out is not None: pub.send("plate", out)

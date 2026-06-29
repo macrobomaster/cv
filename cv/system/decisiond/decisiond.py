@@ -42,8 +42,8 @@ def delta_settle(yaw_err:float, pitch_err:float) -> float:
 
 def _ballistic_pitch(target:np.ndarray, muzzle:np.ndarray=MUZZLE_OFFSET) -> Optional[tuple[float, float]]:
   rel = target - muzzle
-  r = math.hypot(rel[0], rel[2])
-  h = rel[1]
+  r = math.hypot(rel[0], rel[1])   # z-up: horizontal range in the x-y plane
+  h = rel[2]                        # z-up: height is the world-z component
   if r < 1e-6: return None
   v0 = MUZZLE_VELOCITY
   g = GRAVITY
@@ -58,7 +58,7 @@ def solve_with_lead(predict_fn:Callable[[float], np.ndarray], t_now:float, t_sta
                     d_yaw_prev:float=0.0, d_pitch_prev:float=0.0):
   # Returns (yaw_gi_cmd, pitch_cmd, t_arrival, target_at_arrival) or None.
   target = predict_fn(t_now)
-  r0 = math.hypot(target[0] - MUZZLE_OFFSET[0], target[2] - MUZZLE_OFFSET[2])
+  r0 = math.hypot(target[0] - MUZZLE_OFFSET[0], target[1] - MUZZLE_OFFSET[1])
   t_f = r0 / MUZZLE_VELOCITY
   dp_pipeline = (t_now - t_state) + DELTA_INPUT + DELTA_TRIGGER + delta_settle(d_yaw_prev, d_pitch_prev)
 
@@ -75,12 +75,11 @@ def solve_with_lead(predict_fn:Callable[[float], np.ndarray], t_now:float, t_sta
 
   t_arrival = t_now + dp_pipeline + t_f
   rel = target - MUZZLE_OFFSET
-  # −rel[2]: the gimbal-inertial frame is y-up with yaw = roty(yaw_gi), whose rotation
-  # sense (forward → −z) is OPPOSITE to atan2(+z, x) — so a target's azimuth in gimbal-
-  # yaw terms is −atan2(z, x). (Same RH-readout vs LH-frame handedness flip navd's
-  # look-at hit; here it's plated's roty(yaw_gi) sense.) The +rel[2] paired with the
-  # R_MOUNT det fix mirrored the aim — HW-confirmed flipped, so back to −rel[2].
-  yaw_cmd = math.atan2(-rel[2], rel[0])
+  # z-up RH gimbal-inertial (shared with slam/plated): yaw = rotz(yaw_gi) about +z, so the target
+  # azimuth is the plain RH atan2(y, x) — same handedness as gimbal_state.yaw_gi, no sign hack. This
+  # retires the y-up roty(yaw) ±rel[2] hunt (that ambiguity WAS the left-handed frame). If the gimbal
+  # IMU yaw still reads inverted vs rotz, fix it ONCE at the source (a YAW_FLIPPED-style flag), not here.
+  yaw_cmd = math.atan2(rel[1], rel[0])
   return yaw_cmd, theta, t_arrival, target
 
 # --- Target trajectory prediction ---
@@ -103,7 +102,7 @@ def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
     t_ref = spin["t_ref"]
     def predict(t):
       dt = t - t_ref
-      return np.array([c_0[0] + v_c[0]*dt, c_0[1], c_0[2] + v_c[1]*dt])
+      return np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])   # z-up: center moves in x-y, height=z
     return predict
   return None
 
@@ -127,21 +126,21 @@ def _spin_plate_pos(spin:dict, k:int, t:float) -> Optional[np.ndarray]:
   c_0 = np.array(spin["c_0"])
   v_c = np.array(spin["v_c"])
   dt = t - spin["t_ref"]
-  c = np.array([c_0[0] + v_c[0]*dt, c_0[1], c_0[2] + v_c[1]*dt])
+  c = np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])
   theta_k = spin["omega"] * dt + spin["theta_body_0"] + k * (math.pi / 2)
-  return np.array([c[0] + r*math.cos(theta_k), h, c[2] + r*math.sin(theta_k)])
+  return np.array([c[0] + r*math.cos(theta_k), c[1] + r*math.sin(theta_k), h])   # z-up: (x, y, height=z)
 
 def _spin_center_at(spin:dict, t:float) -> np.ndarray:
   c_0 = np.array(spin["c_0"])
   v_c = np.array(spin["v_c"])
   dt = t - spin["t_ref"]
-  return np.array([c_0[0] + v_c[0]*dt, c_0[1], c_0[2] + v_c[1]*dt])
+  return np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])   # z-up: center moves in x-y, height=z
 
 def best_visible_plate(spin:dict, t:float, muzzle:np.ndarray=MUZZLE_OFFSET) -> Optional[SpinHit]:
   center = _spin_center_at(spin, t)
-  # theta_los: direction from center toward muzzle in xz plane. Plate's body-frame phase must
-  # match within theta_facing for the plate to face us.
-  theta_los = math.atan2(muzzle[2] - center[2], muzzle[0] - center[0])
+  # theta_los: direction from center toward muzzle in the x-y horizontal plane (z-up). Plate's
+  # body-frame phase must match within theta_facing for the plate to face us.
+  theta_los = math.atan2(muzzle[1] - center[1], muzzle[0] - center[0])
   theta_facing = spin["theta_facing"]
 
   los_vec = center - muzzle
