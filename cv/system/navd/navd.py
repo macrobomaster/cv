@@ -1,17 +1,19 @@
-"""Navigation daemon — hold a world pose a fixed standoff from a known tag.
+"""Navigation daemon — play a sequence of standoff waypoints around known tags.
 
-Goal: park the robot STANDOFF metres in front of tag #6 and hold there. The tag
-is a surveyed field landmark (`slam.common.TAG_FIELD_MAP`), so the standoff point
-is a fixed world coordinate — 2 m out along the tag's face normal. navd reads the
-robot's localized pose from slamd (`slam_pose`) and drives the chassis to close
-the world-frame position error. No camera/PnP here: detection feeds slamd's
-localization, and navd just consumes the resulting pose.
+Each waypoint is a fixed world point a given distance out in front of a surveyed
+tag's face (`slam.common.TAG_FIELD_MAP`). A WaypointPlayer walks the mission in
+order, advancing to the next once the robot has settled at the current one. navd
+reads the robot's localized pose from slamd (`slam_pose`), drives the chassis to
+close the world-frame position error to the active waypoint, and stops once the
+mission is done. No camera/PnP here — detection feeds slamd's localization; navd
+just consumes the resulting pose.
+
+Current mission (MISSION): hold 2.5 m in front of tag #6, then 1.5 m in front.
 
 The chassis is holonomic; `chassis_velocity` is {x: forward, y: left} m/s
 referenced to the GIMBAL heading (the board rotates chassis→gimbal). So we rotate
 the world position error into the gimbal-heading frame (from slam_pose's q_wb) and
-command it directly. Heading/orientation is not controlled — this only regulates
-position.
+command it directly. Heading/orientation is not controlled — position only.
 
 Subs:  slam_pose:        {t, p_w, v_w, q_wb, cov_pos, n_tags}   (from slamd)
 Pubs:  chassis_velocity: {x, y}   (x = forward, y = left, m/s; commsd → MOVE_ROBOT)
@@ -26,18 +28,48 @@ from ..core.keyvalue import kv_put
 from ...slam import common
 
 NAV_TAG_ID = 6
-STANDOFF = 2.0               # m, hold this far out in front of the tag's face
-POS_DEADBAND = 0.10          # m, no command once inside this radius of the goal
+# Mission: (tag_id, standoff_m) waypoints, held in order.
+MISSION = [(NAV_TAG_ID, 2.5), (NAV_TAG_ID, 1.5)]
+
+ARRIVE_RADIUS = 0.15         # m, within this of a waypoint counts as "at" it (> POS_DEADBAND)
+ARRIVE_DWELL = 0.3           # s, must stay inside ARRIVE_RADIUS this long before advancing
+POS_DEADBAND = 0.10          # m, no command once inside this radius of the active waypoint
 KP = 1.0                     # (m/s) per m of position error
 MAX_SPEED = 1.0              # m/s, per-axis chassis speed cap
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
 
-# Goal: STANDOFF metres out along tag #6's outward face normal, in the field
-# (world) frame. TAG_FIELD_MAP gives (R_world_tag, t_world_tag); the tag's +z
-# column is the direction its face points into the play area.
-_R_wt, _t_wt = common.TAG_FIELD_MAP[NAV_TAG_ID]
-_normal = _R_wt[:2, 2]
-GOAL_XY = (_t_wt[:2] + STANDOFF * _normal / (np.linalg.norm(_normal) + 1e-9)).astype(np.float64)
+def tag_standoff(tag_id:int, dist:float) -> np.ndarray:
+  """World-XY point `dist` metres out along tag `tag_id`'s outward face normal.
+  TAG_FIELD_MAP gives (R_world_tag, t_world_tag); the tag's +z column is the
+  direction its face points into the play area."""
+  R_wt, t_wt = common.TAG_FIELD_MAP[tag_id]
+  n = R_wt[:2, 2]
+  return (t_wt[:2] + dist * n / (np.linalg.norm(n) + 1e-9)).astype(np.float64)
+
+class WaypointPlayer:
+  """Plays a fixed list of world-XY goals in order. update(p_xy, now) returns the
+  active goal (None once the mission is done), advancing to the next goal after the
+  robot has stayed within ARRIVE_RADIUS of the current one for ARRIVE_DWELL."""
+  def __init__(self, waypoints, arrive_radius=ARRIVE_RADIUS, dwell=ARRIVE_DWELL):
+    self.waypoints = list(waypoints)
+    self.arrive_radius = arrive_radius
+    self.dwell = dwell
+    self.idx = 0
+    self.since = None          # time we entered the arrive radius (None if outside)
+
+  def goal(self):
+    return None if self.idx >= len(self.waypoints) else self.waypoints[self.idx]
+
+  def update(self, p_xy:np.ndarray, now:float):
+    g = self.goal()
+    if g is None: return None
+    if float(math.hypot(*(g - p_xy))) <= self.arrive_radius:
+      if self.since is None: self.since = now
+      if now - self.since >= self.dwell:
+        self.idx += 1; self.since = None
+    else:
+      self.since = None
+    return self.goal()
 
 def gimbal_heading(q_wb):
   """Horizontal unit forward vector of the gimbal in world, from q_wb=[w,x,y,z]
@@ -52,10 +84,13 @@ def run():
   gc.disable()
   pub = messaging.Pub(["chassis_velocity"])
   sub = messaging.Sub(["slam_pose"], poll="slam_pose")
+  player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION])
   last_wd = last_diag = last_pose_t = 0.0
+  last_idx = -1
 
   kv_put("watchdog", "navd", time.monotonic())
-  logger.info(f"navd: holding {STANDOFF:.1f}m standoff at world {GOAL_XY.round(2).tolist()} (tag {NAV_TAG_ID})")
+  logger.info("navd: mission " + " → ".join(
+    f"{d:.1f}m@tag{t} {w.round(2).tolist()}" for (t, d), w in zip(MISSION, player.waypoints)))
 
   while True:
     sub.update(timeout=100)
@@ -74,11 +109,22 @@ def run():
         logger.info("navd: no usable slam_pose (stale or unanchored), stopped"); last_diag = now
       continue
 
+    p_xy = np.asarray(pose["p_w"], np.float64)[:2]
+    goal = player.update(p_xy, now)
+    if player.idx != last_idx:
+      logger.info(f"navd: waypoint {player.idx}/{len(MISSION)} " +
+                  ("complete, holding" if goal is None else f"→ {goal.round(2).tolist()}"))
+      last_idx = player.idx
+
+    if goal is None:
+      pub.send("chassis_velocity", {"x": 0.0, "y": 0.0})     # mission done ⇒ hold
+      continue
+
     fwd = gimbal_heading(pose["q_wb"])
     if fwd is None: continue                                  # gimbal looking ~straight up/down
     left = (-fwd[1], fwd[0])
 
-    e = GOAL_XY - np.asarray(pose["p_w"], np.float64)[:2]     # world position error to the goal
+    e = goal - p_xy                                           # world position error to the waypoint
     dist = float(math.hypot(e[0], e[1]))
     if dist < POS_DEADBAND:
       x = y = 0.0
@@ -88,6 +134,5 @@ def run():
     pub.send("chassis_velocity", {"x": x, "y": y})
 
     if now - last_diag > 1.0:
-      logger.info(f"navd: err={dist:.2f}m p_w={np.asarray(pose['p_w']).round(2).tolist()} "
-                  f"→ x={x:+.2f} y={y:+.2f}")
+      logger.info(f"navd: wp{player.idx} err={dist:.2f}m p_w={p_xy.round(2).tolist()} → x={x:+.2f} y={y:+.2f}")
       last_diag = now
