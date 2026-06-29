@@ -1,7 +1,7 @@
 """State daemon - temporary high-level gimbal state machine.
 
 For now this only owns armor search:
-  SCAN: continuously rotate the gimbal in yaw while autoaim does not see a usable armor plate.
+  SCAN: sweep +/-45 deg, turn 180 deg, then sweep the opposite half while autoaim sees no usable plate.
   YIELD: publish nothing once autoaim sees a plate; decisiond owns all aiming.
 
 Publishes a `state_setpoint` consumed by gimbald. gimbald still arbitrates priority, so decisiond's
@@ -13,7 +13,9 @@ from ..core import messaging
 from ..core.logging import logger
 from ..common.geometry import wrap_pi
 
-SCAN_PERIOD = 2.0
+SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
+SCAN_SWEEP_DT = 2.0
+SCAN_TURN_DT = 1.0
 SCAN_PITCH = 0.0
 AUTOAIM_TIMEOUT = 0.25
 
@@ -21,9 +23,19 @@ def _sees_plate(autoaim:dict|None, last_autoaim_t:float, now:float) -> bool:
   return autoaim is not None and autoaim.get("valid", False) and now - last_autoaim_t < AUTOAIM_TIMEOUT
 
 def _scan_setpoint(t:float, center:float, start_t:float) -> dict:
-  w = 2 * math.pi / SCAN_PERIOD
-  yaw = wrap_pi(center + w * (t - start_t))
-  return {"yaw": yaw, "pitch": SCAN_PITCH, "yaw_ff": w, "pitch_ff": 0.0}
+  cycle_dt = SCAN_SWEEP_DT + SCAN_TURN_DT
+  t_scan = t - start_t
+  cycle = int(t_scan // cycle_dt)
+  t_cycle = t_scan - cycle * cycle_dt
+  base = center + (cycle % 2) * math.pi
+  if t_cycle < SCAN_SWEEP_DT:
+    w = 2 * math.pi / SCAN_SWEEP_DT
+    yaw = wrap_pi(base + SCAN_SWEEP_AMPLITUDE * math.sin(w * t_cycle))
+    yaw_ff = SCAN_SWEEP_AMPLITUDE * w * math.cos(w * t_cycle)
+  else:
+    yaw_ff = math.pi / SCAN_TURN_DT
+    yaw = wrap_pi(base + yaw_ff * (t_cycle - SCAN_SWEEP_DT))
+  return {"yaw": yaw, "pitch": SCAN_PITCH, "yaw_ff": yaw_ff, "pitch_ff": 0.0}
 
 def run():
   pub = messaging.Pub(["state_setpoint"])
