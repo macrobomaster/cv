@@ -85,18 +85,21 @@ def render(view, state, grid, inflated):
     cv2.rectangle(img, (p[0] - 6, p[1] - 6), (p[0] + 6, p[1] + 6), C_TAG, -1)
     cv2.putText(img, str(tid), (p[0] + 9, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, C_TEXT, 1)
 
-  for i, (gx, gy, _) in enumerate(state["goals"]):
+  for i, (gx, gy, lbl) in enumerate(state["goals"]):
     p = view.to_px(gx, gy)
     cv2.circle(img, p, 6, C_GOAL, -1)
-    cv2.putText(img, f"g{i}", (p[0] + 7, p[1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, C_TEXT, 1)
+    txt = f"{lbl or f'g{i}'} ({gx:.2f}, {gy:.2f})"
+    tx = p[0] - 8 - 9 * len(txt) if gx > view.x1 - 3.0 else p[0] + 8   # left-anchor near the right edge
+    cv2.putText(img, txt, (tx, p[1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, C_TEXT, 1)
 
   # pending wall corner + rubber-band to the mouse
   if state["mode"] == "walls" and state["pend"] is not None and state["mouse"] is not None:
     cv2.rectangle(img, view.to_px(*state["pend"]), view.to_px(*state["mouse"]), C_RUBBER, 1)
     cv2.circle(img, view.to_px(*state["pend"]), 4, C_PEND, -1)
 
-  hud = [f"mode: {state['mode'].upper()}   walls: {len(state['walls'])}   goals: {len(state['goals'])}   "
-         f"inflate: {ROBOT_RADIUS} m   out: {state['out']}",
+  mx, my = state["mouse"] if state["mouse"] is not None else (0.0, 0.0)
+  hud = [f"cursor: ({mx:.2f}, {my:.2f}) m      mode: {state['mode'].upper()}   "
+         f"walls: {len(state['walls'])}   goals: {len(state['goals'])}   out: {state['out']}",
          "[w]alls [g]oals  |  L-click add  R-click remove  |  [z]undo [x]clear [s]ave [l]oad [q]uit"]
   for i, line in enumerate(hud):
     cv2.putText(img, line, (12, 22 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5, C_TEXT, 1)
@@ -141,6 +144,7 @@ def main():
         else: state["walls"].append((state["pend"][0], state["pend"][1], w[0], w[1])); state["pend"] = None
       else:
         state["goals"].append((w[0], w[1], ""))
+        print(f"goal g{len(state['goals']) - 1} = [{w[0]:.2f}, {w[1]:.2f}]")   # paste into stated
     elif event == cv2.EVENT_RBUTTONDOWN:
       if state["mode"] == "walls":
         n = _nearest(state["walls"], w, lambda r: ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2))
