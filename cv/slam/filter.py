@@ -131,13 +131,19 @@ class PoseEKF:
     return self._apply(H, r, np.diag([_R_VEL, _R_VEL, _R_VZ]))
 
   def update_with_position(self, p_meas:np.ndarray, pos_std:float|None=None) -> float:
-    """Absolute position fix from an AprilTag (known field map). pos_std overrides
-    the measurement stddev — slamd scales it with the tag's range, since far PnP
-    is much noisier (a fixed small stddev makes every jittery fix yank p_w)."""
+    """Absolute HORIZONTAL position fix from an AprilTag (known field map). pos_std
+    overrides the measurement stddev — slamd scales it with the tag's range, since
+    far PnP is much noisier (a fixed small stddev makes every jittery fix yank p_w).
+
+    Only x,y are fused. The robot is a ground vehicle at ~constant height, and the
+    tag's z is the most R_CAM-tilt-sensitive / least useful component: a sub-degree
+    tilt error in the yaw-only camera makes the recovered height swing with gimbal
+    yaw. z is instead held by the planar vz=0 velocity constraint at its init value
+    (nav uses x,y only), so vertical can't wobble as the gimbal pans."""
     var = pos_std*pos_std if pos_std is not None else _R_POS
-    H = np.zeros((3, ERR_DIM)); H[:, 0:3] = _I3
-    r = np.asarray(p_meas, np.float64) - self.p_w
-    return self._apply(H, r, var * _I3)
+    H = np.zeros((2, ERR_DIM)); H[:, 0:2] = np.eye(2)
+    r = (np.asarray(p_meas, np.float64) - self.p_w)[:2]
+    return self._apply(H, r, var * np.eye(2))
 
   def update_with_yaw(self, r_yaw:float, yaw_std:float|None=None) -> float:
     """Absolute yaw fix from an AprilTag → corrects the δψ gimbal-yaw drift bias.
