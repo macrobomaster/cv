@@ -12,7 +12,7 @@ from ..system.core.logging import logger
 from ..system.core.keyvalue import kv_put
 from ..common.dataloader import BatchDesc, Dataloader
 from tinygrad.nn.optim import OptimizerGroup, Muon
-from ..common.optim import CLAMB, TrapezoidalWarmupLR, MasterWeights, CosineWarmupLR
+from ..common.optim import CLAMB, TrapezoidalWarmupLR, MasterWeights, CosineWarmupLR, SwitchEMA
 from .common import BASE_PATH
 from .model import Model
 from .data import get_train_files
@@ -27,6 +27,7 @@ ADAMW_END_LR = 1e-4
 MUON_START_LR = 1e-2 * math.sqrt(BS / 256)
 MUON_END_LR = 1e-3
 EPOCHS = 24
+EMA_MOMENTUM = 0.999
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def run():
@@ -92,6 +93,14 @@ def run():
       state_dict = safe_load(BASE_PATH / "intermediate" / f"optim_{ckpt}.safetensors")
       load_state_dict(optim, state_dict, strict=False)
 
+  # ema
+  model_ema = Model(temporal_size=T)
+  for _, x in get_state_dict(model_ema).items(): x.to_(GPUS)
+  me_sd, m_sd = get_state_dict(model_ema), get_state_dict(model)
+  for k in me_sd: me_sd[k].assign(m_sd[k].detach())
+  Tensor.realize(*me_sd.values())
+  switch_ema = SwitchEMA(model, model_ema, EPOCHS, STEPS_PER_EPOCH, momentum=EMA_MOMENTUM, master_opts=[muon_optim, adamw_decay, adamw_nodecay])
+
   for p in optim.params:
     p.grad = p.zeros_like().contiguous()
   grads = [p.grad for p in optim.params]
@@ -109,6 +118,7 @@ def run():
   @TinyJit
   def optim_step():
     optim.step()
+    switch_ema.update()
     grad_norm = Tensor.stack(*[g.float().square().sum() for g in grads]).sum().sqrt().contiguous()
 
     muon_lr_sched.step()
@@ -170,11 +180,12 @@ def run():
     if not getenv("VIZ"):
       logger.info(f"saving checkpoint for epoch {epoch} at {BASE_PATH / 'intermediate' / f'model_{epoch}.safetensors'}")
       safe_save(get_state_dict(model), str(BASE_PATH / f"intermediate/model_{epoch}.safetensors"))
+      safe_save(get_state_dict(model_ema), str(BASE_PATH / f"intermediate/ema_{epoch}.safetensors"))
       safe_save(get_state_dict(optim), str(BASE_PATH / f"intermediate/optim_{epoch}.safetensors"))
 
   if not getenv("VIZ"):
-    logger.info(f"final save to {BASE_PATH / 'model.safetensors'}")
-    with open(BASE_PATH / "intermediate" / f"model_{epoch}.safetensors", "rb") as f:
+    logger.info(f"final save (EMA weights) to {BASE_PATH / 'model.safetensors'}")
+    with open(BASE_PATH / "intermediate" / f"ema_{epoch}.safetensors", "rb") as f:
       with open(BASE_PATH / "model.safetensors", "wb") as f2: f2.write(f.read())
 
   wandb.finish()
