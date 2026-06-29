@@ -32,16 +32,22 @@ CX, CY = float(K[0, 2]), float(K[1, 2])
 # which lets noisy corners wobble the rotation and jitter the position) and undoes
 # the lever arm to return the yaw-axis (robot) position the filter tracks.
 #
-# From cv/tools/calib_slam_cam.py (bench: checkerboard + gimbal yaw sweep). Use
-# the R_CAM and T_CAM from the SAME run together — the bench can't see the
-# absolute heading about world-up (same unobservable as δψ), so both share one
-# heading gauge that the runtime δψ (yaw_offset, from tags) removes. T_CAM's
-# vertical part is unobservable on a yaw-only sweep (it doesn't move under yaw)
-# → 0; it doesn't affect planar position.
-R_CAM = np.array([[ 0.99582, -0.06652,  0.06261],
-                  [-0.06652, -0.0583 ,  0.99608],
+# From cv/tools/calib_slam_cam.py (bench: checkerboard + gimbal yaw sweep), in its
+# canonical HEADING GAUGE: the gauge is rotated about world-z so the optical axis
+# has zero azimuth — at heading 0 the camera looks along world +x. That makes the
+# runtime `heading` (gimbal_yaw + δψ) equal the camera's world-forward azimuth,
+# which is exactly what the wheel-velocity world rotation (filter: e_fwd =
+# Rz(heading)·x̂) and navd's gimbal_heading both assume. They treat the SLAM-cam
+# forward as the chassis forward — a ~parallel mount; a deliberately angled SLAM
+# cam would need that fixed yaw offset added here. The bench still can't see the
+# ABSOLUTE heading (where +x is in the world) — δψ (yaw_offset, from tags) supplies
+# it. Use R_CAM and T_CAM from the SAME run (shared gauge). T_CAM's vertical part
+# is unobservable on a yaw-only sweep → 0 (doesn't affect planar position); its xy
+# ≈ 0.188 m along −y = 19 cm to the right, matching the measured mount.
+R_CAM = np.array([[-0.00392, -0.06236,  0.99805],
+                  [-0.99803,  0.06273,  0.00000],
                   [-0.06261, -0.99608, -0.06248]], dtype=np.float32)
-T_CAM = np.array([0.18632, -0.02918, 0.0], dtype=np.float32)   # m; lever arm ≈ 189 mm (~19 cm right)
+T_CAM = np.array([-0.01743, -0.18778,  0.0], dtype=np.float32)   # m; ≈19 cm right of the yaw axis
 # Set True only if calib reported "gimbal-yaw sign FLIPPED vs Rz" (negates yaw in
 # R_wc). This calibration run was not flipped.
 YAW_FLIPPED = False

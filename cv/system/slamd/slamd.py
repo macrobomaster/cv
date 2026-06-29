@@ -23,8 +23,8 @@ Subs:
   apriltags:    {ct, detections}   (from tagd; PnP'd + fused here)
 
 Pubs:
-  slam_pose:  {t, p_w, v_w, q_wb(gimbal), cov_pos(3x3), n_tags}
-  slam_debug: {t, seen_tag_p}
+  slam_pose:  {t, p_w(yaw axis), v_w, q_wb(SLAM-cam = Rz·R_CAM), cov_pos(3x3), n_tags}
+  slam_debug: {t, seen_tag_p, p_cam(optical centre)}
 """
 import gc, time
 
@@ -60,6 +60,13 @@ def _gimbal_R_wb(yaw:float, pitch:float) -> np.ndarray:
   TODO: confirm yaw/pitch axis order + signs against the gimbal firmware."""
   return (rotz(yaw) @ roty(pitch) @ common.CAM_BASE_R).astype(np.float32)
 
+def _slam_cam(heading:float) -> tuple[np.ndarray, np.ndarray]:
+  """SLAM-camera pose pieces for the yaw-only mount: world<-camera orientation
+  R_wc = Rz(heading)·R_CAM, and the world lever-arm vector Rz(heading)·T_CAM so
+  p_cam_w = p_axis_w + lever. heading = gimbal_yaw + yaw_offset."""
+  Rz = rotz(-heading if common.YAW_FLIPPED else heading)
+  return (Rz @ common.R_CAM).astype(np.float32), (Rz @ common.T_CAM).astype(np.float32)
+
 def _tag_body_pose(tag_id:int, corners:np.ndarray, heading:float):
   """Position-only tag fix using the KNOWN camera orientation → (p_axis_w,
   yaw_meas, range) or None. The SLAM camera is yaw-only, so its world orientation
@@ -73,8 +80,7 @@ def _tag_body_pose(tag_id:int, corners:np.ndarray, heading:float):
   if entry is None: return None
   R_wt, t_wt = entry
   cor = corners.astype(np.float32)
-  h = -heading if common.YAW_FLIPPED else heading
-  R_wc = (rotz(h) @ common.R_CAM).astype(np.float32)            # world <- camera (known)
+  R_wc, lever = _slam_cam(heading)                              # world <- camera (known) + lever arm
   # back-project the 4 corners to world rays (all share the camera centre)
   uv1 = np.concatenate([cor, np.ones((4, 1), np.float32)], axis=1)
   d_w = (R_wc @ (common.K_INV @ uv1.T)).T                       # (4,3) world rays
@@ -95,7 +101,7 @@ def _tag_body_pose(tag_id:int, corners:np.ndarray, heading:float):
   R_yaw = (R_wt @ cv2.Rodrigues(rvec)[0].T) @ common.R_CAM.T
   h_meas = float(np.arctan2(R_yaw[1, 0], R_yaw[0, 0]))
   yaw_meas = -h_meas if common.YAW_FLIPPED else h_meas
-  p_axis_w = p_cam_w - rotz(h) @ common.T_CAM                   # undo lever arm → yaw axis
+  p_axis_w = p_cam_w - lever                                    # undo lever arm → yaw axis
   return p_axis_w.astype(np.float32), yaw_meas, rng
 
 # ---------------------------------------------------------------------------
@@ -197,11 +203,19 @@ def run():
       d_imu = d_tags = d_loop = d_vel = 0; d_acc_mag = d_aw_z = 0.0; d_acc_n = 0
 
     # --- Publish ------------------------------------------------------------
+    # q_wb is the SLAM-camera world orientation Rz(heading)·R_CAM (yaw-only, fixed
+    # tilt) — NOT the CAM_BASE_R IMU base (that drives the accel predict only).
+    # navd reads the chassis-forward azimuth from this, and the wheel-velocity
+    # update rotates by the same `heading`, so they must share the R_CAM frame the
+    # tag yaw-fix anchors. p_cam (= yaw axis + lever arm) lets the viz draw the
+    # real camera swinging off the (steady) yaw axis as the gimbal pans.
+    R_wc_pub, lever_pub = _slam_cam(gimbal_yaw + yaw_offset)
     pub.send("slam_pose", {
       "t": now,
       "p_w": st.p_w.tolist(), "v_w": st.v_w.tolist(),
-      "q_wb": _R_to_quat_np(R_wb).tolist(),
+      "q_wb": _R_to_quat_np(R_wc_pub).tolist(),
       "cov_pos": st.P[0:3, 0:3].flatten().tolist(),
       "n_tags": n_tags_total,
     })
-    pub.send("slam_debug", {"t": now, "seen_tag_p": seen_tag_p})
+    pub.send("slam_debug", {"t": now, "seen_tag_p": seen_tag_p,
+                            "p_cam": (st.p_w + lever_pub).astype(np.float32).tolist()})
