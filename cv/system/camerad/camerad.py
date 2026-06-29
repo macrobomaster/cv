@@ -12,7 +12,7 @@ from ...common.camera import setup_aravis, get_aravis_frame_view, latch_timestam
 from ..plated.plated import REAL_CAMERA_MATRIX, REAL_DIST_COEFFS, REAL_CALIB_W
 from ...autoaim.common import CANONICAL_CAMERA_MATRIX, IMG_H, IMG_W
 
-CAPTURE_MID_EXPOSURE = 6000 / 2000000
+CAPTURE_MID_EXPOSURE = 4000 / 2000000
 OPENCV_THREADS = getenv("OPENCV_THREADS", 1)
 
 def _build_undistort_maps(src_w, src_h):
