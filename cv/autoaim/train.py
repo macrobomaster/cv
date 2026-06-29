@@ -26,7 +26,7 @@ ADAMW_START_LR = 1e-3 * math.sqrt(BS / 256)
 ADAMW_END_LR = 1e-4
 MUON_START_LR = 1e-2 * math.sqrt(BS / 256)
 MUON_END_LR = 1e-3
-EPOCHS = 20
+EPOCHS = 24
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def run():
