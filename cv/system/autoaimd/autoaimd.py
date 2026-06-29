@@ -18,13 +18,15 @@ HALF = getenv("HALF", 0)
 BEAM = getenv("BEAM", 0) or getenv("JITBEAM", 0)
 FUSE = getenv("FUSE", 0)
 TARGET_COLOR = getenv("TARGET_COLOR", 1)
+COLOR_TO_ID = {"red": 0, "blue": 1}
+ID_TO_COLOR = {0: "red", 1: "blue"}
 
 VALID_REL_ERR = 0.10
 VALID_CONF_THRESH = math.exp(-MAL_GAMMA * VALID_REL_ERR / QUALITY_TAU)
 
 def run():
   pub = messaging.Pub(["autoaim"])
-  sub = messaging.Sub(["camera_feed"])
+  sub = messaging.Sub(["camera_feed", "team_color"], poll="camera_feed")
 
   Tensor.training = False
   if getenv("HALF", 0) == 1:
@@ -60,6 +62,8 @@ def run():
   model_fn: Callable[[Any, Tensor, Tensor], Tensor] = pickle.loads(kv_get("autoaim", model_key))
 
   color_names = {0: "none", 1: "red", 2: "blue"}
+  target_color = TARGET_COLOR
+  team_color = None
 
   infer = TemporalInference(model_fn, T=T)
   fid = 0
@@ -76,7 +80,17 @@ def run():
       framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON")
       ft = time.monotonic()
 
-      model_out = infer(framet, target_color=TARGET_COLOR)
+      if sub.updated["team_color"]:
+        team_color = sub["team_color"]
+        if team_color in COLOR_TO_ID:
+          # team_color is our alliance; the model target is the enemy armor color.
+          target_color = 1 - COLOR_TO_ID[team_color]
+          logger.info(f"autoaimd: team={team_color}, target={ID_TO_COLOR[target_color]}")
+        else:
+          logger.warning(f"autoaimd: unknown team_color {team_color!r}; "
+                         f"keeping target={ID_TO_COLOR.get(target_color, target_color)}")
+
+      model_out = infer(framet, target_color=target_color)
       mt = time.monotonic()
 
       class_id = int(model_out[0])
@@ -97,6 +111,8 @@ def run():
         "confidence": confidence,
         "detected": detected,
         "color": color_name,
+        "team_color": team_color,
+        "target_color": ID_TO_COLOR.get(target_color, target_color),
         "number": number,
         "corners": corners,
         "corner_lo": corner_lo,
