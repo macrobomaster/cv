@@ -17,10 +17,6 @@ from ...autoaim.common import (
   AIM_GAINS, AIM_I_CLAMP, AIM_FF_DT, AIM_D_TAU,
 )
 
-# Chassis
-MAINTAIN_DIST = 2.0
-CHASE_SPEED = 2.0
-
 # Aim / trigger tunings
 TOL_STATIC = math.radians(0.7)        # |aim_error| below this to commit a STATIC/LINEAR shot
 TOL_SPIN = math.radians(1.0)          # tighter angular hold for SPIN
@@ -248,27 +244,6 @@ class TriggerGate:
     self.reason = f"class={cls}?"
     return False
 
-# --- Chassis chase (preserve previous behavior, retarget to gimbal-inertial pos) ---
-
-class ChassisController:
-  def step(self, plate:dict) -> dict:
-    if plate["class"] in ("LOST", "UNKNOWN"):
-      return {"x": 0.0, "z": 0.0}
-    pos = np.array(plate["pos_gi"])
-    dist = float(math.hypot(pos[0], pos[2]))
-    cv = {"x": 0.0, "z": 0.0}
-    if dist > MAINTAIN_DIST + 0.1:
-      cv["x"] = min(CHASE_SPEED, dist - MAINTAIN_DIST)
-    elif dist < MAINTAIN_DIST - 0.1:
-      cv["x"] = -min(CHASE_SPEED, MAINTAIN_DIST - dist)
-    # Chassis yaw sign convention matches the old decisiond: chassis_velocity.z>0 turns toward
-    # positive-z (left) targets. (Aim yaw uses the opposite sign because it follows the gimbal
-    # R_yaw convention; chassis yaw is a separate firmware contract.)
-    yaw_to_target = math.atan2(pos[2], pos[0])
-    if abs(yaw_to_target) > math.radians(3.0):
-      cv["z"] = math.copysign(min(CHASE_SPEED, abs(yaw_to_target) / math.radians(5)), yaw_to_target)
-    return cv
-
 # --- Gimbal tracking controller (rate/joystick output) ---
 
 class AxisPID:
@@ -304,13 +279,12 @@ class AxisPID:
 # --- Daemon entry point ---
 
 def run():
-  pub = messaging.Pub(["aim_error", "aim_angle", "chassis_velocity", "shoot"])
+  pub = messaging.Pub(["aim_error", "aim_angle", "shoot"])
   sub = messaging.Sub(["plate"], poll="plate")
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
 
   trigger = TriggerGate()
-  # chassis = ChassisController()
   yaw_pid = AxisPID(**AIM_GAINS["yaw"], i_clamp=AIM_I_CLAMP, d_tau=AIM_D_TAU)
   pitch_pid = AxisPID(**AIM_GAINS["pitch"], i_clamp=AIM_I_CLAMP, d_tau=AIM_D_TAU)
 
@@ -352,7 +326,6 @@ def run():
       yaw_pid.reset(); pitch_pid.reset(); last_t = None
       pub.send("aim_error", {"x": 0.0, "y": 0.0})
       pub.send("shoot", False)
-      pub.send("chassis_velocity", {"x": 0.0, "z": 0.0})
       if t_now - last_diag > 1.0:
         logger.info(f"no-fire: class={cls} (no targetable plate)"); last_diag = t_now
       continue
@@ -401,4 +374,3 @@ def run():
     pub.send("aim_error", {"x": aim_x, "y": aim_y})
     pub.send("aim_angle", {"x": math.degrees(yaw_gi_cmd), "y": math.degrees(pitch_cmd)})
     pub.send("shoot", fire)
-    # pub.send("chassis_velocity", chassis.step(plate))
