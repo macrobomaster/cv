@@ -100,6 +100,7 @@ class Sub:
     self.updated = {service: False for service in self.services}
     self.alive_checker = {service: AliveChecker() for service in self.services}
     self.alive = {service: False for service in self.services}
+    self.now = time.monotonic()
 
   def __getitem__(self, service:str):
     return self.data[service]
@@ -139,6 +140,7 @@ class Sub:
         self.alive_checker[service].update(t)
       if self.data[service] is not None:
         self.alive[service] = self.alive_checker[service].alive(t)
+    self.now = time.monotonic()
 
 class PushPull:
   def __init__(self, service:str):
