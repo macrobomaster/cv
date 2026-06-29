@@ -2,7 +2,7 @@
 
 For now this only owns armor search:
   SCAN: sweep +/-45 deg, turn 180 deg, then sweep the opposite half while autoaim sees no usable plate.
-  YIELD: publish nothing once autoaim sees a plate; decisiond owns all aiming.
+  YIELD: publish nothing for a short acquisition window after autoaim sees a plate; decisiond owns all aiming.
 
 Publishes a `state_setpoint` consumed by gimbald. gimbald still arbitrates priority, so decisiond's
 `aim_setpoint` can override this when enabled.
@@ -17,10 +17,10 @@ SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
 SCAN_SWEEP_DT = 2.0
 SCAN_TURN_DT = 1.0
 SCAN_PITCH = 0.0
-AUTOAIM_TIMEOUT = 0.25
+ACQUIRE_HOLD_DT = 0.8
 
-def _sees_plate(autoaim:dict|None, last_autoaim_t:float, now:float) -> bool:
-  return autoaim is not None and autoaim.get("valid", False) and now - last_autoaim_t < AUTOAIM_TIMEOUT
+def _recently_saw_plate(last_valid_t:float, now:float) -> bool:
+  return now - last_valid_t < ACQUIRE_HOLD_DT
 
 def _scan_setpoint(t:float, center:float, start_t:float) -> dict:
   cycle_dt = SCAN_SWEEP_DT + SCAN_TURN_DT
@@ -45,7 +45,7 @@ def run():
   scan_center = 0.0
   scan_start_t = time.monotonic()
   have_scan_center = False
-  last_autoaim_t = -math.inf
+  last_valid_t = -math.inf
   last_diag = 0.0
 
   while True:
@@ -57,10 +57,10 @@ def run():
       scan_center = gs["yaw_gi"]
       have_scan_center = True
 
-    if sub.updated["autoaim"]: last_autoaim_t = now
     autoaim = sub["autoaim"]
+    if sub.updated["autoaim"] and autoaim is not None and autoaim.get("valid", False): last_valid_t = now
 
-    next_mode = "YIELD" if _sees_plate(autoaim, last_autoaim_t, now) else "SCAN"
+    next_mode = "YIELD" if _recently_saw_plate(last_valid_t, now) else "SCAN"
     if next_mode != mode:
       if next_mode == "SCAN":
         if gs is not None: scan_center = gs["yaw_gi"]
@@ -73,5 +73,5 @@ def run():
 
     if now - last_diag > 1.0:
       valid = autoaim.get("valid") if autoaim is not None else None
-      logger.info(f"stated: mode={mode} autoaim_valid={valid}")
+      logger.info(f"stated: mode={mode} autoaim_valid={valid} last_valid={now - last_valid_t:.2f}s")
       last_diag = now
