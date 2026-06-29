@@ -1,30 +1,32 @@
-"""Navigation daemon — play a sequence of standoff waypoints around known tags.
+"""Navigation daemon — drive the chassis to an injected goal via a planned, obstacle-aware path.
 
-Each waypoint is a fixed world point a given distance out in front of a surveyed
-tag's face (`slam.common.TAG_FIELD_MAP`). A WaypointPlayer walks the mission in
-order, advancing to the next once the robot has settled at the current one. navd
-reads the robot's localized pose from slamd (`slam_pose`), drives the chassis to
-close the world-frame position error to the active waypoint, and stops once the
-mission is done. No camera/PnP here — detection feeds slamd's localization; navd
-just consumes the resulting pose.
+The goal is a world point set by `nav_goal` (decisiond / the state machine deciding "go home",
+"center", a tag standoff, …; latest wins, sticky), with an optional startup seed. navd plans an
+any-angle path to it around static walls — and dynamic obstacles like other robots, TODO — on an
+occupancy grid (`cv/nav`), and follows it with pure pursuit, REPLANNING each cycle (receding
+horizon) so it reacts to a new goal or a changed map. With no map configured it drives straight
+to the goal. No goal ⇒ idle.
 
-Current mission (MISSION): hold 2.5 m in front of tag #6, then 1.5 m in front.
+navd reads the robot's localized pose from slamd (`slam_pose`); no camera/PnP here —
+detection feeds slamd's localization, navd just consumes the pose.
 
-The chassis is holonomic; `chassis_velocity` is {x: forward, y: left} m/s
-referenced to the GIMBAL heading (the board rotates chassis→gimbal). So we rotate
-the world position error into the gimbal-heading frame (from slam_pose's q_wb) and
-command it directly. Chassis orientation is not controlled — position only.
+The chassis is holonomic; `chassis_velocity` is {x: forward, y: left} m/s referenced to the
+GIMBAL heading (the board rotates chassis→gimbal). We rotate the world-frame velocity toward
+the path's lookahead point into that gimbal frame and command it. Chassis orientation is not
+controlled — position only.
 
-While navigating we also point the gimbal at the best nearby tag (closest +
-most face-on) so the SLAM camera keeps an absolute anchor in view. navd doesn't
-drive the gimbal directly — it publishes a `nav_setpoint` and gimbald arbitrates
-(aim_setpoint from decisiond outranks it) and runs the PID. The look-at runs even
-while holding position, so localization stays anchored at a waypoint too.
+While navigating we also point the gimbal at the best nearby tag (closest + most face-on) so
+the SLAM camera keeps an absolute anchor in view. navd publishes a `nav_setpoint` and gimbald
+arbitrates (aim_setpoint from decisiond outranks it). The look-at runs while holding too.
 
 Subs:  slam_pose:        {t, p_w, v_w, q_wb, cov_pos, n_tags}   (from slamd)
+       nav_goal:         {x, y, label?}                         (injected goal; latest wins, sticky)
+       plate:            {class, pos_gi, spin, ...}             (enemy robot → dynamic obstacle)
        gimbal_state:     {yaw_gi, ...}                          (latest; for the absolute yaw setpoint)
 Pubs:  chassis_velocity: {x, y}   (x = forward, y = left, m/s; commsd → MOVE_ROBOT)
        nav_setpoint:     {yaw, pitch, yaw_ff, pitch_ff}         (gimbal target; gimbald → aim_error)
+       nav_debug:        {goal, path, obstacles}                (for visual_slam)
+Map:   NAV_MAP env → JSON {bounds:[x0,y0,x1,y1], res, robot_radius?, walls:[{rect|poly}]}  (optional)
 """
 import gc, os, json, math, time
 
@@ -36,38 +38,68 @@ from ..core.keyvalue import kv_put
 from ..common.geometry import wrap_pi
 from ..common.gimbal import GimbalBuffer
 from ...slam import common
+from ...nav.occupancy import OccupancyGrid
+from ...nav import planner
+from ...nav.obstacles import RobotObstacles
 
 NAV_TAG_ID = 6
-# Mission: (tag_id, standoff_m) waypoints, held in order.
-MISSION = [(NAV_TAG_ID, 2.5), (NAV_TAG_ID, 2)]
-LOOP = False                 # True ⇒ restart the mission after the last waypoint (never finishes)
+# Startup goal seed (tag_id, standoff_m), or None to idle until a nav_goal is injected.
+# decisiond's nav_goal overrides this — it's just so navd does something standalone.
+DEFAULT_GOAL = (NAV_TAG_ID, 2.5)
 
-ARRIVE_RADIUS = 0.15         # m, within this of a waypoint counts as "at" it (> POS_DEADBAND)
-ARRIVE_DWELL = 0.3           # s, must stay inside ARRIVE_RADIUS this long before advancing
-POS_DEADBAND = 0.10          # m, profile brakes to a stop here; no command inside it
+POS_DEADBAND = 0.10          # m, pure-pursuit brakes to a stop here; "arrived" inside it
 V_MAX = 1.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
 ACCEL = 0.6                  # m/s², trapezoid accel = decel ramp rate
 MAX_DT = 0.2                 # s, clamp on the loop dt used for the accel ramp (guards stalls)
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
 LOOKAHEAD = 0.4              # m, pure-pursuit lookahead (larger = smoother, cuts corners more)
 PROJECT_WINDOW = 1.5         # m, forward arc-length window when re-projecting progress onto the path
+ROBOT_RADIUS = 0.28          # m, obstacle inflation (RoboMaster half-footprint) for planning
+PLAN_DT = 0.2                # s, replan period (5 Hz receding horizon → reacts to goal/map changes)
+ENEMY_RADIUS = 0.30          # m, painted radius of a detected enemy robot obstacle (its half-footprint)
+ENEMY_AGE_GROWTH = 0.4       # m per s of staleness — a stale detection inflates (the robot may have moved)
 
 LOOK_AT_TAG = True           # point the gimbal at the best face-on tag to keep SLAM anchored
 VIEW_MIN_ALIGN = 0.2         # min cos(tag-normal vs line-of-sight): skip tags seen too obliquely (poor PnP)
 VIEW_MAX_RANGE = common.TAG_MAX_RANGE   # m, ignore tags beyond useful PnP range
 LOOK_PITCH = 0.0             # rad, gravity-relative pitch setpoint (level; the SLAM cam is yaw-only anyway)
 
-def load_nav_path():
-  """A drawn path from the path_editor tool, via the NAV_PATH env var (JSON with a
-  world-XY "path"). Returns (waypoints, is_curve) or None to fall back to MISSION."""
-  p = os.environ.get("NAV_PATH")
-  if not p: return None
+def load_map():
+  """Static obstacle map for planning. NAV_MAP env → JSON (bounds, res, walls); with none,
+  an empty grid over the 12×8 field (FIELD_BOUNDS) so dynamic obstacles still work. Returns
+  (OccupancyGrid, robot_radius)."""
+  p = os.environ.get("NAV_MAP")
+  if not p:
+    return OccupancyGrid(*common.FIELD_BOUNDS, 0.10), ROBOT_RADIUS
   try:
     with open(p) as f: data = json.load(f)
   except (OSError, json.JSONDecodeError) as e:
-    logger.warning(f"navd: NAV_PATH {p} unreadable ({e}); using built-in MISSION"); return None
-  pts = [np.asarray(xy, np.float64) for xy in data.get("path", [])]
-  return (pts, bool(data.get("curve", False))) if pts else None
+    logger.warning(f"navd: NAV_MAP {p} unreadable ({e}); empty field grid")
+    return OccupancyGrid(*common.FIELD_BOUNDS, 0.10), ROBOT_RADIUS
+  x0, y0, x1, y1 = data["bounds"]
+  g = OccupancyGrid(x0, y0, x1, y1, data.get("res", 0.10))
+  for w in data.get("walls", []):
+    if "rect" in w: g.add_rect(*w["rect"])
+    elif "poly" in w: g.add_poly(w["poly"])
+  logger.info(f"navd: map {g.nx}x{g.ny} @ {g.res}m, {len(data.get('walls', []))} walls")
+  return g, float(data.get("robot_radius", ROBOT_RADIUS))
+
+def plan_path(static_grid, robot_radius, p_xy, goal_xy, robots=()):
+  """Plan an obstacle-aware path from p_xy to goal_xy (world XY), or None if blocked. `robots`
+  = (x, y, radius) circles for detected enemies, painted onto a copy before inflating."""
+  g = static_grid.copy()
+  for rx, ry, rad in robots:
+    g.add_circle(rx, ry, rad)
+  return planner.plan(g.inflated(robot_radius), p_xy, goal_xy)
+
+def enemy_center_gi(plate):
+  """Enemy robot CENTER in the gimbal-inertial frame from a plate msg (x, y), or None for a
+  lost/empty track. SPIN → the estimated spin centre c_0 (stable); else the plate position."""
+  cls = plate.get("class")
+  if cls in (None, "LOST", "UNKNOWN"): return None
+  spin = plate.get("spin")
+  c = spin["c_0"] if cls == "SPIN" and spin else plate.get("pos_gi")
+  return (float(c[0]), float(c[1])) if c is not None else None
 
 def tag_standoff(tag_id:int, dist:float) -> np.ndarray:
   """World-XY point `dist` metres out along tag `tag_id`'s outward face normal.
@@ -76,34 +108,6 @@ def tag_standoff(tag_id:int, dist:float) -> np.ndarray:
   R_wt, t_wt = common.TAG_FIELD_MAP[tag_id]
   n = R_wt[:2, 2]
   return (t_wt[:2] + dist * n / (np.linalg.norm(n) + 1e-9)).astype(np.float64)
-
-class WaypointPlayer:
-  """Plays a fixed list of world-XY goals in order. update(p_xy, now) returns the
-  active goal (None once the mission is done), advancing to the next goal after the
-  robot has stayed within ARRIVE_RADIUS of the current one for ARRIVE_DWELL. With
-  loop=True it wraps back to the first waypoint instead of finishing."""
-  def __init__(self, waypoints, arrive_radius=ARRIVE_RADIUS, dwell=ARRIVE_DWELL, loop=False):
-    self.waypoints = list(waypoints)
-    self.arrive_radius = arrive_radius
-    self.dwell = dwell
-    self.loop = loop
-    self.idx = 0
-    self.since = None          # time we entered the arrive radius (None if outside)
-
-  def goal(self):
-    return None if self.idx >= len(self.waypoints) else self.waypoints[self.idx]
-
-  def update(self, p_xy:np.ndarray, now:float):
-    g = self.goal()
-    if g is None: return None
-    if float(math.hypot(*(g - p_xy))) <= self.arrive_radius:
-      if self.since is None: self.since = now
-      if now - self.since >= self.dwell:
-        self.idx += 1; self.since = None
-        if self.loop and self.idx >= len(self.waypoints): self.idx = 0
-    else:
-      self.since = None
-    return self.goal()
 
 class PurePursuit:
   """Follows a polyline path by chasing a lookahead point that slides along it.
@@ -204,29 +208,24 @@ def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_at_pose:float
 
 def run():
   gc.disable()
-  pub = messaging.Pub(["chassis_velocity", "nav_setpoint"])
-  sub = messaging.Sub(["slam_pose"], poll="slam_pose")
+  pub = messaging.Pub(["chassis_velocity", "nav_setpoint", "nav_debug"])
+  # nav_goal (injected destination) and plate (enemy robot detections) are non-polled latest-wins.
+  sub = messaging.Sub(["slam_pose", "nav_goal", "plate"], poll="slam_pose")
   # gimbal_state non-conflated + buffered so we can sample yaw_gi at the slam pose's
   # capture time — the SAME instant as q_wb/psi. (Latest yaw_gi vs a lagged q_wb-heading
   # corrupts the world↔gimbal offset during a slew → the look-at setpoint overshoots.)
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
-  # A drawn path (NAV_PATH, ≥2 pts) is followed smoothly with PurePursuit. The
-  # tag-standoff MISSION uses WaypointPlayer instead — it WANTS to stop and hold at
-  # each standoff, whereas pure pursuit flows straight through to the path end.
-  np_path = load_nav_path()
-  player = pursuit = None
-  if np_path is not None and len(np_path[0]) >= 2:
-    waypoints, is_curve = np_path
-    pursuit = PurePursuit(waypoints, loop=LOOP)
-    logger.info(f"navd: pure-pursuit NAV_PATH — {len(waypoints)} pts, {pursuit.total:.1f} m "
-                f"({'curve' if is_curve else 'straight'}{', loop' if LOOP else ''})")
-  else:
-    player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION], loop=LOOP)
-    logger.info("navd: mission " + " → ".join(
-      f"{d:.1f}m@tag{t} {w.round(2).tolist()}" for (t, d), w in zip(MISSION, player.waypoints)))
-  last_wd = last_diag = last_pose_t = 0.0
-  last_idx = -1
+  obstacles = RobotObstacles()
+
+  static_grid, robot_radius = load_map()
+  injected = tag_standoff(*DEFAULT_GOAL) if DEFAULT_GOAL else None   # startup seed; nav_goal overrides
+  inj_label = "default"
+  logger.info(f"navd: goal mode {'[' + str(int(static_grid.occ.sum())) + ' wall cells]' if static_grid.occ.any() else '[open field]'}"
+              + (f", seed {injected.round(2).tolist()}" if injected is not None else ", idle until nav_goal"))
+
+  pursuit = last_goal = None
+  last_wd = last_diag = last_pose_t = last_plan = 0.0
   v_prev = 0.0                                                # last commanded speed (for the accel ramp)
   last_t = time.monotonic()
 
@@ -265,26 +264,44 @@ def run():
         sp, look_tag = res
         pub.send("nav_setpoint", sp)
 
-    # --- Chassis nav: pick the target point to drive at + the distance to brake
-    # against. PurePursuit → a lookahead point sliding along the path, braking on the
-    # remaining arc length (stops only at the path end). WaypointPlayer → the active
-    # waypoint, braking on straight-line distance (stops and holds at each).
-    if pursuit is not None:
-      target, brake = (None, 0.0) if pursuit.done(p_xy) else pursuit.update(p_xy)
-      prog = f"path {100.0 * pursuit.s / pursuit.total:.0f}%" if pursuit.total > 0 else "path"
-    else:
-      goal = player.update(p_xy, now)
-      if player.idx != last_idx:
-        logger.info(f"navd: waypoint {player.idx}/{len(MISSION)} " +
-                    ("complete, holding" if goal is None else f"→ {goal.round(2).tolist()}"))
-        last_idx = player.idx
-      target = goal
-      brake = float(math.hypot(*(goal - p_xy))) if goal is not None else 0.0
-      prog = f"wp{player.idx}"
+    # --- Dynamic obstacles: persist detected enemy robots in the world frame. plated gives
+    # the enemy CENTER in gimbal-inertial; rotate into world by ψ0 = ψ_world − yaw_gi (the
+    # gimbal-inertial→world azimuth, which is slew-INVARIANT so detection latency is fine).
+    # TODO HW-verify: place a robot at a known spot, confirm the obstacle lands there.
+    plate = sub["plate"]
+    if plate is not None and sub.updated["plate"] and fwd is not None and gp is not None:
+      c_gi = enemy_center_gi(plate)
+      if c_gi is not None:
+        psi0 = math.atan2(fwd[1], fwd[0]) - gp[0]
+        cs, sn = math.cos(psi0), math.sin(psi0)
+        obstacles.update(p_xy[0] + cs * c_gi[0] - sn * c_gi[1],
+                         p_xy[1] + sn * c_gi[0] + cs * c_gi[1], now)
 
-    if target is None or fwd is None:                        # arrived/finished, or gimbal ~vertical
+    # --- Chassis nav: plan an obstacle-aware path to the current goal (injected nav_goal)
+    # and follow it with pure pursuit, replanning on goal/map change or the PLAN_DT timer
+    # (receding horizon — each plan starts at the live pose, so pure pursuit follows between).
+    ng = sub["nav_goal"]
+    if ng is not None and sub.updated["nav_goal"]:
+      injected = np.array([float(ng["x"]), float(ng["y"])]); inj_label = ng.get("label", "goal")
+    goal_xy = injected
+    robots = [(x, y, ENEMY_RADIUS + ENEMY_AGE_GROWTH * age) for x, y, age in obstacles.active(now)]
+    if goal_xy is not None and (last_goal is None or pursuit is None
+                                or not np.allclose(goal_xy, last_goal) or now - last_plan > PLAN_DT):
+      path = plan_path(static_grid, robot_radius, p_xy, goal_xy, robots)
+      pursuit = PurePursuit(path) if path is not None and len(path) >= 2 else None
+      if pursuit is None and now - last_diag > 1.0:
+        logger.info(f"navd: no path to {np.round(goal_xy, 2).tolist()} ({inj_label}) — blocked"); last_diag = now
+      last_goal = np.asarray(goal_xy, np.float64).copy(); last_plan = now
+
+    pub.send("nav_debug", {"t": now,
+      "goal": goal_xy.tolist() if goal_xy is not None else None,
+      "path": pursuit.P.tolist() if pursuit is not None else [],
+      "obstacles": [[x, y, r] for x, y, r in robots]})
+
+    if goal_xy is None or pursuit is None or fwd is None or pursuit.done(p_xy):  # idle/blocked/arrived
       pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0
       continue
+    target, brake = pursuit.update(p_xy)
     left = (-fwd[1], fwd[0])
 
     # Trapezoidal speed profile on the brake distance: cap at V_MAX (cruise), brake on
@@ -304,6 +321,6 @@ def run():
     pub.send("chassis_velocity", {"x": x, "y": y})
 
     if now - last_diag > 1.0:
-      logger.info(f"navd: {prog} brake={brake:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}"
+      logger.info(f"navd: goal:{inj_label} brake={brake:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}"
                   + (f"  look@tag{look_tag}" if look_tag is not None else "  look:none"))
       last_diag = now

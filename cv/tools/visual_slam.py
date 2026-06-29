@@ -3,13 +3,15 @@
 Run with:
   python -m cv.tools.visual_slam <addr>
 
-Subscribes to camera_feed, apriltags, slam_pose, slam_debug. Shows:
+Subscribes to camera_feed, apriltags, slam_pose, slam_debug, nav_debug. Shows:
   - 2D camera view with AprilTag detections (from tagd's apriltags topic)
   - 3D world: robot trajectory, current pose marker, known field AprilTags,
     and tags actually used for a fix this frame (slam_debug.seen_tag_p)
+  - Nav: the field boundary + walls (NAV_MAP), the active goal, planned path,
+    and detected enemy-robot obstacle circles (navd's nav_debug)
   - Scalars: number of tags fixed, position-stddev
 """
-import sys, gc, time
+import sys, os, gc, json, time
 from collections import deque
 
 import numpy as np
@@ -60,7 +62,25 @@ def main():
            rr.Points3D(tag_pts, colors=[(200, 200, 200)], radii=0.05, labels=tag_lbls),
            static=True)
 
-  sub = messaging.Sub(["camera_feed", "slam_pose", "slam_debug", "apriltags"],
+  # Static nav map: the 12×8 field boundary + walls/named goals from NAV_MAP (what navd plans on).
+  fx0, fy0, fx1, fy1 = common.FIELD_BOUNDS
+  rr.log("world/field", rr.LineStrips3D([[[fx0, fy0, 0], [fx1, fy0, 0], [fx1, fy1, 0], [fx0, fy1, 0],
+         [fx0, fy0, 0]]], colors=[(110, 110, 110)], radii=[0.012]), static=True)
+  try:
+    with open(os.environ["NAV_MAP"]) as f: nav_map = json.load(f)
+  except (KeyError, OSError, json.JSONDecodeError): nav_map = {}
+  rects = [w["rect"] for w in nav_map.get("walls", []) if "rect" in w]
+  if rects:
+    rr.log("world/walls", rr.Boxes3D(
+      centers=[[(r[0] + r[2]) / 2, (r[1] + r[3]) / 2, 0.15] for r in rects],
+      half_sizes=[[abs(r[2] - r[0]) / 2, abs(r[3] - r[1]) / 2, 0.15] for r in rects],
+      colors=[(90, 90, 90)]), static=True)
+  if nav_map.get("goals"):
+    rr.log("world/named_goals", rr.Points3D([[g["x"], g["y"], 0] for g in nav_map["goals"]],
+           colors=[(180, 120, 255)], radii=0.07, labels=[g.get("label", "") for g in nav_map["goals"]]),
+           static=True)
+
+  sub = messaging.Sub(["camera_feed", "slam_pose", "slam_debug", "apriltags", "nav_debug"],
                       poll="camera_feed", addr=addr)
   fk = FrequencyKeeper(30)
 
@@ -144,6 +164,19 @@ def main():
         rr.log("world/slam_cam", rr.Transform3D(translation=pc, quaternion=_q_wxyz_to_scipy(last_q)))
         if last_p_w is not None:
           rr.log("world/lever_arm", rr.LineStrips3D([[last_p_w, pc]], colors=[(255, 160, 0)], radii=[0.012]))
+
+    # --- Nav debug: active goal, planned path, dynamic obstacle circles ----
+    nav = sub["nav_debug"]
+    if nav is not None and sub.updated["nav_debug"]:
+      g = nav.get("goal")
+      rr.log("world/nav_goal", rr.Points3D([[g[0], g[1], 0.0]], colors=[(255, 0, 255)], radii=0.10)
+             if g is not None else rr.Clear(recursive=True))
+      path = nav.get("path") or []
+      rr.log("world/nav_path", rr.LineStrips3D([[[x, y, 0.02] for x, y in path]], colors=[(0, 220, 0)],
+             radii=[0.02]) if len(path) >= 2 else rr.Clear(recursive=True))
+      obs = nav.get("obstacles") or []
+      rr.log("world/nav_obstacles", rr.Points3D([[o[0], o[1], 0.1] for o in obs], colors=[(255, 60, 60)],
+             radii=[o[2] for o in obs]) if obs else rr.Clear(recursive=True))
 
     for k, v in sub.alive.items():
       rr.log(f"alive/{k}", rr.Scalars(int(v)))
