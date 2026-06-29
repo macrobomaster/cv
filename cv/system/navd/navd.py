@@ -15,9 +15,11 @@ GIMBAL heading (the board rotates chassis→gimbal). We rotate the world-frame v
 the path's lookahead point into that gimbal frame and command it. Chassis orientation is not
 controlled — position only.
 
-While navigating we also point the gimbal at the best nearby tag (closest + most face-on) so
-the SLAM camera keeps an absolute anchor in view. navd publishes a `nav_setpoint` and gimbald
-arbitrates (aim_setpoint from decisiond outranks it). The look-at runs while holding too.
+While ACTIVELY navigating (driving to a goal) we also point the gimbal at the best nearby tag
+(closest + most face-on) so the SLAM camera keeps an absolute anchor in view — that's when
+ego-motion makes localization drift matter. navd publishes `nav_setpoint` and gimbald arbitrates
+(aim_setpoint from decisiond outranks it). When idle/holding/arrived navd publishes NOTHING, so the
+gimbal is free for decisiond's aim or the state machine's scan.
 
 Subs:  slam_pose:        {t, p_w, v_w, q_wb, cov_pos, n_tags}   (from slamd)
        nav_goal:         {x, y, label?}                         (injected goal; latest wins, sticky)
@@ -42,10 +44,10 @@ from ...nav.occupancy import OccupancyGrid
 from ...nav import planner
 from ...nav.obstacles import RobotObstacles
 
-NAV_TAG_ID = 6
-# Startup goal seed (tag_id, standoff_m), or None to idle until a nav_goal is injected.
-# decisiond's nav_goal overrides this — it's just so navd does something standalone.
-DEFAULT_GOAL = (NAV_TAG_ID, 2.5)
+# No default goal → navd HOLDS POSITION (idle, zero chassis velocity) until the state machine
+# injects a nav_goal. Set to a (tag_id, standoff_m) tuple, e.g. (6, 2.5), only to drive somewhere
+# standalone for testing.
+DEFAULT_GOAL = None
 
 POS_DEADBAND = 0.10          # m, pure-pursuit brakes to a stop here; "arrived" inside it
 V_MAX = 1.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
@@ -252,17 +254,7 @@ def run():
 
     p_xy = np.asarray(pose["p_w"], np.float64)[:2]
     fwd = gimbal_heading(pose["q_wb"])
-
-    # --- Gimbal look-at: point at the best face-on tag to keep SLAM anchored.
-    # Runs whether or not the chassis is moving; stays silent (→ gimbald holds /
-    # yields) when there's no good tag or no gimbal feedback yet.
     gp = gimbal_buf.interpolate(pose["t"])     # yaw_gi at the pose's capture time (consistent with fwd)
-    look_tag = None
-    if LOOK_AT_TAG and fwd is not None and gp is not None:
-      res = look_at_setpoint(p_xy, np.asarray(pose["v_w"], np.float64)[:2], fwd, gp[0])
-      if res is not None:
-        sp, look_tag = res
-        pub.send("nav_setpoint", sp)
 
     # --- Dynamic obstacles: persist detected enemy robots in the world frame. plated gives
     # the enemy CENTER in gimbal-inertial; rotate into world by ψ0 = ψ_world − yaw_gi (the
@@ -298,7 +290,20 @@ def run():
       "path": pursuit.P.tolist() if pursuit is not None else [],
       "obstacles": [[x, y, r] for x, y, r in robots]})
 
-    if goal_xy is None or pursuit is None or fwd is None or pursuit.done(p_xy):  # idle/blocked/arrived
+    navigating = goal_xy is not None and pursuit is not None and fwd is not None and not pursuit.done(p_xy)
+
+    # --- Gimbal look-at: point at the best face-on tag to keep SLAM anchored — but ONLY while
+    # actively navigating (that's when ego-motion makes drift matter). Idle/holding/arrived → stay
+    # SILENT so decisiond's aim or stated's scan owns the gimbal (gimbald yields when nav_setpoint
+    # goes stale). Silent too when there's no good tag / no gimbal feedback.
+    look_tag = None
+    if LOOK_AT_TAG and navigating and gp is not None:
+      res = look_at_setpoint(p_xy, np.asarray(pose["v_w"], np.float64)[:2], fwd, gp[0])
+      if res is not None:
+        sp, look_tag = res
+        pub.send("nav_setpoint", sp)
+
+    if not navigating:                                        # idle/blocked/arrived ⇒ hold, gimbal free
       pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0
       continue
     target, brake = pursuit.update(p_xy)
