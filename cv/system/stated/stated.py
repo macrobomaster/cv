@@ -1,7 +1,7 @@
 """State daemon - temporary high-level gimbal state machine.
 
 For now this only owns armor search:
-  SCAN: sweep the gimbal in yaw while autoaim does not see a usable armor plate.
+  SCAN: continuously rotate the gimbal in yaw while autoaim does not see a usable armor plate.
   YIELD: publish nothing once autoaim sees a plate; decisiond owns all aiming.
 
 Publishes a `state_setpoint` consumed by gimbald. gimbald still arbitrates priority, so decisiond's
@@ -13,8 +13,7 @@ from ..core import messaging
 from ..core.logging import logger
 from ..common.geometry import wrap_pi
 
-SCAN_YAW_AMPLITUDE = math.radians(45.0)
-SCAN_PERIOD = 3.0
+SCAN_PERIOD = 2.0
 SCAN_PITCH = 0.0
 AUTOAIM_TIMEOUT = 0.25
 
@@ -23,10 +22,8 @@ def _sees_plate(autoaim:dict|None, last_autoaim_t:float, now:float) -> bool:
 
 def _scan_setpoint(t:float, center:float, start_t:float) -> dict:
   w = 2 * math.pi / SCAN_PERIOD
-  phase = w * (t - start_t)
-  yaw = wrap_pi(center + SCAN_YAW_AMPLITUDE * math.sin(phase))
-  yaw_ff = SCAN_YAW_AMPLITUDE * w * math.cos(phase)
-  return {"yaw": yaw, "pitch": SCAN_PITCH, "yaw_ff": yaw_ff, "pitch_ff": 0.0}
+  yaw = wrap_pi(center + w * (t - start_t))
+  return {"yaw": yaw, "pitch": SCAN_PITCH, "yaw_ff": w, "pitch_ff": 0.0}
 
 def run():
   pub = messaging.Pub(["state_setpoint"])
