@@ -29,14 +29,15 @@ from ...slam import common
 
 NAV_TAG_ID = 6
 # Mission: (tag_id, standoff_m) waypoints, held in order.
-MISSION = [(NAV_TAG_ID, 2.5), (NAV_TAG_ID, 1.5)]
+MISSION = [(NAV_TAG_ID, 2.5), (NAV_TAG_ID, 2)]
 LOOP = False                 # True ⇒ restart the mission after the last waypoint (never finishes)
 
 ARRIVE_RADIUS = 0.15         # m, within this of a waypoint counts as "at" it (> POS_DEADBAND)
 ARRIVE_DWELL = 0.3           # s, must stay inside ARRIVE_RADIUS this long before advancing
-POS_DEADBAND = 0.10          # m, no command once inside this radius of the active waypoint
-KP = 1.0                     # (m/s) per m of position error
-MAX_SPEED = 1.0              # m/s, per-axis chassis speed cap
+POS_DEADBAND = 0.10          # m, profile brakes to a stop here; no command inside it
+V_MAX = 1.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
+ACCEL = 0.6                  # m/s², trapezoid accel = decel ramp rate
+MAX_DT = 0.2                 # s, clamp on the loop dt used for the accel ramp (guards stalls)
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
 
 def tag_standoff(tag_id:int, dist:float) -> np.ndarray:
@@ -91,6 +92,8 @@ def run():
   player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION], loop=LOOP)
   last_wd = last_diag = last_pose_t = 0.0
   last_idx = -1
+  v_prev = 0.0                                                # last commanded speed (for the accel ramp)
+  last_t = time.monotonic()
 
   kv_put("watchdog", "navd", time.monotonic())
   logger.info("navd: mission " + " → ".join(
@@ -99,6 +102,7 @@ def run():
   while True:
     sub.update(timeout=100)
     now = time.monotonic()
+    dt = min(now - last_t, MAX_DT); last_t = now
     if now - last_wd > 1.0:
       kv_put("watchdog", "navd", now); last_wd = now
 
@@ -108,7 +112,7 @@ def run():
     # the world origin is meaningless until the first absolute fix (n_tags counts
     # fixes seen so far; a tighter cov_pos gate could replace this later).
     if pose is None or now - last_pose_t > STALE_TIMEOUT or pose["n_tags"] == 0:
-      pub.send("chassis_velocity", {"x": 0.0, "y": 0.0})     # no usable localization ⇒ hold still
+      pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0   # no localization ⇒ hold still
       if now - last_diag > 1.0:
         logger.info("navd: no usable slam_pose (stale or unanchored), stopped"); last_diag = now
       continue
@@ -120,23 +124,29 @@ def run():
                   ("complete, holding" if goal is None else f"→ {goal.round(2).tolist()}"))
       last_idx = player.idx
 
-    if goal is None:
-      pub.send("chassis_velocity", {"x": 0.0, "y": 0.0})     # mission done ⇒ hold
+    fwd = gimbal_heading(pose["q_wb"]) if goal is not None else None
+    if goal is None or fwd is None:                          # mission done, or gimbal ~vertical
+      pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0
       continue
-
-    fwd = gimbal_heading(pose["q_wb"])
-    if fwd is None: continue                                  # gimbal looking ~straight up/down
     left = (-fwd[1], fwd[0])
 
-    e = goal - p_xy                                           # world position error to the waypoint
-    dist = float(math.hypot(e[0], e[1]))
-    if dist < POS_DEADBAND:
+    # Trapezoidal speed profile along the straight line to the waypoint: cap at
+    # V_MAX (cruise), brake on √(2·a·d) so we can always stop at the deadband, and
+    # limit the rise to ACCEL (accel ramp). Recomputed from the live distance each
+    # tick → self-correcting, and triangular automatically when the move is short.
+    e = goal - p_xy                                          # world position error to the waypoint
+    d = float(math.hypot(e[0], e[1]))
+    v_target = min(V_MAX, math.sqrt(2.0 * ACCEL * max(0.0, d - POS_DEADBAND)))
+    v_cmd = max(0.0, min(v_target, v_prev + ACCEL * dt))
+    v_prev = v_cmd
+    if v_cmd <= 0.0 or d < 1e-6:
       x = y = 0.0
     else:
-      x = max(-MAX_SPEED, min(MAX_SPEED, KP * (e[0] * fwd[0] + e[1] * fwd[1])))   # forward error
-      y = max(-MAX_SPEED, min(MAX_SPEED, KP * (e[0] * left[0] + e[1] * left[1]))) # leftward error
+      vx, vy = v_cmd * e[0] / d, v_cmd * e[1] / d            # world-frame velocity toward the goal
+      x = vx * fwd[0] + vy * fwd[1]                          # → gimbal forward
+      y = vx * left[0] + vy * left[1]                        # → gimbal left
     pub.send("chassis_velocity", {"x": x, "y": y})
 
     if now - last_diag > 1.0:
-      logger.info(f"navd: wp{player.idx} err={dist:.2f}m p_w={p_xy.round(2).tolist()} → x={x:+.2f} y={y:+.2f}")
+      logger.info(f"navd: wp{player.idx} d={d:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}")
       last_diag = now
