@@ -9,9 +9,12 @@ Setpoint contract (all topics): {yaw, pitch, yaw_ff, pitch_ff}
   yaw, pitch        absolute gimbal target — gimbal-inertial yaw, gravity-relative pitch (rad)
   yaw_ff, pitch_ff  feedforward angular rate of the aim point (rad/s); 0 if unknown
 
-Arbitration: aim_setpoint wins while fresh (decisiond only publishes it when it has a target);
-otherwise state_setpoint, otherwise nav_setpoint, otherwise hold (zero rate). stated only publishes while searching. The PID is reset on every source switch so its
-integral/derivative don't carry across a setpoint discontinuity.
+Arbitration (priority, first fresh wins): aim_setpoint (decisiond, only when it has a target);
+otherwise nav_setpoint (navd, only while actively driving — anchors SLAM during motion); otherwise
+state_setpoint (stated's search scan); otherwise hold (zero rate). So scan runs whenever we're not
+engaging or driving — navd's look-at only pre-empts the scan while the robot is actually moving (and
+then yields the instant it arrives). The PID is reset on every source switch so its integral/
+derivative don't carry across a setpoint discontinuity.
 
 Subs:  aim_setpoint, state_setpoint, nav_setpoint, gimbal_state
 Pubs:  aim_error: {x, y}   (rate/joystick command to commsd)
@@ -27,6 +30,8 @@ from ..common.gimbal import GimbalBuffer
 from ...autoaim.common import AIM_GAINS, AIM_I_CLAMP, AIM_D_TAU
 
 # Setpoint sources in PRIORITY order — first one with a fresh sample wins the gimbal.
+# aim (combat) > nav (navd's look-at, only fresh WHILE DRIVING) > state (stated's scan). navd's
+# only-while-navigating gating is what makes this work: scan wins whenever navd isn't driving.
 SOURCES = ["aim_setpoint", "nav_setpoint", "state_setpoint"]
 SETPOINT_TIMEOUT = 0.1   # s — a setpoint older than this is stale; its source yields to the next
 
