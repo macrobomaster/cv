@@ -62,11 +62,11 @@ P_CAP = 1e3                     # diagonal covariance ceiling (numerical safety 
 MEAS_NOISE_BASE = (0.01) ** 2   # m^2, PnP position floor
 MEAS_NOISE_STALE_MULT = 100.0
 PSI_NOISE = (math.radians(25)) ** 2  # rad^2, plate facing-yaw is the NOISY part of PnP — trust loosely
+PSI_FLIP_GATE = math.radians(90)     # |ψ innovation| above this ⇒ likely a PnP normal flip → drop ψ this frame
 H_EMA = 0.3                     # per-plate height smoothing
 
 # Data association / retarget
-ASSOC_PHASE_TOL = math.radians(40)   # facing-yaw must land within this of a plate slot to associate
-ASSOC_POS_MAHAL = 30.0          # position gate for "same robot, this plate"
+ASSOC_POS_MAHAL = 30.0          # min-over-slots position gate for "same robot, this plate" (else retarget)
 RETARGET_JUMP_FRAMES = 2        # consecutive gate failures before declaring a new robot
 
 # Classification thresholds (read off the state)
@@ -163,11 +163,13 @@ class RobotUKF:
     np.fill_diagonal(self.P, np.minimum(np.diag(self.P), P_CAP))
     self.t = t
 
-  def associate(self, psi_obs:float) -> tuple[int, float]:
-    """Which plate slot does this facing-yaw belong to, and the phase residual."""
-    k = int(round(wrap_pi(psi_obs - self.x[IDX_TH]) / (math.pi / 2))) % 4
-    phase_res = abs(wrap_pi(psi_obs - self.x[IDX_TH] - k * (math.pi / 2)))
-    return k, phase_res
+  def associate(self, p_xz:np.ndarray, R_pos:np.ndarray) -> tuple[int, float]:
+    """Position-based association: the 4 slots are distinct points (a square around the center), so the
+    visible plate is the slot whose PREDICTED position is closest. Returns (k, that slot's Mahalanobis
+    distance — the min also gates retargeting). Independent of ψ, so a PnP flip can't mis-assign a slot."""
+    mahals = [self.pos_mahal(k, p_xz, R_pos) for k in range(4)]
+    k = int(np.argmin(mahals))
+    return k, mahals[k]
 
   def _unscented(self, x:np.ndarray, P:np.ndarray, k:int):
     """Sigma-point propagation of plate-k's measurement h(x) = [px, pz, psi]. Returns
@@ -194,10 +196,18 @@ class RobotUKF:
 
   def update(self, k:int, p_xz:np.ndarray, y:float, psi_obs:float, R_pos:np.ndarray, R_psi:float):
     z_hat, Pzz, Pxz = self._unscented(self.x, self.P, k)
-    R = np.zeros((3, 3)); R[:2, :2] = R_pos; R[2, 2] = R_psi
-    S = Pzz + R
-    K = Pxz @ np.linalg.inv(S)
-    innov = np.array([p_xz[0] - z_hat[0], p_xz[1] - z_hat[1], wrap_pi(psi_obs - z_hat[2])])
+    innov_psi = wrap_pi(psi_obs - z_hat[2])
+    if abs(innov_psi) > PSI_FLIP_GATE:
+      # |ψ innovation| too large ⇒ likely a PnP normal flip. Drop the facing channel this frame and keep
+      # the tight position update, so the flip can't corrupt theta (position association already chose k).
+      S = Pzz[:2, :2] + R_pos
+      K = Pxz[:, :2] @ np.linalg.inv(S)
+      innov = p_xz - z_hat[:2]
+    else:
+      R = np.zeros((3, 3)); R[:2, :2] = R_pos; R[2, 2] = R_psi
+      S = Pzz + R
+      K = Pxz @ np.linalg.inv(S)
+      innov = np.array([p_xz[0] - z_hat[0], p_xz[1] - z_hat[1], innov_psi])
     self.x = self.x + K @ innov
     self.x[IDX_TH] = wrap_pi(self.x[IDX_TH])
     self.x[IDX_R] = min(R_RANGE[1], max(R_RANGE[0], self.x[IDX_R]))
@@ -303,10 +313,9 @@ class PlatedState:
       return
 
     self.ukf.predict_to(t_capture)
-    k, phase_res = self.ukf.associate(psi)
-    mahal = self.ukf.pos_mahal(k, p_xz, R_pos_xz)
-    # No consistent plate slot (bad facing-yaw AND off-position) → likely a new robot.
-    if phase_res > ASSOC_PHASE_TOL and mahal > ASSOC_POS_MAHAL:
+    k, mahal = self.ukf.associate(p_xz, R_pos_xz)
+    # The detection matches no predicted plate position → likely a new robot.
+    if mahal > ASSOC_POS_MAHAL:
       self.consecutive_jumps += 1
       if self.consecutive_jumps >= RETARGET_JUMP_FRAMES:
         self._retarget(p_xz, y, psi, t_capture)

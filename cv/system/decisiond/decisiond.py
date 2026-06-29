@@ -14,7 +14,7 @@ from ..common.gimbal import GimbalBuffer
 from ...autoaim.common import (
   MUZZLE_VELOCITY, GRAVITY,
   DELTA_INPUT, DELTA_TRIGGER, GIMBAL_TAU, GIMBAL_OMEGA_MAX,
-  AIM_GAINS, AIM_I_CLAMP, AIM_FF_DT, AIM_D_TAU,
+  AIM_FF_DT,
 )
 
 # Aim / trigger tunings
@@ -244,55 +244,22 @@ class TriggerGate:
     self.reason = f"class={cls}?"
     return False
 
-# --- Gimbal tracking controller (rate/joystick output) ---
-
-class AxisPID:
-  """Velocity feedforward + PID on the angular position error → aim_error (a rate command, divided
-  by K_JOYSTICK). With KI=KD=0 this is feedforward + P. omega_ff carries the aim-point motion so the
-  loop tracks moving targets without the steady-state lag a pure position controller leaves.
-
-  The derivative is computed as the ERROR rate from clean signals — d(θ_err)/dt = θ̇_target − θ̇_gimbal
-  = omega_ff − gimbal_rate — not by differencing the noisy position error, then low-pass filtered.
-  That's kick-free (a retarget step in θ_target never spikes it) and ~0 during good tracking."""
-  def __init__(self, kp, ki, kd, k_joystick, i_clamp, d_tau):
-    self.kp, self.ki, self.kd, self.kj, self.i_clamp, self.d_tau = kp, ki, kd, k_joystick, i_clamp, d_tau
-    self.reset()
-
-  def reset(self):
-    self.integ = 0.0
-    self.d_filt = 0.0
-
-  def update(self, err:float, omega_ff:float, gimbal_rate:float, dt:float) -> float:
-    if dt > 0:
-      self.integ += err * dt
-      if self.ki > 0:  # clamp the integral's velocity contribution (anti-windup)
-        lim = self.i_clamp / self.ki
-        self.integ = max(-lim, min(lim, self.integ))
-    d_err = omega_ff - gimbal_rate                          # error derivative from clean signals
-    if dt > 0 and self.d_tau > 0:
-      self.d_filt += (dt / (self.d_tau + dt)) * (d_err - self.d_filt)
-    else:
-      self.d_filt = d_err
-    omega_des = omega_ff + self.kp * err + self.ki * self.integ + self.kd * self.d_filt
-    return omega_des / self.kj
-
 # --- Daemon entry point ---
+# decisiond owns aiming POLICY (ballistic + lead → target angle, and the trigger) but NOT the gimbal
+# control loop: it publishes a gimbal SETPOINT {yaw, pitch, yaw_ff, pitch_ff} that gimbald's PID closes,
+# so navd can drive the same gimbal without routing through here. No aim_setpoint published when there's
+# no targetable plate ⇒ gimbald yields the gimbal to navd.
 
 def run():
-  pub = messaging.Pub(["aim_error", "aim_angle", "shoot"])
+  pub = messaging.Pub(["aim_setpoint", "aim_angle", "shoot"])
   sub = messaging.Sub(["plate"], poll="plate")
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
 
   trigger = TriggerGate()
-  yaw_pid = AxisPID(**AIM_GAINS["yaw"], i_clamp=AIM_I_CLAMP, d_tau=AIM_D_TAU)
-  pitch_pid = AxisPID(**AIM_GAINS["pitch"], i_clamp=AIM_I_CLAMP, d_tau=AIM_D_TAU)
 
   yaw_gi_now, pitch_gi_now = 0.0, 0.0
-  yaw_rate_now, pitch_rate_now = 0.0, 0.0
   d_yaw_prev, d_pitch_prev = 0.0, 0.0
-  last_t = None
-  last_target_id = -1
   fk = FrequencyKeeper(200)
   warned_no_gimbal = False
   last_diag = 0.0                         # throttle for the trigger-reason diagnostic
@@ -308,37 +275,27 @@ def run():
         logger.warning("decisiond: no gimbal_state samples; using zero gimbal pose")
         warned_no_gimbal = True
     else:
-      yaw_gi_now, pitch_gi_now, yaw_rate_now, pitch_rate_now = gp
+      yaw_gi_now, pitch_gi_now, _, _ = gp
 
     t_now = time.monotonic()
     plate = sub["plate"]
     if plate is None: continue
     if not sub.updated["plate"]: continue
 
-    # Reset the controllers on retarget so integral/derivative state doesn't carry across targets.
-    if plate["target_id"] != last_target_id:
-      yaw_pid.reset(); pitch_pid.reset()
-      last_t = None
-      last_target_id = plate["target_id"]
-
     cls = plate["class"]
     if cls in ("LOST", "UNKNOWN"):
-      yaw_pid.reset(); pitch_pid.reset(); last_t = None
-      pub.send("aim_error", {"x": 0.0, "y": 0.0})
-      pub.send("shoot", False)
+      pub.send("shoot", False)               # no aim_setpoint ⇒ gimbald yields the gimbal to navd
       if t_now - last_diag > 1.0:
         logger.info(f"no-fire: class={cls} (no targetable plate)"); last_diag = t_now
       continue
 
     predict = make_predict_fn(plate)
     if predict is None:
-      pub.send("aim_error", {"x": 0.0, "y": 0.0})
       pub.send("shoot", False)
       continue
 
     sol = solve_with_lead(predict, t_now, plate["t_state"], d_yaw_prev, d_pitch_prev)
     if sol is None:
-      pub.send("aim_error", {"x": 0.0, "y": 0.0})
       pub.send("shoot", False)
       if t_now - last_diag > 1.0:
         logger.info(f"no-fire: {cls} no ballistic solution (out of range?)"); last_diag = t_now
@@ -346,9 +303,9 @@ def run():
     yaw_gi_cmd, pitch_cmd, t_arrival, target_at_arrival = sol
 
     # Aim-point angular velocity (feedforward): how fast the lead-compensated command moves in real
-    # time → tracks moving/spinning targets. Advance BOTH t_now and t_state by FF_DT: in real time a
-    # fresh plate arrives with t_state advanced too, so the (t_now - t_state) lead term stays constant
-    # (advancing only t_now would double-count it and over-feedforward by ~2×).
+    # time → lets gimbald's loop track moving/spinning targets. Advance BOTH t_now and t_state by FF_DT:
+    # in real time a fresh plate arrives with t_state advanced too, so the (t_now - t_state) lead term
+    # stays constant (advancing only t_now would double-count it and over-feedforward by ~2×).
     sol_ff = solve_with_lead(predict, t_now + AIM_FF_DT, plate["t_state"] + AIM_FF_DT, d_yaw_prev, d_pitch_prev)
     if sol_ff is not None:
       yaw_ff = wrap_pi(sol_ff[0] - yaw_gi_cmd) / AIM_FF_DT
@@ -356,14 +313,10 @@ def run():
     else:
       yaw_ff = pitch_ff = 0.0
 
+    # Aim error vs the live gimbal pose (gimbald closes the loop; here it only gates the trigger).
     yaw_err = wrap_pi(yaw_gi_cmd - yaw_gi_now)
     pitch_err = pitch_cmd - pitch_gi_now
     d_yaw_prev, d_pitch_prev = abs(yaw_err), abs(pitch_err)
-
-    dt = 0.0 if last_t is None else (t_now - last_t)
-    last_t = t_now
-    aim_x = yaw_pid.update(yaw_err, yaw_ff, yaw_rate_now, dt)
-    aim_y = pitch_pid.update(pitch_err, pitch_ff, pitch_rate_now, dt)
 
     fire = trigger.evaluate(plate, yaw_err, pitch_err, t_arrival, t_now)
     if fire or t_now - last_diag > 1.0:
@@ -371,6 +324,6 @@ def run():
                   f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° → {trigger.reason}")
       last_diag = t_now
 
-    pub.send("aim_error", {"x": aim_x, "y": aim_y})
+    pub.send("aim_setpoint", {"yaw": yaw_gi_cmd, "pitch": pitch_cmd, "yaw_ff": yaw_ff, "pitch_ff": pitch_ff})
     pub.send("aim_angle", {"x": math.degrees(yaw_gi_cmd), "y": math.degrees(pitch_cmd)})
     pub.send("shoot", fire)

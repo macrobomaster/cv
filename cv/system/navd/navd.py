@@ -13,18 +13,27 @@ Current mission (MISSION): hold 2.5 m in front of tag #6, then 1.5 m in front.
 The chassis is holonomic; `chassis_velocity` is {x: forward, y: left} m/s
 referenced to the GIMBAL heading (the board rotates chassis→gimbal). So we rotate
 the world position error into the gimbal-heading frame (from slam_pose's q_wb) and
-command it directly. Heading/orientation is not controlled — position only.
+command it directly. Chassis orientation is not controlled — position only.
+
+While navigating we also point the gimbal at the best nearby tag (closest +
+most face-on) so the SLAM camera keeps an absolute anchor in view. navd doesn't
+drive the gimbal directly — it publishes a `nav_setpoint` and gimbald arbitrates
+(aim_setpoint from decisiond outranks it) and runs the PID. The look-at runs even
+while holding position, so localization stays anchored at a waypoint too.
 
 Subs:  slam_pose:        {t, p_w, v_w, q_wb, cov_pos, n_tags}   (from slamd)
+       gimbal_state:     {yaw_gi, ...}                          (latest; for the absolute yaw setpoint)
 Pubs:  chassis_velocity: {x, y}   (x = forward, y = left, m/s; commsd → MOVE_ROBOT)
+       nav_setpoint:     {yaw, pitch, yaw_ff, pitch_ff}         (gimbal target; gimbald → aim_error)
 """
-import gc, math, time
+import gc, os, json, math, time
 
 import numpy as np
 
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_put
+from ..common.geometry import wrap_pi
 from ...slam import common
 
 NAV_TAG_ID = 6
@@ -39,6 +48,23 @@ V_MAX = 1.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
 ACCEL = 0.6                  # m/s², trapezoid accel = decel ramp rate
 MAX_DT = 0.2                 # s, clamp on the loop dt used for the accel ramp (guards stalls)
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
+
+LOOK_AT_TAG = True           # point the gimbal at the best face-on tag to keep SLAM anchored
+VIEW_MIN_ALIGN = 0.2         # min cos(tag-normal vs line-of-sight): skip tags seen too obliquely (poor PnP)
+VIEW_MAX_RANGE = common.TAG_MAX_RANGE   # m, ignore tags beyond useful PnP range
+LOOK_PITCH = 0.0             # rad, gravity-relative pitch setpoint (level; the SLAM cam is yaw-only anyway)
+
+def load_nav_path():
+  """A drawn path from the path_editor tool, via the NAV_PATH env var (JSON with a
+  world-XY "path"). Returns (waypoints, is_curve) or None to fall back to MISSION."""
+  p = os.environ.get("NAV_PATH")
+  if not p: return None
+  try:
+    with open(p) as f: data = json.load(f)
+  except (OSError, json.JSONDecodeError) as e:
+    logger.warning(f"navd: NAV_PATH {p} unreadable ({e}); using built-in MISSION"); return None
+  pts = [np.asarray(xy, np.float64) for xy in data.get("path", [])]
+  return (pts, bool(data.get("curve", False))) if pts else None
 
 def tag_standoff(tag_id:int, dist:float) -> np.ndarray:
   """World-XY point `dist` metres out along tag `tag_id`'s outward face normal.
@@ -85,19 +111,66 @@ def gimbal_heading(q_wb):
   n = math.hypot(fx, fy)
   return (fx / n, fy / n) if n > 1e-6 else None
 
+def best_tag_to_view(p_xy:np.ndarray):
+  """Pick the tag best to point the gimbal at for localization: face-on (its
+  normal points toward us) AND close. Score = alignment / range² (≈ apparent
+  projected tag area — the driver of PnP quality). Tags seen from the back
+  (alignment ≤ 0) or too obliquely are skipped. Returns (tag_id, tag_xy, range)
+  or None if nothing is worth looking at."""
+  best, best_score = None, 0.0
+  for tid, (R_wt, t_wt) in common.TAG_FIELD_MAP.items():
+    t_xy = t_wt[:2].astype(np.float64)
+    los = p_xy - t_xy                                # tag → robot
+    rng = float(np.linalg.norm(los))
+    if rng < 1e-3 or rng > VIEW_MAX_RANGE: continue
+    n = R_wt[:2, 2].astype(np.float64); nn = float(np.linalg.norm(n))
+    if nn < 1e-6: continue
+    align = float(los @ n) / (rng * nn)              # 1 ⇒ robot on the tag's normal (dead face-on)
+    if align < VIEW_MIN_ALIGN: continue
+    score = align / (rng * rng)
+    if score > best_score: best, best_score = (tid, t_xy, rng), score
+  return best
+
+def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_now:float):
+  """Gimbal setpoint (gimbal-inertial yaw) to point at the best tag, or None.
+  Computes the bearing error in WORLD (frame-offset-free) and adds it to the
+  current gimbal yaw, so it's robust to the slam yaw-drift bias."""
+  bt = best_tag_to_view(p_xy)
+  if bt is None: return None
+  tid, t_xy, rng = bt
+  los = t_xy - p_xy                                  # robot → tag (world)
+  bearing = math.atan2(los[1], los[0])               # desired gimbal world heading
+  psi = math.atan2(fwd[1], fwd[0])                   # current gimbal world heading
+  yaw_sp = yaw_gi_now + wrap_pi(bearing - psi)       # absolute gimbal-inertial yaw target
+  # Feedforward: driving past a static tag drifts its bearing at
+  # β̇ = (los_y·v_x − los_x·v_y)/range² — feed it so the gimbal doesn't lag.
+  yaw_ff = float((los[1] * v_xy[0] - los[0] * v_xy[1]) / (rng * rng))
+  return {"yaw": float(yaw_sp), "pitch": LOOK_PITCH, "yaw_ff": yaw_ff, "pitch_ff": 0.0}, tid
+
 def run():
   gc.disable()
-  pub = messaging.Pub(["chassis_velocity"])
-  sub = messaging.Sub(["slam_pose"], poll="slam_pose")
-  player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION], loop=LOOP)
+  pub = messaging.Pub(["chassis_velocity", "nav_setpoint"])
+  # gimbal_state is non-polled (latest only) — we just need the current yaw_gi to
+  # turn the world bearing error into an absolute gimbal-inertial yaw setpoint.
+  sub = messaging.Sub(["slam_pose", "gimbal_state"], poll="slam_pose")
+  # A drawn path (NAV_PATH) overrides the tag-standoff MISSION. Curve paths flow
+  # without dwelling at each sampled point (dwell=0); the trapezoid still slows
+  # near each. (Smooth pure-pursuit following is the natural next step.)
+  np_path = load_nav_path()
+  if np_path is not None:
+    waypoints, is_curve = np_path
+    player = WaypointPlayer(waypoints, dwell=0.0 if is_curve else ARRIVE_DWELL, loop=LOOP)
+    logger.info(f"navd: following NAV_PATH — {len(waypoints)} wp ({'curve' if is_curve else 'straight'})")
+  else:
+    player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION], loop=LOOP)
+    logger.info("navd: mission " + " → ".join(
+      f"{d:.1f}m@tag{t} {w.round(2).tolist()}" for (t, d), w in zip(MISSION, player.waypoints)))
   last_wd = last_diag = last_pose_t = 0.0
   last_idx = -1
   v_prev = 0.0                                                # last commanded speed (for the accel ramp)
   last_t = time.monotonic()
 
   kv_put("watchdog", "navd", time.monotonic())
-  logger.info("navd: mission " + " → ".join(
-    f"{d:.1f}m@tag{t} {w.round(2).tolist()}" for (t, d), w in zip(MISSION, player.waypoints)))
 
   while True:
     sub.update(timeout=100)
@@ -118,13 +191,26 @@ def run():
       continue
 
     p_xy = np.asarray(pose["p_w"], np.float64)[:2]
+    fwd = gimbal_heading(pose["q_wb"])
+
+    # --- Gimbal look-at: point at the best face-on tag to keep SLAM anchored.
+    # Runs whether or not the chassis is moving; stays silent (→ gimbald holds /
+    # yields) when there's no good tag or no gimbal feedback yet.
+    gs = sub["gimbal_state"]
+    look_tag = None
+    if LOOK_AT_TAG and fwd is not None and gs is not None:
+      res = look_at_setpoint(p_xy, np.asarray(pose["v_w"], np.float64)[:2], fwd, float(gs["yaw_gi"]))
+      if res is not None:
+        sp, look_tag = res
+        pub.send("nav_setpoint", sp)
+
+    # --- Chassis waypoint nav ---
     goal = player.update(p_xy, now)
     if player.idx != last_idx:
       logger.info(f"navd: waypoint {player.idx}/{len(MISSION)} " +
                   ("complete, holding" if goal is None else f"→ {goal.round(2).tolist()}"))
       last_idx = player.idx
 
-    fwd = gimbal_heading(pose["q_wb"]) if goal is not None else None
     if goal is None or fwd is None:                          # mission done, or gimbal ~vertical
       pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0
       continue
@@ -148,5 +234,6 @@ def run():
     pub.send("chassis_velocity", {"x": x, "y": y})
 
     if now - last_diag > 1.0:
-      logger.info(f"navd: wp{player.idx} d={d:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}")
+      logger.info(f"navd: wp{player.idx} d={d:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}"
+                  + (f"  look@tag{look_tag}" if look_tag is not None else "  look:none"))
       last_diag = now
