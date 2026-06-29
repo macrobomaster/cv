@@ -30,6 +30,7 @@ from ...slam import common
 NAV_TAG_ID = 6
 # Mission: (tag_id, standoff_m) waypoints, held in order.
 MISSION = [(NAV_TAG_ID, 2.5), (NAV_TAG_ID, 1.5)]
+LOOP = False                 # True ⇒ restart the mission after the last waypoint (never finishes)
 
 ARRIVE_RADIUS = 0.15         # m, within this of a waypoint counts as "at" it (> POS_DEADBAND)
 ARRIVE_DWELL = 0.3           # s, must stay inside ARRIVE_RADIUS this long before advancing
@@ -49,11 +50,13 @@ def tag_standoff(tag_id:int, dist:float) -> np.ndarray:
 class WaypointPlayer:
   """Plays a fixed list of world-XY goals in order. update(p_xy, now) returns the
   active goal (None once the mission is done), advancing to the next goal after the
-  robot has stayed within ARRIVE_RADIUS of the current one for ARRIVE_DWELL."""
-  def __init__(self, waypoints, arrive_radius=ARRIVE_RADIUS, dwell=ARRIVE_DWELL):
+  robot has stayed within ARRIVE_RADIUS of the current one for ARRIVE_DWELL. With
+  loop=True it wraps back to the first waypoint instead of finishing."""
+  def __init__(self, waypoints, arrive_radius=ARRIVE_RADIUS, dwell=ARRIVE_DWELL, loop=False):
     self.waypoints = list(waypoints)
     self.arrive_radius = arrive_radius
     self.dwell = dwell
+    self.loop = loop
     self.idx = 0
     self.since = None          # time we entered the arrive radius (None if outside)
 
@@ -67,6 +70,7 @@ class WaypointPlayer:
       if self.since is None: self.since = now
       if now - self.since >= self.dwell:
         self.idx += 1; self.since = None
+        if self.loop and self.idx >= len(self.waypoints): self.idx = 0
     else:
       self.since = None
     return self.goal()
@@ -84,7 +88,7 @@ def run():
   gc.disable()
   pub = messaging.Pub(["chassis_velocity"])
   sub = messaging.Sub(["slam_pose"], poll="slam_pose")
-  player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION])
+  player = WaypointPlayer([tag_standoff(t, d) for t, d in MISSION], loop=LOOP)
   last_wd = last_diag = last_pose_t = 0.0
   last_idx = -1
 
