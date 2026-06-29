@@ -135,7 +135,7 @@ class GrokfastEMA:
       p.grad.assign(p.grad + t * self.factor)
 
 class SwitchEMA:
-  def __init__(self, model, ema_model, epochs:int, steps_per_epoch:int, momentum:float=0.999):
+  def __init__(self, model, ema_model, epochs:int, steps_per_epoch:int, momentum:float=0.999, master_opts:list|None=None):
     self.step_counter = Tensor([0], device=get_parameters(model)[0].device).is_param_(False)
     self.epochs, self.steps_per_epoch = epochs, steps_per_epoch
     self.momentum = momentum
@@ -143,14 +143,24 @@ class SwitchEMA:
     ema_state_dict = get_state_dict(ema_model)
     self.ema_model_params = {k:ema_state_dict[k] for k in self.model_params.keys()}
     for p_ema in self.ema_model_params.values(): p_ema.is_param = False
+    name_of = {id(v):k for k,v in self.model_params.items()}
+    self.live = dict(self.model_params)
+    for o in (master_opts or []):
+      master = getattr(o, "master", None)
+      if master is None: continue  # raw optimizer (fp32): its params already are the live tensors
+      for p, mst in zip(o.params, master):
+        if id(p) in name_of: self.live[name_of[id(p)]] = mst
 
   def update(self):
-    for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
-      p_ema.assign(p_ema * self.momentum + p.detach() * (1 - self.momentum))
-    for p, p_ema in zip(self.model_params.values(), self.ema_model_params.values()):
-      p.assign((self.step_counter == self.steps_per_epoch - 1).where(p_ema, p).detach())
-    self.step_counter.assign((self.step_counter == self.steps_per_epoch - 1).where(0, self.step_counter + 1))
-    Tensor.realize(*self.model_params.values(), *self.ema_model_params.values(), self.step_counter)
+    last = self.step_counter == self.steps_per_epoch - 1
+    for k, p_ema in self.ema_model_params.items():
+      p_ema.assign(p_ema * self.momentum + self.live[k].detach() * (1 - self.momentum))
+    for k, p_ema in self.ema_model_params.items():
+      lv, p = self.live[k], self.model_params[k]
+      lv.assign(last.where(p_ema.cast(lv.dtype), lv).detach())             # switch the master (carries forward)
+      if p is not lv: p.assign(last.where(p_ema.cast(p.dtype), p).detach())  # and the param (next forward)
+    self.step_counter.assign(last.where(0, self.step_counter + 1))
+    Tensor.realize(*self.live.values(), *self.model_params.values(), *self.ema_model_params.values(), self.step_counter)
 
 class CosineWarmupLR(LR_Scheduler):
   def __init__(self, optimizer:Optimizer, warmup_steps:int, warmup_lr:float, start_lr:float, end_lr:float, epochs:int, steps_per_epoch:int):
