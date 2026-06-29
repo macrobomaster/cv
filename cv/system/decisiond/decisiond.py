@@ -75,7 +75,12 @@ def solve_with_lead(predict_fn:Callable[[float], np.ndarray], t_now:float, t_sta
 
   t_arrival = t_now + dp_pipeline + t_f
   rel = target - MUZZLE_OFFSET
-  yaw_cmd = math.atan2(rel[2], rel[0])  # +z = right in the corrected (proper) gimbal frame; was -rel[2] to undo R_MOUNT's mirror
+  # −rel[2]: the gimbal-inertial frame is y-up with yaw = roty(yaw_gi), whose rotation
+  # sense (forward → −z) is OPPOSITE to atan2(+z, x) — so a target's azimuth in gimbal-
+  # yaw terms is −atan2(z, x). (Same RH-readout vs LH-frame handedness flip navd's
+  # look-at hit; here it's plated's roty(yaw_gi) sense.) The +rel[2] paired with the
+  # R_MOUNT det fix mirrored the aim — HW-confirmed flipped, so back to −rel[2].
+  yaw_cmd = math.atan2(-rel[2], rel[0])
   return yaw_cmd, theta, t_arrival, target
 
 # --- Target trajectory prediction ---
