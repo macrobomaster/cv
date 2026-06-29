@@ -10,7 +10,6 @@ Publishes a `state_setpoint` consumed by gimbald. gimbald still arbitrates prior
 import math, time
 
 from ..core import messaging
-from ..core.helpers import FrequencyKeeper
 from ..core.logging import logger
 from ..common.geometry import wrap_pi
 
@@ -31,9 +30,8 @@ def _scan_setpoint(t:float, center:float, start_t:float) -> dict:
 
 def run():
   pub = messaging.Pub(["state_setpoint"])
-  sub = messaging.Sub(["autoaim", "gimbal_state"])
+  sub = messaging.Sub(["autoaim", "gimbal_state"], poll="autoaim")
 
-  fk = FrequencyKeeper(50)
   mode = None
   scan_center = 0.0
   scan_start_t = time.monotonic()
@@ -42,8 +40,7 @@ def run():
   last_diag = 0.0
 
   while True:
-    fk.step()
-    sub.update(timeout=0)
+    sub.update(timeout=50)
     now = time.monotonic()
 
     gs = sub["gimbal_state"]
