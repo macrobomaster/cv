@@ -46,7 +46,9 @@ SPIN_FACING_HALF = math.radians(50)  # half-width of a plate's facing window (fo
 
 # Robot-body EKF process noise (per second)
 Q_CENTER = (0.05) ** 2          # m^2/s, center random-walk
-Q_VEL = (3.0) ** 2              # (m/s)^2/s, center-velocity random walk (allows accel)
+Q_VEL = (1.0) ** 2              # (m/s)^2/s, center-velocity random walk. Was (3)² — far looser than a real
+                                # chassis accelerates, which let vx/vy spike on plate handoffs/noise and
+                                # fling the lead. (1)² ≈ realistic accel; raise toward (2) for faster chase.
 Q_THETA = (0.05) ** 2           # rad^2/s, heading random-walk
 Q_OMEGA = (12.0) ** 2           # (rad/s)^2/s, heading-rate random walk (covers a spin spin-up in ~1s)
 Q_R = (0.02) ** 2              # m^2/s, radius drifts slowly

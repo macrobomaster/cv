@@ -27,10 +27,10 @@ E_WINDOW_OMEGA_K = 2.0                 # shrink window by k·r·σ_ω·t_f (σ_�
 SIGMA_OMEGA = 0.5                      # rad/s, placeholder spin-rate uncertainty
 BALLISTIC_MAX_ITER = 5
 BALLISTIC_TOL = 5e-4                   # s, fixed-point convergence
-MAX_CENTER_SPEED = 3.0                 # m/s — clamp the spin-CENTER velocity used for lead. v_c is the
-                                       # weakly-observable state (spin/translation ambiguity) and gets
-                                       # extrapolated over the full ~0.6 s lead, so a spurious spike
-                                       # flings the aim point. Bound it to the chassis's physical top speed.
+MAX_CENTER_SPEED = 3.0                 # m/s — clamp the target velocity used for lead (LINEAR vel_gi AND
+                                       # SPIN center v_c). These are weakly observable / spike on plate
+                                       # handoffs, and get extrapolated over the full ~0.6 s lead, so a
+                                       # spurious spike flings the aim. Bound to the chassis's physical top speed.
 
 MUZZLE_OFFSET = np.zeros(3)            # muzzle position in gimbal-inertial. TODO: measure barrel offset.
 
@@ -97,6 +97,9 @@ def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
   if cls == "STATIC":
     return lambda t, p=pos: p.copy()
   if cls == "LINEAR":
+    spd = float(math.hypot(vel[0], vel[1]))          # bound the target velocity (z-up horizontal) so a
+    if spd > MAX_CENTER_SPEED:                         # handoff/noise spike can't fling the aim over the lead
+      vel = vel * (MAX_CENTER_SPEED / spd)
     return lambda t, p=pos, v=vel, ts=t_state: p + v * (t - ts)
   if cls == "SPIN":
     spin = plate["spin"]
@@ -274,6 +277,7 @@ def run():
   fk = FrequencyKeeper(200)
   warned_no_gimbal = False
   last_diag = 0.0                         # throttle for the trigger-reason diagnostic
+  last_setpoint = None                    # last aim_setpoint, re-sent to HOLD through a brief re-acquire
 
   while True:
     fk.step()
@@ -294,10 +298,22 @@ def run():
     if not sub.updated["plate"]: continue
 
     cls = plate["class"]
-    if cls in ("LOST", "UNKNOWN"):
-      pub.send("shoot", False)               # no aim_setpoint ⇒ gimbald yields the gimbal to navd
+    if cls == "LOST":
+      pub.send("shoot", False)
+      last_setpoint = None                   # truly lost → release the gimbal (scan/nav can take over)
       if t_now - last_diag > 1.0:
-        logger.info(f"no-fire: class={cls} (no targetable plate)"); last_diag = t_now
+        logger.info("no-fire: class=LOST (target lost)"); last_diag = t_now
+      continue
+    if cls == "UNKNOWN":
+      # UNKNOWN = same target re-settling after a retarget (e.g. a spin plate-handoff), NOT "no target".
+      # HOLD the last aim (zero feedforward) so the gimbal stays on the robot instead of going stale and
+      # letting gimbald fall through to the search scan (→ gimbal jumps to a random direction). No fire
+      # until the class settles.
+      pub.send("shoot", False)
+      if last_setpoint is not None:
+        pub.send("aim_setpoint", {**last_setpoint, "yaw_ff": 0.0, "pitch_ff": 0.0})
+      if t_now - last_diag > 1.0:
+        logger.info("no-fire: class=UNKNOWN (re-acquiring, holding aim)"); last_diag = t_now
       continue
 
     predict = make_predict_fn(plate)
@@ -339,6 +355,7 @@ def run():
                   f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° → {trigger.reason}{extra}")
       last_diag = t_now
 
-    pub.send("aim_setpoint", {"yaw": yaw_gi_cmd, "pitch": pitch_cmd, "yaw_ff": yaw_ff, "pitch_ff": pitch_ff})
+    last_setpoint = {"yaw": yaw_gi_cmd, "pitch": pitch_cmd, "yaw_ff": yaw_ff, "pitch_ff": pitch_ff}
+    pub.send("aim_setpoint", last_setpoint)
     pub.send("aim_angle", {"x": math.degrees(yaw_gi_cmd), "y": math.degrees(pitch_cmd)})
     pub.send("shoot", fire)
