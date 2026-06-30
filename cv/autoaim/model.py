@@ -589,6 +589,7 @@ class Model:
 if __name__ == "__main__":
   from tinygrad.nn.state import get_parameters
   from tinygrad.helpers import GlobalCounters, getenv, Context
+  from tinygrad.device import Device
   from .common import pred, TemporalInference
   import time
 
@@ -606,7 +607,7 @@ if __name__ == "__main__":
 
   # full runs
   tms = []
-  fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").clone().realize()
+  fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device=Device.DEFAULT).clone().realize()
   for _ in range(15):
     GlobalCounters.reset()
     st = time.perf_counter()

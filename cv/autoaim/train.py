@@ -27,7 +27,7 @@ ADAMW_END_LR = 1e-4
 MUON_START_LR = 1e-2 * math.sqrt(BS / 256)
 MUON_END_LR = 1e-3
 EPOCHS = 24
-EMA_MOMENTUM = 0.999
+EMA_MOMENTUM = 0.995
 STEPS_PER_EPOCH = len(get_train_files())//BS
 
 def run():
@@ -99,7 +99,8 @@ def run():
   me_sd, m_sd = get_state_dict(model_ema), get_state_dict(model)
   for k in me_sd: me_sd[k].assign(m_sd[k].detach())
   Tensor.realize(*me_sd.values())
-  switch_ema = SwitchEMA(model, model_ema, EPOCHS, STEPS_PER_EPOCH, momentum=EMA_MOMENTUM, master_opts=[muon_optim, adamw_decay, adamw_nodecay])
+  switch_ema = SwitchEMA(model, model_ema, EPOCHS, STEPS_PER_EPOCH, momentum=EMA_MOMENTUM,
+                         master_opts=[muon_optim, adamw_decay, adamw_nodecay], switch=bool(getenv("SWITCH_EMA", 0)))
 
   for p in optim.params:
     p.grad = p.zeros_like().contiguous()

@@ -77,7 +77,7 @@ def run():
 
     if sub.updated["camera_feed"]:
       frame = camera_feed["frame"]
-      framet = Tensor(frame, dtype=dtypes.uint8, device="PYTHON")
+      framet = Tensor(frame, dtype=dtypes.uint8, device=Device.DEFAULT)
       ft = time.monotonic()
 
       if sub.updated["team_color"]:

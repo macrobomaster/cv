@@ -26,7 +26,7 @@ T = getenv("T", 1)
 # corner output valid range
 BIN_LO, BIN_HI = -0.5, 1.5
 
-MODEL_VERSION = 41
+MODEL_VERSION = 42
 
 # canonical camera
 CANONICAL_FX_FY = 648
@@ -102,15 +102,18 @@ class TemporalInference:
       self.frames = Tensor.zeros(self.T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone()
     else:
       self.frames = None
+    self._target_color, self._target_color_t = None, None
 
   def __call__(self, img, target_color:int=0) -> list:
-    target_color_t = Tensor([target_color], dtype=dtypes.int32, device="PYTHON")
-    return self.model_fn(self.model, img, target_color_t, frames=self.frames).tolist()[0]
+    if target_color != self._target_color:
+      self._target_color = target_color
+      self._target_color_t = Tensor([target_color], dtype=dtypes.int32, device=Device.DEFAULT).realize()
+    return self.model_fn(self.model, img, self._target_color_t, frames=self.frames).tolist()[0]
 
   def warmup(self):
     for _ in range(3):
       if self.T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone().realize()
-      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="PYTHON").clone().realize()
-      fake_target = Tensor([0], dtype=dtypes.int32, device="PYTHON").realize()
+      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device=Device.DEFAULT).clone().realize()
+      fake_target = Tensor([0], dtype=dtypes.int32, device=Device.DEFAULT).realize()
       self.model_fn(self.model, fake_frame, fake_target, frames=fake_frames if self.T != 1 else None)
     return self.model_fn
