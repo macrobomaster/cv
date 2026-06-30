@@ -3,12 +3,14 @@
 Run with:
   python -m cv.tools.visual_slam <addr>
 
-Subscribes to camera_feed, apriltags, slam_pose, slam_debug, nav_debug. Shows:
+Subscribes to camera_feed, apriltags, slam_pose, slam_debug, nav_debug,
+cam_occupancy. Shows:
   - 2D camera view with AprilTag detections (from tagd's apriltags topic)
   - 3D world: robot trajectory, current pose marker, known field AprilTags,
     and tags actually used for a fix this frame (slam_debug.seen_tag_p)
   - Nav: the field boundary + walls (NAV_MAP), the active goal, planned path,
     and detected enemy-robot obstacle circles (navd's nav_debug)
+  - Occupancy: occupancyd's camera-derived obstacle cells (cam_occupancy)
   - Scalars: number of tags fixed, position-stddev
 """
 import sys, os, gc, json, time
@@ -80,7 +82,8 @@ def main():
            colors=[(180, 120, 255)], radii=0.07, labels=[g.get("label", "") for g in nav_map["goals"]]),
            static=True)
 
-  sub = messaging.Sub(["camera_feed_full", "slam_pose", "slam_debug", "apriltags", "nav_debug"],
+  sub = messaging.Sub(["camera_feed_full", "slam_pose", "slam_debug", "apriltags", "nav_debug",
+                       "cam_occupancy", "cam_occupancy_debug"],
                       poll="camera_feed_full", addr=addr)   # full frames via the framed bridge (DEBUG>=1)
   fk = FrequencyKeeper(30)
 
@@ -149,6 +152,13 @@ def main():
         rr.log("camera/feed/apriltags", rr.Clear(recursive=True))
         rr.log("camera/feed/apriltag_ids", rr.Clear(recursive=True))
 
+    # --- occupancyd's detected obstacle contact line (2D, localization-independent) ------
+    cod = sub["cam_occupancy_debug"]
+    if cod is not None and sub.updated["cam_occupancy_debug"]:
+      pts = cod.get("contact") or []
+      rr.log("camera/feed/cam_contact", rr.Points2D(pts, radii=2.0, colors=[(255, 180, 40)])
+             if pts else rr.Clear(recursive=True))
+
     # --- Debug topic: tags actually fused this frame (3D) -----------------
     dbg = sub["slam_debug"]
     if dbg is not None and sub.updated["slam_debug"]:
@@ -177,6 +187,19 @@ def main():
       obs = nav.get("obstacles") or []
       rr.log("world/nav_obstacles", rr.Points3D([[o[0], o[1], 0.1] for o in obs], colors=[(255, 60, 60)],
              radii=[o[2] for o in obs]) if obs else rr.Clear(recursive=True))
+
+    # --- Camera occupancy: occupancyd's world obstacle grid (floor-vs-obstacle IPM) -
+    co = sub["cam_occupancy"]
+    if co is not None and sub.updated["cam_occupancy"]:
+      occ = np.frombuffer(co["occ"], bool).reshape(co["ny"], co["nx"])
+      iy, ix = np.nonzero(occ)
+      if len(ix):
+        cx = co["x0"] + (ix + 0.5) * co["res"]
+        cy = co["y0"] + (iy + 0.5) * co["res"]
+        pts = np.stack([cx, cy, np.full(len(ix), 0.03)], axis=1)
+        rr.log("world/cam_occupancy", rr.Points3D(pts, colors=[(255, 180, 40)], radii=co["res"] * 0.5))
+      else:
+        rr.log("world/cam_occupancy", rr.Clear(recursive=True))
 
     for k, v in sub.alive.items():
       rr.log(f"alive/{k}", rr.Scalars(int(v)))
