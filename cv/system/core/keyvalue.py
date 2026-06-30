@@ -5,22 +5,24 @@ from typing import Any
 
 import cbor2
 
-from .. import SYSTEM_PATH
+from .. import SYSTEM_PATH, PERSIST_PATH
 
-KVPATH = SYSTEM_PATH / "keyvalue.db"
+EPHEMERAL_DB = SYSTEM_PATH / "keyvalue.db"
+PERSIST_DB = PERSIST_PATH / "persist.db"
+PERSISTED_TABLES: set[str] = set()
+def kv_persist(table:str): PERSISTED_TABLES.add(table)
 
-_kv_connection = None
-def kv_connection():
-  global _kv_connection
-  if _kv_connection is None:
-    # Ensure SYSTEM_PATH exists before creating the database connection
-    SYSTEM_PATH.mkdir(parents=True, exist_ok=True)
-    _kv_connection = sqlite3.connect(KVPATH, timeout=10, isolation_level=None)
-    # another connection has set it already or is in the process of setting it
-    # that connection will lock the database
-    with contextlib.suppress(sqlite3.OperationalError): _kv_connection.execute("PRAGMA journal_mode=WAL").fetchone()
-    _kv_connection.execute("PRAGMA busy_timeout=10000")
-  return _kv_connection
+_connections: dict = {}
+def kv_connection(table=None):
+  path = PERSIST_DB if table in PERSISTED_TABLES else EPHEMERAL_DB
+  conn = _connections.get(path)
+  if conn is None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=10, isolation_level=None)
+    with contextlib.suppress(sqlite3.OperationalError): conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    conn.execute("PRAGMA busy_timeout=2000")
+    _connections[path] = conn
+  return conn
 
 def _retry_locked(op):
   delay = 0.005
@@ -33,19 +35,20 @@ def _retry_locked(op):
       delay = min(delay * 2, 0.2)
 
 def kv_reset():
-  global _kv_connection, _db_tables
-  _kv_connection = None
+  global _connections, _db_tables
+  _connections = {}
   _db_tables = set()
 
 def kv_clear(table:str):
-  kv_connection().execute(f"DROP TABLE IF EXISTS '{table}'")
+  kv_connection(table).execute(f"DROP TABLE IF EXISTS '{table}'")
 
 def kv_checkpoint():
-  kv_connection().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+  for conn in _connections.values():
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 def kv_get(table:str, key:Any) -> Any:
   def op():
-    cur = kv_connection().cursor()
+    cur = kv_connection(table).cursor()
     try:
       # fetchall drains the statement so no read txn is left open on the shared connection
       res = cur.execute(f"SELECT val FROM '{table}' WHERE key = ?", (cbor2.dumps(key),)).fetchall()
@@ -59,7 +62,7 @@ def kv_get(table:str, key:Any) -> Any:
 
 def kv_getall(table:str) -> dict:
   def op():
-    cur = kv_connection().cursor()
+    cur = kv_connection(table).cursor()
     try:
       res = cur.execute(f"SELECT * FROM '{table}'").fetchall()
     except sqlite3.OperationalError as e:
@@ -73,7 +76,7 @@ def kv_getall(table:str) -> dict:
 _db_tables = set()
 def kv_put(table:str, key:Any, val:Any):
   def op():
-    cur = kv_connection().cursor()
+    cur = kv_connection(table).cursor()
     try:
       if table not in _db_tables:
         cur.execute(f"CREATE TABLE IF NOT EXISTS '{table}' (key blob, val blob, PRIMARY KEY (key))")

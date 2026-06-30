@@ -10,7 +10,7 @@ from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 
 from ..core import messaging
 from ..core.logging import logger
-from ..core.keyvalue import kv_get, kv_put
+from ..core.keyvalue import kv_get, kv_put, kv_persist
 from ..common.frame_ring import FrameRing, frame_tensor, CAMERA_RING
 from ...autoaim.model import Model, CLASS_DECODE_TABLE, QUALITY_TAU, MAL_GAMMA
 from ...autoaim.common import pred, TemporalInference, MODEL_VERSION, IMG_H, IMG_W, T
@@ -34,6 +34,7 @@ def run():
     dtypes.default_float = dtypes.float16
 
   # cache model jit
+  kv_persist("autoaim")
   model_key = f"model_{MODEL_VERSION}_{HALF}_{BEAM}_{FUSE}_{Device.DEFAULT}"
   if kv_get("autoaim", model_key) is None:
     logger.info("building cached model")
