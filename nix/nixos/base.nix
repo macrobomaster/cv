@@ -122,8 +122,11 @@
   boot.tmp.cleanOnBoot = true;
 
   # disable USB autosuspend — USB3 cameras (HikVision MV-CS016) freeze when the
-  # kernel suspends the bus; this is a dedicated robot with no battery concerns
-  boot.kernelParams = [ "usbcore.autosuspend=-1" ];
+  # kernel suspends the bus; this is a dedicated robot with no battery concerns.
+  # usbfs_memory_mb: default 16 MB caps libusb's in-flight transfer buffers; the
+  # Aravis USB3 stream can exhaust it and stall (silently — no dmesg, the device
+  # stays enumerated), tripping the camerad watchdog. 256 MB gives headroom.
+  boot.kernelParams = [ "usbcore.autosuspend=-1" "usbcore.usbfs_memory_mb=256" ];
 
   # networking
   systemd.services.NetworkManager-wait-online.enable = false;
