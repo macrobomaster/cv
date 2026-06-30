@@ -44,10 +44,10 @@ CX, CY = float(K[0, 2]), float(K[1, 2])
 # it. Use R_CAM and T_CAM from the SAME run (shared gauge). T_CAM's vertical part
 # is unobservable on a yaw-only sweep → 0 (doesn't affect planar position); its xy
 # ≈ 0.188 m along −y = 19 cm to the right, matching the measured mount.
-R_CAM = np.array([[ 2.59305e-03, -2.99353e-02,  9.99548e-01],
-                  [-9.96269e-01, -8.62985e-02, -8.84798e-17],
-                  [ 8.62595e-02, -9.95819e-01, -3.00474e-02]], dtype=np.float32)
-T_CAM = np.array([-0.01428, -0.00509,  0.     ], dtype=np.float32)
+R_CAM = np.array([[ 1.26394e-02, -2.46683e-01,  9.69014e-01],
+                  [-9.98690e-01, -5.11704e-02, -1.07261e-17],
+                  [ 4.95848e-02, -9.67744e-01, -2.47006e-01]], dtype=np.float32)
+T_CAM = np.array([-0.00601,  0.00791,  0.     ], dtype=np.float32)
 # Set True only if calib reported "gimbal-yaw sign FLIPPED vs Rz" (negates yaw in
 # R_wc). This calibration run was not flipped.
 YAW_FLIPPED = False
