@@ -92,6 +92,8 @@ def run():
   logger.info(f"occupancyd: grid {g.nx}x{g.ny} @ {g.res}m, band v0={ipm.v0}, CAM_HEIGHT={common.CAM_HEIGHT}m")
 
   last_occ_t = last_wd = last_diag = 0.0
+  n_cam = n_rgb = n_contact = 0                          # per-diag-window counters
+  reason = "no camera_feed yet"                          # latest world-projection status
   kv_put("watchdog", "occupancyd", time.monotonic())
 
   while True:
@@ -100,15 +102,25 @@ def run():
     for m in gimbal_sub.drain("gimbal_state"): gimbal_buf.push(m)
     if now - last_wd > 1.0:
       kv_put("watchdog", "occupancyd", now); last_wd = now
+    # Unconditional heartbeat at the TOP so it always reports, even when the loop is
+    # continuing early (no frames, shm not attachable, gated on pose).
+    if now - last_diag > 1.0:
+      logger.info(f"occupancyd: cam_feed={n_cam}/s rgb_ok={n_rgb}/s contact_px={n_contact} "
+                  f"pose_alive={sub.alive.get('slam_pose')} | world: {reason}")
+      last_diag = now; n_cam = n_rgb = 0
 
     cam = sub["camera_feed"]
     if cam is None or not sub.updated["camera_feed"]: continue
+    n_cam += 1
     if now - last_occ_t < 1.0 / OCCUPANCY_HZ: continue
     last_occ_t = now
 
     rgb = frame_view(ring, cam)
-    if rgb is None: continue
+    if rgb is None:
+      reason = "frame_view None — shm slot not attachable (occupancyd not on camerad's host? camerad down?)"; continue
+    n_rgb += 1
     contact = contact_mask(floor_mask(rgb[ipm.v0:]))     # (Hb, W) ground-contact pixels
+    n_contact = int(contact.sum())
 
     # DEBUG: 2D overlay of the detected obstacle contact line, in FULL-image pixel coords —
     # visible in visual_slam's camera view INDEPENDENT of localization, so the floor
@@ -140,6 +152,3 @@ def run():
         "t": float(cam["ct"]), "x0": g.x0, "y0": g.y0, "res": g.res, "nx": g.nx, "ny": g.ny,
         "occ": occ.tobytes(), "stale": bool(gp_ct[2])})
       reason = f"{len(pts)} contact pts → {int(occ.sum())} occ cells" + (" [stale gimbal]" if gp_ct[2] else "")
-
-    if now - last_diag > 1.0:
-      logger.info(f"occupancyd: {int(contact.sum())} contact px in frame; world: {reason}"); last_diag = now
