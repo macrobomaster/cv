@@ -32,7 +32,12 @@ MAX_CENTER_SPEED = 3.0                 # m/s — clamp the target velocity used 
                                        # handoffs, and get extrapolated over the full ~0.6 s lead, so a
                                        # spurious spike flings the aim. Bound to the chassis's physical top speed.
 
-MUZZLE_OFFSET = np.zeros(3)            # muzzle position in gimbal-inertial. TODO: measure barrel offset.
+# Muzzle position relative to the yaw axis (gimbal-inertial z-up). The VERTICAL term sets pitch:
+# h = pos_gi[2] - MUZZLE_OFFSET[2], and with the yaw-only camera's T_CAM_z=0, pos_gi[2] is height-above-
+# CAMERA, so MUZZLE_OFFSET[2] = -(camera optical centre height above the muzzle). MEASURE it (CAD/tape) —
+# the yaw-only camera calibration can't observe a vertical lever arm. fwd/lat are parallax (2nd-order at a few m).
+CAM_ABOVE_MUZZLE = 0.0                 # m, camera optical centre height ABOVE the muzzle. TODO: measure.
+MUZZLE_OFFSET = np.array([0.0, 0.0, -CAM_ABOVE_MUZZLE])
 
 # --- Math helpers ---
 

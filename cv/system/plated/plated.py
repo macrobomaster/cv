@@ -50,7 +50,10 @@ Q_VEL = (1.0) ** 2              # (m/s)^2/s, center-velocity random walk. Was (3
                                 # chassis accelerates, which let vx/vy spike on plate handoffs/noise and
                                 # fling the lead. (1)² ≈ realistic accel; raise toward (2) for faster chase.
 Q_THETA = (0.05) ** 2           # rad^2/s, heading random-walk
-Q_OMEGA = (12.0) ** 2           # (rad/s)^2/s, heading-rate random walk (covers a spin spin-up in ~1s)
+Q_OMEGA = (4.0) ** 2            # (rad/s)^2/s, heading-rate random walk. Was (12)² — too loose: on a slow
+                                # spin (ω weakly observable, noisy facing-ψ) it let ω run to absurd values
+                                # (~18 rad/s seen) that destabilize the coupled center → aim flings. Raise
+                                # toward (8) if genuine fast spin-ups are recognized too slowly.
 Q_R = (0.02) ** 2              # m^2/s, radius drifts slowly
 
 # Initial covariance at bootstrap — center/heading/omega/radius are poorly known from one plate.
@@ -61,10 +64,14 @@ INIT_W = (10.0) ** 2
 INIT_R = (0.12) ** 2
 P_CAP = 1e3                     # diagonal covariance ceiling (numerical safety in under-observed dirs)
 
-# Measurement noise
-MEAS_NOISE_BASE = (0.1) ** 2    # m^2, PnP position floor — set to the MEASURED raw-PnP scatter (~0.1 m).
-                                # Was (0.01)² = 100× overconfident, so the UKF over-trusted noisy corners
-                                # and over-fit them into v_c / spurious jumps. Retune if scatter changes.
+# Measurement noise — ANISOTROPIC in the CAMERA frame. PnP's depth (camera +z) is the sloppy axis (the
+# measured ~0.1 m scatter is almost all depth), but the corner centroid pins the LATERAL/bearing tightly.
+# Flooring lateral at the depth scale drowns the bearing signal that observes the spin orbit → garbage ω
+# (and mis-association). cov is camera-frame here; run() rotates it to gimbal-inertial (depth → range,
+# lateral → bearing/height). Trust bearing, distrust range.
+MEAS_NOISE_LAT = (0.02) ** 2    # m^2, lateral (camera x,y) floor — bearing is well-localized
+MEAS_NOISE_DEPTH = (0.10) ** 2  # m^2, depth (camera z) floor — the measured raw-PnP scatter (~0.1 m)
+_MEAS_FLOOR = np.diag([MEAS_NOISE_LAT, MEAS_NOISE_LAT, MEAS_NOISE_DEPTH])
 MEAS_NOISE_STALE_MULT = 100.0
 PSI_NOISE = (math.radians(25)) ** 2  # rad^2, plate facing-yaw is the NOISY part of PnP — trust loosely
 PSI_FLIP_GATE = math.radians(90)     # |ψ innovation| above this ⇒ likely a PnP normal flip → drop ψ this frame
@@ -396,11 +403,11 @@ def _pnp_pos_cov(corners:list, c_lo:Optional[list], c_hi:Optional[list], number:
   mean = np.array(corners, dtype=np.float32).reshape(4, 2) * _SCALE_PX
   pos, rvec = _pnp_pose(mean, obj)
   if pos is None:
-    return None, None, np.eye(3) * MEAS_NOISE_BASE
+    return None, None, _MEAS_FLOOR
   normal = cv2.Rodrigues(rvec)[0][:, 2]              # plate model +z = outward normal, camera frame
   if normal[2] > 0: normal = -normal                # face the camera (optical axis is +z)
   if c_lo is None or c_hi is None:
-    return pos, normal, np.eye(3) * MEAS_NOISE_BASE
+    return pos, normal, _MEAS_FLOOR
   lo = np.array(c_lo, dtype=np.float32).reshape(4, 2) * _SCALE_PX
   hi = np.array(c_hi, dtype=np.float32).reshape(4, 2) * _SCALE_PX
   cov = np.zeros((3, 3))
@@ -412,7 +419,7 @@ def _pnp_pos_cov(corners:list, c_lo:Optional[list], c_hi:Optional[list], number:
       if yl is None or yh is None: continue
       d = yh - yl
       cov += 0.25 * np.outer(d, d)
-  return pos, normal, cov + np.eye(3) * MEAS_NOISE_BASE
+  return pos, normal, cov + _MEAS_FLOOR
 
 def run():
   pub = messaging.Pub(["plate"])
