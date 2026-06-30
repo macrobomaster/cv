@@ -16,6 +16,13 @@ Subs:  camera_feed:  {ct, st, fid, slot}            (RGB frame, canonical pinhol
        gimbal_state: {t_stamp, yaw_gi, ...}          (~200Hz; interpolated to the frame ct)
 Pubs:  cam_occupancy:{t, x0, y0, res, nx, ny, occ:<bool grid bytes>, stale}
 """
+import os
+# Cap native math-lib threads BEFORE cv2/numpy load: occupancyd does only light per-frame
+# CPU work at a few Hz, so OpenBLAS/OpenMP defaulting to one thread PER CORE just
+# oversubscribes — the idle worker threads busy-spin → spurious ~Ncore% CPU. One is plenty.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import gc, math, time
 
 import cv2
@@ -80,6 +87,13 @@ def contact_mask(floor:np.ndarray) -> np.ndarray:
 def run():
   gc.disable()
   cv2.setNumThreads(OPENCV_THREADS)
+  # Mark alive IMMEDIATELY (before constructing sockets / FrameRing / GroundIPM) so a slow
+  # startup under load can't miss the 10s watchdog and trigger a kill→respawn restart loop
+  # (each respawn re-imports cv2/numpy → sustained high CPU with no output).
+  kv_put("watchdog", "occupancyd", time.monotonic())
+  logger.info("occupancyd: starting")
+  t0 = time.monotonic()
+
   pub = messaging.Pub(["cam_occupancy", "cam_occupancy_debug"])
   sub = messaging.Sub(["camera_feed", "slam_pose"], poll="camera_feed")
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
@@ -89,12 +103,12 @@ def run():
   ipm = GroundIPM(common.IMG_H, common.IMG_W, band_top=BAND_TOP, min_range=IPM_MIN_RANGE, max_range=IPM_MAX_RANGE)
   acc = OccupancyAccumulator(common.FIELD_BOUNDS, res=0.10, ttl=OCC_TTL)
   g = acc.grid
-  logger.info(f"occupancyd: grid {g.nx}x{g.ny} @ {g.res}m, band v0={ipm.v0}, CAM_HEIGHT={common.CAM_HEIGHT}m")
+  logger.info(f"occupancyd: grid {g.nx}x{g.ny} @ {g.res}m, band v0={ipm.v0}, "
+              f"CAM_HEIGHT={common.CAM_HEIGHT}m ({time.monotonic() - t0:.1f}s setup)")
 
   last_occ_t = last_wd = last_diag = 0.0
   n_cam = n_rgb = n_contact = 0                          # per-diag-window counters
   reason = "no camera_feed yet"                          # latest world-projection status
-  kv_put("watchdog", "occupancyd", time.monotonic())
 
   while True:
     sub.update(timeout=200)
