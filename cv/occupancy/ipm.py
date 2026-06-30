@@ -68,13 +68,15 @@ class OccupancyAccumulator:
     self.ttl = ttl
     self.seen = np.full((self.grid.ny, self.grid.nx), -1e18, dtype=np.float64)   # last-seen monotonic time
 
-  def stamp(self, pts_xy:np.ndarray, now:float):
-    if len(pts_xy) == 0: return
+  def stamp(self, pts_xy:np.ndarray, now:float) -> int:
+    """Stamp in-bounds points as seen at `now`; returns how many landed in the grid."""
+    if len(pts_xy) == 0: return 0
     g = self.grid
     ix = np.floor((pts_xy[:, 0] - g.x0) / g.res).astype(np.int64)
     iy = np.floor((pts_xy[:, 1] - g.y0) / g.res).astype(np.int64)
     m = (ix >= 0) & (ix < g.nx) & (iy >= 0) & (iy < g.ny)
     self.seen[iy[m], ix[m]] = now
+    return int(m.sum())
 
   def occupied(self, now:float) -> np.ndarray:
     return (now - self.seen) < self.ttl

@@ -145,10 +145,14 @@ def run():
       # psi0 = chassis world heading (slew-invariant); add the gimbal yaw at the FRAME's
       # capture time → the camera's world-forward azimuth at ct (mirrors navd's look-at).
       cam_world_yaw = math.atan2(fwd[1], fwd[0]) - gp_pose[0] + gp_ct[0]
-      pts = ipm.project(contact, cam_world_yaw, np.asarray(pose["p_w"], np.float64)[:2])
-      acc.stamp(pts, now)
+      p_xy = np.asarray(pose["p_w"], np.float64)[:2]
+      pts = ipm.project(contact, cam_world_yaw, p_xy)
+      inb = acc.stamp(pts, now)
       occ = acc.occupied(now)
       pub.send("cam_occupancy", {
         "t": float(cam["ct"]), "x0": g.x0, "y0": g.y0, "res": g.res, "nx": g.nx, "ny": g.ny,
         "occ": occ.tobytes(), "stale": bool(gp_ct[2])})
-      reason = f"{len(pts)} contact pts → {int(occ.sum())} occ cells" + (" [stale gimbal]" if gp_ct[2] else "")
+      c = pts.mean(0) if len(pts) else (float("nan"), float("nan"))
+      reason = (f"yaw={math.degrees(cam_world_yaw):.0f}deg robot=({p_xy[0]:.1f},{p_xy[1]:.1f}) "
+                f"pts~({c[0]:.1f},{c[1]:.1f}) inbounds={inb}/{len(pts)} → {int(occ.sum())} cells"
+                + (" [stale gimbal]" if gp_ct[2] else ""))
