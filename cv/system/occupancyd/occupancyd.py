@@ -32,6 +32,7 @@ from ...occupancy.ipm import GroundIPM, OccupancyAccumulator
 
 OPENCV_THREADS = getenv("OPENCV_THREADS", 1)   # don't oversubscribe; camerad is RT-pinned
 OCCUPANCY_HZ = getenv("OCCUPANCY_HZ", 8)        # cap; navd replans at 5Hz so this is plenty
+DEBUG = getenv("DEBUG", 0)                       # >=1: publish a 2D contact overlay for visual_slam
 OCC_TTL = 2.0                                   # s, out-of-view / departed obstacles fade (mirrors RobotObstacles.ttl)
 BAND_TOP = 0.5                                  # fraction of image height; only the lower band sees the floor
 IPM_MIN_RANGE = 0.2                             # m, ignore cells too close (own footprint) / too far (unreliable)
@@ -79,7 +80,7 @@ def contact_mask(floor:np.ndarray) -> np.ndarray:
 def run():
   gc.disable()
   cv2.setNumThreads(OPENCV_THREADS)
-  pub = messaging.Pub(["cam_occupancy"])
+  pub = messaging.Pub(["cam_occupancy", "cam_occupancy_debug"])
   sub = messaging.Sub(["camera_feed", "slam_pose"], poll="camera_feed")
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
@@ -105,31 +106,40 @@ def run():
     if now - last_occ_t < 1.0 / OCCUPANCY_HZ: continue
     last_occ_t = now
 
-    # World projection needs the robot pose; the world origin is meaningless until the
-    # first absolute tag fix (same gate navd uses).
-    pose = sub["slam_pose"]
-    if pose is None or pose["n_tags"] == 0: continue
-    fwd = gimbal_heading(pose["q_wb"])
-    gp_pose = gimbal_buf.interpolate(pose["t"])
-    gp_ct = gimbal_buf.interpolate(float(cam["ct"]))
-    if fwd is None or gp_pose is None or gp_ct is None: continue
-    # psi0 = chassis world heading (slew-invariant); add the gimbal yaw at the FRAME's
-    # capture time → the camera's world-forward azimuth at ct (mirrors navd's look-at).
-    psi0 = math.atan2(fwd[1], fwd[0]) - gp_pose[0]
-    cam_world_yaw = psi0 + gp_ct[0]
-
     rgb = frame_view(ring, cam)
     if rgb is None: continue
-    band = rgb[ipm.v0:]
-    contact = contact_mask(floor_mask(band))
-    pts = ipm.project(contact, cam_world_yaw, np.asarray(pose["p_w"], np.float64)[:2])
-    acc.stamp(pts, now)
+    contact = contact_mask(floor_mask(rgb[ipm.v0:]))     # (Hb, W) ground-contact pixels
 
-    occ = acc.occupied(now)
-    pub.send("cam_occupancy", {
-      "t": float(cam["ct"]), "x0": g.x0, "y0": g.y0, "res": g.res, "nx": g.nx, "ny": g.ny,
-      "occ": occ.tobytes(), "stale": bool(gp_ct[2])})
+    # DEBUG: 2D overlay of the detected obstacle contact line, in FULL-image pixel coords —
+    # visible in visual_slam's camera view INDEPENDENT of localization, so the floor
+    # classifier can be verified before SLAM ever anchors.
+    if DEBUG:
+      cy, cx = np.nonzero(contact)
+      pub.send("cam_occupancy_debug",
+               {"t": float(cam["ct"]), "contact": np.stack([cx, cy + ipm.v0], 1).astype(np.int32).tolist()})
+
+    # World projection needs a localized pose: the world origin is meaningless until the
+    # first absolute tag fix (same gate navd uses). Until then we still emit the 2D overlay
+    # above but can't place obstacles in the world — log WHY so it isn't silently dark.
+    pose = sub["slam_pose"]
+    fwd = gimbal_heading(pose["q_wb"]) if pose is not None else None
+    gp_pose = gimbal_buf.interpolate(pose["t"]) if pose is not None else None
+    gp_ct = gimbal_buf.interpolate(float(cam["ct"]))
+    if pose is None or pose["n_tags"] == 0:
+      reason = "no slam_pose" if pose is None else "n_tags=0 (SLAM not anchored to a tag yet)"
+    elif fwd is None or gp_pose is None or gp_ct is None:
+      reason = "no gimbal_state"
+    else:
+      # psi0 = chassis world heading (slew-invariant); add the gimbal yaw at the FRAME's
+      # capture time → the camera's world-forward azimuth at ct (mirrors navd's look-at).
+      cam_world_yaw = math.atan2(fwd[1], fwd[0]) - gp_pose[0] + gp_ct[0]
+      pts = ipm.project(contact, cam_world_yaw, np.asarray(pose["p_w"], np.float64)[:2])
+      acc.stamp(pts, now)
+      occ = acc.occupied(now)
+      pub.send("cam_occupancy", {
+        "t": float(cam["ct"]), "x0": g.x0, "y0": g.y0, "res": g.res, "nx": g.nx, "ny": g.ny,
+        "occ": occ.tobytes(), "stale": bool(gp_ct[2])})
+      reason = f"{len(pts)} contact pts → {int(occ.sum())} occ cells" + (" [stale gimbal]" if gp_ct[2] else "")
 
     if now - last_diag > 1.0:
-      logger.info(f"occupancyd: {len(pts)} contact pts, {int(occ.sum())} occ cells"
-                  + (" [stale gimbal]" if gp_ct[2] else "")); last_diag = now
+      logger.info(f"occupancyd: {int(contact.sum())} contact px in frame; world: {reason}"); last_diag = now
