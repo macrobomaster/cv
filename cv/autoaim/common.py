@@ -26,7 +26,7 @@ T = getenv("T", 1)
 # corner output valid range
 BIN_LO, BIN_HI = -0.5, 1.5
 
-MODEL_VERSION = 43
+MODEL_VERSION = 45
 
 # canonical camera
 CANONICAL_FX_FY = 648
@@ -72,15 +72,8 @@ AIM_I_CLAMP = 2.0       # rad/s, anti-windup ceiling on the integral's velocity 
 AIM_FF_DT = 0.010       # s, forward finite-difference step for the velocity feedforward
 AIM_D_TAU = 0.020       # s, low-pass time constant on the derivative term
 
-# camera frame (RDF: x-right, y-down, z-forward) → gimbal-inertial frame
-# (x-forward, y-up, z-right; right-handed). A camera mount is rigid, so this MUST
-# be a proper rotation (det +1). Row 2 was [-1,0,0] (det -1, a reflection) — a
-# latent bug that left-handed the gimbal frame and mirrored the lateral/yaw
-# channel; the mirror was being undone downstream by decisiond's atan2 sign.
-R_MOUNT = np.array([[0,  0,  1],
-                    [0, -1,  0],
-                    [1,  0,  0]], dtype=np.float64)
-T_MOUNT = np.array([0, 0, 0], dtype=np.float64)
+# (camera→gimbal-inertial extrinsic is now slam.common's R_CAM/T_CAM — autoaim runs on the yaw-only
+#  SLAM camera; the old full-gimbal R_MOUNT/T_MOUNT + calib_handeye were removed.)
 
 @partial(TinyJit, prune=True)
 def pred(model, frame, target_color, frames:Tensor|None=None):

@@ -82,6 +82,13 @@ def euler_to_rvec(roll_deg, pitch_deg, yaw_deg):
 # A small jitter hedges against the real warp not being a perfect canonical (calibration error,
 # distortion residual); set to 0.0 for dead-fixed.
 FOCAL_JITTER = 0.05
+
+# Ambient lighting gain: darkens reflective surfaces (background + plate BODIES) while emissive LEDs
+# stay full-bright (added separately), so "dim plate, bright light bars" low-light scenes appear in
+# training and the model learns to localize off the bars alone. Tunable data-distribution params.
+AMBIENT_DIM_PROB = 0.35           # fraction of sequences rendered as low-light
+AMBIENT_DIM_RANGE = (0.02, 0.5)   # dim-scene gain (uniform; floor ~near-black, only bars visible)
+AMBIENT_NORM_RANGE = (0.8, 1.15)  # ambient gain for normal scenes
 def _sample_focal() -> float:
   return CANONICAL_FX_FY * random.uniform(1 - FOCAL_JITTER, 1 + FOCAL_JITTER)
 
@@ -571,6 +578,10 @@ def generate_sequence(file, T=4, target_color:str|None=None):
   # Background hue/sat/val shift is a scene/white-balance property — sample once and bake into the
   # shared background so it stays consistent across the T frames instead of flickering per frame.
   bg_base = A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=30, val_shift_limit=20, p=0.7)(image=bg_base)["image"]
+  # Ambient gain (per-sequence scene property): dim the reflective bg + plate bodies; the emissive LEDs
+  # added during compositing use the ORIGINAL texture so they stay bright -> "dim plate, bright bars".
+  ambient = random.uniform(*AMBIENT_DIM_RANGE) if random.random() < AMBIENT_DIM_PROB else random.uniform(*AMBIENT_NORM_RANGE)
+  bg_base = np.clip(bg_base.astype(np.float32) * ambient, 0, 255).astype(np.uint8)
   # Highlight clipping is a sensor property — decide on/off and its threshold once per sequence.
   desat_params = (random.uniform(150, 220), random.uniform(0.2, 0.6)) if random.random() < 0.5 else None
 
@@ -662,12 +673,13 @@ def generate_sequence(file, T=4, target_color:str|None=None):
     drawn = []  # (plate_idx, info, kps_t, curr_center, ry_t) at t == T-1
     for _z, plate_idx, info, pose, curr_center, velocity_px in pending:
       x_t, y_t, z_t, rx_t, ry_t, rz_t = pose
-      ret = project_plate(info["plate_rgba"], info["plate_alpha"], info["kps_local"], img,
+      body_rgb = np.clip(info["plate_rgba"].astype(np.float32) * ambient, 0, 255).astype(np.uint8)  # ambient-lit (reflective) body
+      ret = project_plate(body_rgb, info["plate_alpha"], info["kps_local"], img,
                           x_t, y_t, z_t, rx_t, ry_t, rz_t, info["plate_w"], info["plate_h"], fx, velocity_px=velocity_px)
       if ret is not None:
         kps_t, H_t, mask_t = ret
         id_buf[mask_t > 0] = plate_idx
-        _apply_emissive_leds(img, info["plate_rgba"], info["plate_alpha"], info["color"], H_t, velocity_px=velocity_px)
+        _apply_emissive_leds(img, info["plate_rgba"], info["plate_alpha"], info["color"], H_t, velocity_px=velocity_px)  # LEDs from ORIGINAL (bright) texture
         if t == T - 1: drawn.append((plate_idx, info, kps_t, curr_center, ry_t))
 
     # Foreground occluders in front of all plates (+ marked in id_buf), so the visibility gate below

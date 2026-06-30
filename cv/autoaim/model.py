@@ -9,7 +9,7 @@ from ..common.tensor import pixel_unshuffle
 from ..common.nn import Attention, FFN, MLP, LayerScale, LayerScale2d
 from ..common.nn.fuse import FusedBlock
 from ..common.nn.norm import GRN, RMSNorm, RMSNorm2d
-from ..common.losses import mal_loss
+from ..common.losses import mal_loss, quality_focal_loss
 from .common import IMG_H, IMG_W, N_X3_TOKENS, X3_H, X3_W, T, BIN_LO, BIN_HI, CANONICAL_CAMERA_MATRIX
 
 class ChannelMixer:
@@ -25,14 +25,20 @@ class ChannelMixer:
 class ConvTokenMixer(FusedBlock):
   def __init__(self, dim:int, stride:int=1):
     self.dim, self.stride = dim, stride
-    self.dw3x3 = nn.Conv2d(dim, dim, 3, stride, 1, groups=dim)
-    self.dw7x7 = nn.Conv2d(dim, dim, 7, stride, 3, groups=dim)
+    # the mixer always runs at stride 1; a fixed Tri-3 low-pass does any stride-2 subsample (anti-aliased
+    # downsampling, Zhang 2019 BlurPool) so sub-pixel input shifts don't alias into the features -> less jitter.
+    self.dw3x3 = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
+    self.dw7x7 = nn.Conv2d(dim, dim, 7, 1, 3, groups=dim)
+    if stride != 1:
+      k = Tensor([1.0, 2.0, 1.0]).reshape(3, 1)
+      k = k * k.reshape(1, 3)
+      k = k / k.sum()  # separable Tri-3 low-pass
+      self.blur = k.reshape(1, 1, 3, 3).expand(dim, 1, 3, 3).contiguous().is_param_(False)  # fixed depthwise blur
 
   def __call__(self, x:Tensor) -> Tensor:
-    if not self.fused:
-      return self.dw3x3(x) + self.dw7x7(x)
-    else:
-      return self.conv(x)
+    x = self.conv(x) if self.fused else self.dw3x3(x) + self.dw7x7(x)
+    if self.stride != 1: x = x.conv2d(self.blur.cast(x.dtype), groups=self.dim, stride=2, padding=1)
+    return x
 
   def fuse(self) -> bool:
     if not (was_fused := super().fuse()):
@@ -44,7 +50,7 @@ class ConvTokenMixer(FusedBlock):
       dw3x3_b = self.dw3x3.bias
       b = dw3x3_b + dw7x7_b
 
-      self.conv = nn.Conv2d(self.dim, self.dim, 7, self.stride, 3, groups=self.dim)
+      self.conv = nn.Conv2d(self.dim, self.dim, 7, 1, 3, groups=self.dim)  # stride 1, blurpool does the subsample
       self.conv.weight.replace(w.realize())
       self.conv.bias.replace(b.realize())
 
@@ -346,13 +352,14 @@ class Decoder:
     self.blocks = [DecoderBlock(dim, heads=heads, kv_heads=kv_heads, dropout=dropout) for _ in range(n_layers)]
     self.ln_out = RMSNorm(dim)
 
-    self.class_proj = nn.Linear(dim, NUM_CLASSES, bias=False)
+    self.color_proj = nn.Linear(dim, 4, bias=False)   # {none, blank, red, blue} — presence/color = the VALIDITY gate (number-independent)
+    self.number_proj = nn.Linear(dim, 6, bias=False)  # numbers 1-6 — decoupled, so an uncertain digit can't invalidate a localized plate
     self.corner_mlp = MLP(dim, 2 * n_bins, dim // 2, blocks=1)  # shared residual head over absolute bins
 
   def __call__(self, mem:Tensor, sb:Tensor, target_color:Tensor, pos_emb, coords:Tensor) -> tuple[Tensor, list, Tensor]:
     # mem: (B, N_X3_TOKENS, D) spatial memory [x3]; sb: (B, 1, D) global token (last query)
     # target_color: (B,) int32; pos_emb/coords shared with FeatureTokenizer (same Fourier space as mem).
-    # Returns (class_logits, [cum_logits per layer], obj_logit) — obj_logit scores tokens for query selection.
+    # Returns (color_logits, number_logits, [cum_logits per layer], obj_logit) — obj_logit scores tokens for query selection.
     B, _, D = mem.shape
 
     target_tok = self.target_color_embed(target_color).reshape(B, 1, D)  # (B, 1, D)
@@ -388,8 +395,9 @@ class Decoder:
       expected = (cum.reshape(B, N_CORNERS, 2, self.n_bins).softmax(-1) * centers).sum(-1)  # (B, 4, 2)
       ref = expected.clip(0, 1).detach()  # next layer attends where this layer pointed
 
-    class_logits = self.class_proj(qn[:, 1, :])  # (B, NUM_CLASSES)
-    return class_logits, cum_layers, obj_logit
+    color_logits = self.color_proj(qn[:, 1, :])    # (B, 4) presence/color (validity)
+    number_logits = self.number_proj(qn[:, 1, :])  # (B, 6) number 1-6
+    return color_logits, number_logits, cum_layers, obj_logit
 
 # Unified class encoding:
 # 0: no plate
@@ -420,7 +428,8 @@ CLASS_DECODE_TABLE = [
 
 DFL_WEIGHT = 0.5
 L1_WEIGHT = 1.0
-CLASS_WEIGHT = 1.0
+COLOR_WEIGHT = 1.0   # presence/color (validity) — quality-coupled (MAL)
+NUMBER_WEIGHT = 0.5  # number — plain CE, NOT quality-coupled (digit difficulty is resolution, not localization)
 GOLSD_WEIGHT = 0.125
 QUALITY_TAU = 0.4
 MAL_GAMMA = 2
@@ -428,6 +437,8 @@ MIN_PLATE_SCALE = 0.02
 GEOM_WEIGHT = 0.1
 DEGEN_FRAC = 0.1  # vp non-degeneracy: penalize perimeter edges shorter than this fraction of the diagonal
 OBJ_WEIGHT = 0.5  # query-selection objectness: find the plate token (NOT quality-weighted — must find small plates too)
+OBJ_SIGMA = 0.06        # dense-objness Gaussian half-width in normalized coords (~1.4 x3 cells in u, ~0.7 in v)
+OBJ_FOCAL_GAMMA = 2     # QFL modulating exponent for the dense objness target
 
 # image of the absolute conic ω = (KKᵀ)⁻¹ in canonical pixel coords; a rectangle's two 3D edge
 # directions are orthogonal, so their image vanishing points satisfy v_hᵀ ω v_v = 0.
@@ -471,9 +482,9 @@ class Model:
     *_, x3, sb = self.backbone(img)
     return self.feature_tokenizer(x3, sb)
 
-  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+  def __call__(self, img:Tensor, y:Tensor) -> tuple[Tensor, ...]:
     # img: (B, T, IMG_H, IMG_W, 3)
-    # Returns (total_loss, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss, obj_loss).
+    # Returns (total, color_loss, number_loss, l1_loss, dfl_loss, lsd_loss, geom_loss, obj_loss).
     assert Tensor.training
     mem, sb = self.encode(img)
     return self.corner_loss(mem, sb, y)
@@ -490,7 +501,7 @@ class Model:
     target_color = y[:, 11].cast(dtypes.int32)
 
     ft = self.feature_tokenizer
-    class_logits, cum_layers, obj_logit = self.decoder(mem, sb, target_color, ft.pos_emb, ft.coords)
+    color_logits, number_logits, cum_layers, obj_logit = self.decoder(mem, sb, target_color, ft.pos_emb, ft.coords)
 
     denom = has_corners.sum().add(1e-6)
     centers = bin_centers(N)
@@ -516,12 +527,22 @@ class Model:
       l1_loss += (weights[i] / wsum) * (has_corners * l1_i).sum() / denom
       dfl_loss += (weights[i] / wsum) * (has_corners * dfl_i).sum() / denom
 
-    # class loss
+    # presence/color loss (the VALIDITY gate) — quality-coupled MAL over {none, blank, red, blue}.
+    # color_target from class_id arithmetic: 0=none, 1=blank(1-4), 2=red(5-10), 3=blue(11-16).
     rel_err = (expected - corners_f).abs().mean(-1).mean(-1) / plate_scale  # (B,), final layer
     quality = has_corners * (-rel_err / QUALITY_TAU).exp() + (1 - has_corners)  # (B,)
-    y_onehot = class_id.one_hot(NUM_CLASSES).cast(dtypes.float32)
-    mal = mal_loss(class_logits.cast(dtypes.float32), y_onehot, quality.reshape(B, 1), gamma=MAL_GAMMA)  # (B,)
-    class_loss = (has_class * mal).sum() / has_class.sum().add(1e-6)
+    color_target = (class_id >= 1).cast(dtypes.int32) + (class_id >= 5).cast(dtypes.int32) + (class_id >= 11).cast(dtypes.int32)
+    color_oh = color_target.one_hot(4).cast(dtypes.float32)
+    mal = mal_loss(color_logits.cast(dtypes.float32), color_oh, quality.reshape(B, 1), gamma=MAL_GAMMA)  # (B,)
+    color_loss = (has_class * mal).sum() / has_class.sum().add(1e-6)
+
+    # number loss — plain CE over numbers 1-6, supervised ONLY for real (red/blue) targets (class_id>=5),
+    # NOT quality-coupled, so an unreadable digit on a localized plate never invalidates it or fights localization.
+    number_mask = (class_id >= 5).cast(dtypes.float32)  # (B,)
+    number_idx = (class_id - 5 - 6 * (class_id >= 11).cast(dtypes.int32)).clamp(0, 5)  # 0..5 -> number 1..6
+    number_oh = number_idx.one_hot(6).cast(dtypes.float32)
+    number_i = number_logits.cast(dtypes.float32).cross_entropy(number_oh, reduction="none")  # (B,)
+    number_loss = (number_mask * number_i).sum() / number_mask.sum().add(1e-6)
 
     # go-lsd self-distillation loss
     teacher = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1).detach()
@@ -535,27 +556,36 @@ class Model:
     # geometric prior — final-layer corners should be the perspective image of a rectangle (vp-orthogonality)
     geom_loss = (has_corners * vp_orthogonality_loss(expected)).sum() / denom
 
-    # query-selection objectness — pick the x3 token nearest the plate centroid (softmax over the coarse level)
+    # query-selection objectness — DENSE positive supervision: a smooth Gaussian bump over the coarse grid
+    # (peak at the plate-centroid token), trained per-token with Quality Focal Loss (NOT softmax winner-take-all).
+    # the objness surface becomes a plateau, not a knife-edge, so argmax stops flipping cells frame-to-frame.
+    # position-only (preserves "find small plates" — no quality/localization coupling).
     centroid = corners_f.mean(1)  # (B, 2)
     x3_coords = ft.coords[:N_X3_TOKENS]  # selection pool is the coarse level only
-    d2 = ((x3_coords.reshape(1, -1, 2) - centroid.reshape(B, 1, 2)) ** 2).sum(-1)  # (B, N_X3_TOKENS)
-    obj_target = d2.argmin(-1).one_hot(obj_logit.shape[-1]).cast(dtypes.float32)  # (B, N_X3_TOKENS)
-    obj_i = obj_logit.cast(dtypes.float32).cross_entropy(obj_target, reduction="none")  # (B,)
+    d2 = ((x3_coords.reshape(1, -1, 2) - centroid.reshape(B, 1, 2)) ** 2).sum(-1)  # (B, N_X3_TOKENS), normalized
+    obj_target = (-d2 / (2 * OBJ_SIGMA ** 2)).exp()  # (B, N_X3_TOKENS) soft Gaussian, peak 1 at the centroid token
+    obj_qfl = quality_focal_loss(obj_logit.cast(dtypes.float32), obj_target, gamma=OBJ_FOCAL_GAMMA)  # (B, N)
+    obj_i = obj_qfl.sum(-1) / obj_target.sum(-1).add(1e-6)  # GFL norm: sum over grid / soft positive mass
     obj_loss = (has_corners * obj_i).sum() / denom
 
-    total = CLASS_WEIGHT * class_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss + GOLSD_WEIGHT * lsd_loss + GEOM_WEIGHT * geom_loss + OBJ_WEIGHT * obj_loss
-    return total, class_loss, l1_loss, dfl_loss, lsd_loss, geom_loss, obj_loss
+    total = (COLOR_WEIGHT * color_loss + NUMBER_WEIGHT * number_loss + L1_WEIGHT * l1_loss + DFL_WEIGHT * dfl_loss
+             + GOLSD_WEIGHT * lsd_loss + GEOM_WEIGHT * geom_loss + OBJ_WEIGHT * obj_loss)
+    return total, color_loss, number_loss, l1_loss, dfl_loss, lsd_loss, geom_loss, obj_loss
 
   def corner_predict(self, mem:Tensor, sb:Tensor, target_color:Tensor) -> Tensor:
     B = mem.shape[0]
     N = self.decoder.n_bins
 
     ft = self.feature_tokenizer
-    class_logits, cum_layers, _ = self.decoder(mem, sb, target_color, ft.pos_emb, ft.coords)
+    color_logits, number_logits, cum_layers, _ = self.decoder(mem, sb, target_color, ft.pos_emb, ft.coords)
 
-    class_probs = class_logits.cast(dtypes.float32).sigmoid()  # one-vs-all; max = quality-aware confidence
-    class_id = class_probs.argmax(-1, keepdim=True).cast(dtypes.default_float)
-    class_conf = class_probs.max(-1, keepdim=True).cast(dtypes.default_float)
+    # validity = P(target-color plate) from the presence/color head — NUMBER-INDEPENDENT, so a localized plate
+    # with an uncertain digit stays valid. number from its own head; class_id reconstructed for the (unchanged) msg.
+    color_probs = color_logits.cast(dtypes.float32).sigmoid()  # one-vs-all (MAL); idx {0=none,1=blank,2=red,3=blue}
+    tc = target_color.cast(dtypes.int32) + 2  # target red->2, blue->3
+    class_conf = (color_probs * tc.one_hot(4).cast(dtypes.float32)).sum(-1, keepdim=True).cast(dtypes.default_float)
+    number = number_logits.argmax(-1, keepdim=True).cast(dtypes.int32) + 1  # 1..6
+    class_id = (4 + 6 * target_color.cast(dtypes.int32).reshape(B, 1) + number).cast(dtypes.default_float)  # red:5-10, blue:11-16
 
     centers = bin_centers(N)
     dist = cum_layers[-1].reshape(B, N_CORNERS, 2, N).cast(dtypes.float32).softmax(-1)  # (B,4,2,N)

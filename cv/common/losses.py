@@ -18,6 +18,13 @@ def focal_loss(pred:Tensor, y:Tensor, alpha:float=0.25, gamma:float=2) -> Tensor
   loss = ce * ((1 - pt) ** gamma) * alpha_
   return loss
 
+def quality_focal_loss(pred:Tensor, y:Tensor, gamma:float=2) -> Tensor:
+  # QFL (Generalized Focal Loss): soft-target sigmoid loss. The modulating factor |y - sigmoid(pred)|^gamma
+  # drives the loss to 0 when the score matches the soft target exactly (classic focal_loss can't, on soft y).
+  p = pred.sigmoid()
+  ce = pred.binary_crossentropy_logits(y, reduction="none")
+  return ce * (y - p).abs() ** gamma
+
 def mal_loss(pred:Tensor, y:Tensor, quality:Tensor, gamma:float=2) -> Tensor:
   target = y.where(quality.detach() ** gamma, 0)
   ce = pred.binary_crossentropy_logits(target, reduction="none").contiguous().contiguous_backward()
