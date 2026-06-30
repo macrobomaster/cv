@@ -2,7 +2,7 @@
 
 Subscribes non-conflated and drains every tick, so it captures each message the publishers emit
 (not just the latest). Each record is length-prefixed CBOR: {topic, t (monotonic recv), data}.
-The calib tools (calib_handeye, calib_gimbal) replay a bag offline.
+The calib tools (e.g. calib_gimbal) replay a bag offline.
 
   python -m cv.tools.bag out.bag              # record everything until Ctrl-C
   python -m cv.tools.bag out.bag --no-camera  # skip the big camera frames
