@@ -6,6 +6,7 @@ wandb/
 __pycache__/
 
 sys/
+persist/
 base/
 
 weights/camera_calib.npz
