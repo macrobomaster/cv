@@ -68,6 +68,9 @@ H_EMA = 0.3                     # per-plate height smoothing
 
 # Data association / retarget
 ASSOC_POS_MAHAL = 30.0          # min-over-slots position gate for "same robot, this plate" (else retarget)
+ASSOC_POS_FLOOR = (0.06) ** 2   # m^2 — floor on the association innov-cov so a CONVERGED filter (tiny
+                                # Pzz+R_pos) can't hair-trigger the gate on normal PnP noise (~5-15cm).
+                                # With MAHAL=30 this caps the gate at a ~0.33 m "same-plate" radius.
 RETARGET_JUMP_FRAMES = 2        # consecutive gate failures before declaring a new robot
 
 # Classification thresholds (read off the state)
@@ -193,7 +196,9 @@ class RobotUKF:
   def pos_mahal(self, k:int, p_xy:np.ndarray, R_pos:np.ndarray) -> float:
     z_hat, Pzz, _ = self._unscented(self.x, self.P, k)
     innov = p_xy - z_hat[:2]
-    S = Pzz[:2, :2] + R_pos
+    # Floor the innovation cov: a converged filter has tiny Pzz+R_pos, which would turn ordinary PnP
+    # noise into a huge Mahalanobis distance and spuriously retarget a plate it's tracking fine.
+    S = Pzz[:2, :2] + R_pos + ASSOC_POS_FLOOR * np.eye(2)
     return float(innov @ np.linalg.solve(S, innov))
 
   def update(self, k:int, p_xy:np.ndarray, h:float, psi_obs:float, R_pos:np.ndarray, R_psi:float):
@@ -282,12 +287,21 @@ class PlatedState:
     self.consecutive_jumps = 0
     self.last_meas: Optional[np.ndarray] = None   # raw PnP plate position (pre-EKF), for viz
     self.last_psi: float = 0.0                    # raw measured plate facing-yaw, for viz/validation
+    self._retarget_n = 0                          # retargets since last diag log
+    self._retarget_log_t = 0.0
 
-  def _retarget(self, p_xy, h, psi, t):
+  def _retarget(self, p_xy, h, psi, t, reason):
     self.ukf.bootstrap(p_xy, h, psi, t)
     self.target_id += 1
     self.handoff_until_t = t + T_HANDOFF
     self.consecutive_jumps = 0
+    # Each retarget forces 150ms of class=UNKNOWN, so frequent retargets read as "stuck UNKNOWN while
+    # tracking". Throttled log so a flickering cause shows its RATE + reason, not a per-frame flood.
+    self._retarget_n += 1
+    if self._retarget_log_t == 0.0: self._retarget_log_t = t
+    if t - self._retarget_log_t > 1.0:
+      logger.info(f"plated retarget → #{self.target_id} ({reason}); {self._retarget_n} in {t-self._retarget_log_t:.1f}s")
+      self._retarget_log_t = t; self._retarget_n = 0
 
   def push_measurement(self, t_capture, pos_gi, psi, meta, R_pos_xy, R_psi):
     self.last_meas = pos_gi
@@ -296,37 +310,36 @@ class PlatedState:
     h = float(pos_gi[2])                         # z-up: height is the world-z component
 
     if not self.ukf.initialized:
-      self._retarget(p_xy, h, psi, t_capture)
-      self.last_meta = meta
-      self.last_valid_t = t_capture
-      return
-
-    # A different color/number is unambiguously a different robot.
-    if self.last_meta is not None and meta != self.last_meta:
-      self._retarget(p_xy, h, psi, t_capture)
+      self._retarget(p_xy, h, psi, t_capture, "init")
       self.last_meta = meta
       self.last_valid_t = t_capture
       return
 
     if self.last_valid_t is not None and (t_capture - self.last_valid_t) > T_LOST:
-      self._retarget(p_xy, h, psi, t_capture)
+      self._retarget(p_xy, h, psi, t_capture, f"lost {t_capture - self.last_valid_t:.2f}s")
       self.last_meta = meta
       self.last_valid_t = t_capture
       return
 
     self.ukf.predict_to(t_capture)
     k, mahal = self.ukf.associate(p_xy, R_pos_xy)
-    # The detection matches no predicted plate position → likely a new robot.
+    meta_changed = self.last_meta is not None and meta != self.last_meta
+
+    # A new robot appears at a DIFFERENT position. A changed color/number CORROBORATES that but isn't
+    # sufficient alone — a trained model still flips a label on the odd frame, and a flip on a plate
+    # that's still in the same place is just noise (keep the track, adopt the label). So retarget only on
+    # a position jump: persistent (RETARGET_JUMP_FRAMES) by itself, or immediate if meta ALSO changed.
     if mahal > ASSOC_POS_MAHAL:
       self.consecutive_jumps += 1
-      if self.consecutive_jumps >= RETARGET_JUMP_FRAMES:
-        self._retarget(p_xy, h, psi, t_capture)
+      if meta_changed or self.consecutive_jumps >= RETARGET_JUMP_FRAMES:
+        self._retarget(p_xy, h, psi, t_capture,
+                       f"{'meta+' if meta_changed else ''}jump mahal={mahal:.0f}>{ASSOC_POS_MAHAL:.0f}")
         self.last_meta = meta
         self.last_valid_t = t_capture
       return
     self.consecutive_jumps = 0
     self.ukf.update(k, p_xy, h, psi, R_pos_xy, R_psi)
-    self.last_meta = meta
+    self.last_meta = meta                          # adopt current label (handles benign meta flicker)
     self.last_valid_t = t_capture
 
   def push_invalid(self, t:float):
