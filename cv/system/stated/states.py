@@ -1,16 +1,15 @@
 """Concrete match states for stated.
 
 State priority is the order returned by make_state_machine():
-  IDLE -> NAV_TO_CENTER -> ACQUIRE -> SEARCH
+  IDLE -> NAV_TO_BACK -> HOLD_BACK -> RETURN_CENTER -> NAV_TO_CENTER -> ACQUIRE -> SEARCH
 
 Only nav states publish nav_goal. navd treats nav_goal as fresh-only, so every other state
 clears navigation by not publishing it.
 """
-import os, math, time
+import math, time
 
 from ..core.logging import logger
 from ..common.geometry import wrap_pi
-from ...slam import common
 from .state_machine import StateBase, StateMachine
 
 SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
@@ -19,6 +18,12 @@ SCAN_TURN_DT = 0.5
 SCAN_PITCH = 0.0
 ACQUIRE_HOLD_DT = 0.8
 NAV_ARRIVE_RADIUS = 0.25
+RECENTER_PERIOD = 10.0
+RETREAT_PERIOD = 60.0
+RETREAT_HOLD_DT = 10.0
+
+CENTER_GOAL = (11.02, 6.98)
+BACK_GOAL = (11, 6)
 
 def scan_setpoint(t:float, center:float, start_t:float) -> dict:
   cycle_dt = SCAN_SWEEP_DT + SCAN_TURN_DT
@@ -50,7 +55,7 @@ class IdleState(StateBase):
   def run(self, ctx, pub):
     for state in self.reset_states:
       reset = getattr(state, "reset", None)
-      if reset is not None: reset()
+      if reset is not None: reset(ctx)
 
 class NavToGoalState(StateBase):
   name = "nav_to_goal"
@@ -60,7 +65,7 @@ class NavToGoalState(StateBase):
   def __init__(self):
     self.done = False
 
-  def reset(self):
+  def reset(self, ctx=None):
     self.done = False
 
   def arrived(self, ctx) -> bool:
@@ -84,10 +89,110 @@ class NavToGoalState(StateBase):
     if ctx.entered: logger.info(f"stated: navigating to {self.goal_label}")
     pub.send("nav_goal", {"x": self.goal_xy[0], "y": self.goal_xy[1], "label": self.goal_label})
 
-class NavToCenterState(NavToGoalState):
+class PeriodicNavToGoalState(NavToGoalState):
+  period = math.inf
+  first_delay = 0.0
+
+  def __init__(self):
+    super().__init__()
+    self.next_due = time.monotonic() + self.first_delay
+
+  def reset(self, ctx=None):
+    super().reset(ctx)
+    self.next_due = (ctx.now if ctx is not None else time.monotonic()) + self.first_delay
+
+  def should_transition(self, current:StateBase, ctx) -> bool:
+    return bool(ctx["game_running"]) and self.goal_xy is not None and ctx.now >= self.next_due
+
+  def mark_done(self, ctx):
+    self.next_due = ctx.now + self.period
+
+  def can_transition(self, ctx) -> bool:
+    if not bool(ctx["game_running"]): return True
+    if self.arrived(ctx):
+      self.mark_done(ctx)
+      return True
+    return False
+
+class NavToCenterState(PeriodicNavToGoalState):
   name = "nav_to_center"
   goal_label = "center"
-  goal_xy = (11.02, 6.98)
+  goal_xy = CENTER_GOAL
+  period = RECENTER_PERIOD
+  first_delay = 0.0
+
+class NavToBackState(PeriodicNavToGoalState):
+  name = "nav_to_back"
+  goal_label = "back"
+  goal_xy = BACK_GOAL
+  period = RETREAT_PERIOD
+  first_delay = RETREAT_PERIOD
+
+  def __init__(self):
+    super().__init__()
+    self.hold_pending = False
+
+  def reset(self, ctx=None):
+    super().reset(ctx)
+    self.hold_pending = False
+
+  def mark_done(self, ctx):
+    super().mark_done(ctx)
+    self.hold_pending = True
+
+class HoldBackState(StateBase):
+  name = "hold_back"
+
+  def __init__(self, nav_back:NavToBackState):
+    self.nav_back = nav_back
+    self.until = -math.inf
+    self.return_center = False
+
+  def reset(self, ctx=None):
+    self.until = -math.inf
+    self.return_center = False
+
+  def should_transition(self, current:StateBase, ctx) -> bool:
+    return bool(ctx["game_running"]) and self.nav_back.hold_pending
+
+  def can_transition(self, ctx) -> bool:
+    if not bool(ctx["game_running"]): return True
+    if ctx.now >= self.until:
+      self.return_center = True
+      return True
+    return False
+
+  def run(self, ctx, pub):
+    if ctx.entered:
+      self.nav_back.hold_pending = False
+      self.until = ctx.now + RETREAT_HOLD_DT
+      logger.info("stated: holding back")
+    pub.send("nav_goal", {"x": BACK_GOAL[0], "y": BACK_GOAL[1], "label": "back_hold"})
+
+class ReturnCenterState(NavToGoalState):
+  name = "return_center"
+  goal_label = "center"
+  goal_xy = CENTER_GOAL
+
+  def __init__(self, hold_back:HoldBackState, recenter:NavToCenterState):
+    super().__init__()
+    self.hold_back = hold_back
+    self.recenter = recenter
+
+  def reset(self, ctx=None):
+    super().reset(ctx)
+    self.hold_back.return_center = False
+
+  def should_transition(self, current:StateBase, ctx) -> bool:
+    return bool(ctx["game_running"]) and self.hold_back.return_center
+
+  def can_transition(self, ctx) -> bool:
+    if not bool(ctx["game_running"]): return True
+    if self.arrived(ctx):
+      self.hold_back.return_center = False
+      self.recenter.mark_done(ctx)
+      return True
+    return False
 
 class AcquireState(StateBase):
   name = "acquire"
@@ -95,7 +200,7 @@ class AcquireState(StateBase):
   def __init__(self):
     self.last_valid_t = -math.inf
 
-  def reset(self):
+  def reset(self, ctx=None):
     self.last_valid_t = -math.inf
 
   def observe(self, ctx):
@@ -137,7 +242,11 @@ class SearchState(StateBase):
     pub.send("state_setpoint", scan_setpoint(ctx.now, self.scan_center, self.scan_start_t))
 
 def make_state_machine() -> StateMachine:
+  nav_to_back = NavToBackState()
+  hold_back = HoldBackState(nav_to_back)
   nav_to_center = NavToCenterState()
+  return_center = ReturnCenterState(hold_back, nav_to_center)
   acquire = AcquireState()
-  states = [IdleState([nav_to_center, acquire]), nav_to_center, acquire, SearchState()]
+  reset_states = [nav_to_back, hold_back, return_center, nav_to_center, acquire]
+  states = [IdleState(reset_states), nav_to_back, hold_back, return_center, nav_to_center, acquire, SearchState()]
   return StateMachine(states)
