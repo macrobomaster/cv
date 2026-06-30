@@ -14,6 +14,7 @@ class Command(Enum):
   RAW_ACCEL = 0x05
   GIMBAL_STATE = 0x08
   CHASSIS_ODOM = 0x09
+  CHASSIS_ALIGN = 0x0b
 
 COMMAND_FORMATS = {
   Command.CHECK_STATE: '<B',
@@ -24,6 +25,7 @@ COMMAND_FORMATS = {
   Command.RAW_ACCEL: '',
   Command.GIMBAL_STATE: '',
   Command.CHASSIS_ODOM: '',
+  Command.CHASSIS_ALIGN: '',
 }
 
 RESPONSE_FORMATS = {
@@ -38,6 +40,7 @@ RESPONSE_FORMATS = {
   # wheel-odometry chassis velocity referenced to gimbal heading: vx (forward),
   # vy (left), m/s. 2-D horizontal; the board does the chassis→gimbal rotation.
   Command.CHASSIS_ODOM: '<ff',
+  Command.CHASSIS_ALIGN: '<B',
 }
 
 CRC8_INIT = 0xff

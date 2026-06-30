@@ -16,6 +16,7 @@ COMM_RATES_HZ = {
   "shoot": 20.0,
   "chassis_velocity": 50.0,
   "spinning": 10.0,
+  "chassis_align": 10.0,
   "game_running": 1.0,
   "team_color": 0.2,
   "robot_type": 0.2,
@@ -66,7 +67,7 @@ def run():
   # gimbal_state + raw_imu are high-rate streams consumed sample-by-sample
   # (slamd integrates every IMU sample), so publish non-conflate.
   gimbal_pub = messaging.Pub(["gimbal_state", "raw_imu"], conflate=False)
-  sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "spinning"])
+  sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "spinning", "chassis_align"])
   next_comm_at = {comm: 0.0 for comm in COMM_RATES_HZ}
   comm_counts = {comm: 0 for comm in COMM_RATES_HZ}
   comm_rates = {comm: 0.0 for comm in COMM_RATES_HZ}
@@ -148,6 +149,12 @@ def run():
         comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0xff)
       else:
         comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0x00)
+
+    if due(next_comm_at, "chassis_align"):
+      if fresh(sub, "chassis_align"):
+        comm_msg(protocol, comm_counts, "chassis_align", Command.CHASSIS_ALIGN, 0xff)
+      else:
+        comm_msg(protocol, comm_counts, "chassis_align", Command.CHASSIS_ALIGN, 0x00)
 
     if due(next_comm_at, "game_running"):
       game_running = comm_msg(protocol, comm_counts, "game_running", Command.CHECK_STATE, State.GAME_RUNNING.value)
