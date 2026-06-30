@@ -61,6 +61,7 @@ ROBOT_RADIUS = 0.28          # m, obstacle inflation (RoboMaster half-footprint)
 PLAN_DT = 0.2                # s, replan period (5 Hz receding horizon → reacts to goal/map changes)
 ENEMY_RADIUS = 0.30          # m, painted radius of a detected enemy robot obstacle (its half-footprint)
 ENEMY_AGE_GROWTH = 0.4       # m per s of staleness — a stale detection inflates (the robot may have moved)
+CAM_OCC_TIMEOUT = 0.5        # s without a fresh cam_occupancy before dropping occupancyd's obstacle layer
 
 LOOK_AT_TAG = True           # point the gimbal at the best face-on tag to keep SLAM anchored
 VIEW_MIN_ALIGN = 0.2         # min cos(tag-normal vs line-of-sight): skip tags seen too obliquely (poor PnP)
@@ -87,10 +88,12 @@ def load_map():
   logger.info(f"navd: map {g.nx}x{g.ny} @ {g.res}m, {len(data.get('walls', []))} walls")
   return g, float(data.get("robot_radius", ROBOT_RADIUS))
 
-def plan_path(static_grid, robot_radius, p_xy, goal_xy, robots=()):
+def plan_path(static_grid, robot_radius, p_xy, goal_xy, robots=(), cam_occ=None):
   """Plan an obstacle-aware path from p_xy to goal_xy (world XY), or None if blocked. `robots`
-  = (x, y, radius) circles for detected enemies, painted onto a copy before inflating."""
+  = (x, y, radius) circles for detected enemies, painted onto a copy before inflating. `cam_occ`
+  = optional (ny, nx) bool of camera-detected occupancy (occupancyd), ORed in before inflating."""
   g = static_grid.copy()
+  if cam_occ is not None: g.occ |= cam_occ
   for rx, ry, rad in robots:
     g.add_circle(rx, ry, rad)
   return planner.plan(g.inflated(robot_radius), p_xy, goal_xy)
@@ -212,8 +215,9 @@ def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_at_pose:float
 def run():
   gc.disable()
   pub = messaging.Pub(["chassis_velocity", "nav_setpoint", "nav_debug"])
-  # nav_goal (injected destination) and plate (enemy robot detections) are non-polled latest-wins.
-  sub = messaging.Sub(["slam_pose", "nav_goal", "plate"], poll="slam_pose")
+  # nav_goal (injected destination), plate (enemy robot detections), and cam_occupancy (occupancyd's
+  # camera obstacle grid) are non-polled latest-wins.
+  sub = messaging.Sub(["slam_pose", "nav_goal", "plate", "cam_occupancy"], poll="slam_pose")
   # gimbal_state non-conflated + buffered so we can sample yaw_gi at the slam pose's
   # capture time — the SAME instant as q_wb/psi. (Latest yaw_gi vs a lagged q_wb-heading
   # corrupts the world↔gimbal offset during a slew → the look-at setpoint overshoots.)
@@ -228,7 +232,9 @@ def run():
               + (f", seed {injected.round(2).tolist()}" if injected is not None else ", idle until nav_goal"))
 
   pursuit = last_goal = None
-  last_wd = last_diag = last_pose_t = last_plan = 0.0
+  cam_occ = None                                              # latest camera occupancy grid (ny, nx) bool
+  last_cam_occ_t = -math.inf
+  last_wd = last_diag = last_plan = last_pose_t = last_cam_warn = 0.0
   last_goal_t = time.monotonic() if injected is not None else -math.inf
   v_prev = 0.0                                                # last commanded speed (for the accel ramp)
   last_t = time.monotonic()
@@ -271,6 +277,19 @@ def run():
         obstacles.update(p_xy[0] + cs * c_gi[0] - sn * c_gi[1],
                          p_xy[1] + sn * c_gi[0] + cs * c_gi[1], now)
 
+    # --- Camera occupancy: occupancyd publishes a world-frame obstacle grid (floor-vs-obstacle
+    # IPM) over the same FIELD_BOUNDS/res as the planning grid. OR it in before inflation so
+    # detection-independent obstacles (allies, extra enemies, debris) block the path too. Drop it
+    # if the geometry doesn't match the planning grid, or once it goes stale (occupancyd died).
+    co = sub["cam_occupancy"]
+    if co is not None and sub.updated["cam_occupancy"]:
+      if co["nx"] == static_grid.nx and co["ny"] == static_grid.ny and abs(co["res"] - static_grid.res) < 1e-9:
+        cam_occ = np.frombuffer(co["occ"], bool).reshape(co["ny"], co["nx"])
+        last_cam_occ_t = now
+      elif now - last_cam_warn > 5.0:
+        logger.warning("navd: cam_occupancy grid geometry mismatch with plan grid; ignoring"); last_cam_warn = now
+    cam_occ_fresh = cam_occ if now - last_cam_occ_t < CAM_OCC_TIMEOUT else None
+
     # --- Chassis nav: plan an obstacle-aware path to the current goal (injected nav_goal)
     # and follow it with pure pursuit, replanning on goal/map change or the PLAN_DT timer
     # (receding horizon — each plan starts at the live pose, so pure pursuit follows between).
@@ -284,7 +303,7 @@ def run():
     robots = [(x, y, ENEMY_RADIUS + ENEMY_AGE_GROWTH * age) for x, y, age in obstacles.active(now)]
     if goal_xy is not None and (last_goal is None or pursuit is None
                                 or not np.allclose(goal_xy, last_goal) or now - last_plan > PLAN_DT):
-      path = plan_path(static_grid, robot_radius, p_xy, goal_xy, robots)
+      path = plan_path(static_grid, robot_radius, p_xy, goal_xy, robots, cam_occ_fresh)
       pursuit = PurePursuit(path) if path is not None and len(path) >= 2 else None
       if pursuit is None and now - last_diag > 1.0:
         logger.info(f"navd: no path to {np.round(goal_xy, 2).tolist()} ({inj_label}) — blocked"); last_diag = now
