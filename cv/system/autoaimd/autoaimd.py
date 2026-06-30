@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Callable, Any
-import pickle, time, math
+import pickle, time, math, ctypes
 
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
@@ -77,7 +77,8 @@ def run():
 
     if sub.updated["camera_feed"]:
       frame = camera_feed["frame"]
-      framet = Tensor(frame, dtype=dtypes.uint8, device=Device.DEFAULT)
+      frame_ptr = ctypes.cast(ctypes.c_char_p(frame), ctypes.c_void_p).value
+      framet = Tensor.from_blob(frame_ptr, (IMG_H * IMG_W * 3,), dtype=dtypes.uint8, device="CPU")
       ft = time.monotonic()
 
       if sub.updated["team_color"]:

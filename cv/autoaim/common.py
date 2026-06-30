@@ -26,7 +26,7 @@ T = getenv("T", 1)
 # corner output valid range
 BIN_LO, BIN_HI = -0.5, 1.5
 
-MODEL_VERSION = 42
+MODEL_VERSION = 43
 
 # canonical camera
 CANONICAL_FX_FY = 648
@@ -113,7 +113,7 @@ class TemporalInference:
   def warmup(self):
     for _ in range(3):
       if self.T != 1: fake_frames = Tensor.empty(T, IMG_H, IMG_W, 3, dtype=dtypes.uint8).clone().realize()
-      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device=Device.DEFAULT).clone().realize()
+      fake_frame = Tensor.empty(IMG_H * IMG_W * 3, dtype=dtypes.uint8, device="CPU").clone().realize()
       fake_target = Tensor([0], dtype=dtypes.int32, device=Device.DEFAULT).realize()
       self.model_fn(self.model, fake_frame, fake_target, frames=fake_frames if self.T != 1 else None)
     return self.model_fn
