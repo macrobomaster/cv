@@ -60,7 +60,9 @@ INIT_R = (0.12) ** 2
 P_CAP = 1e3                     # diagonal covariance ceiling (numerical safety in under-observed dirs)
 
 # Measurement noise
-MEAS_NOISE_BASE = (0.01) ** 2   # m^2, PnP position floor
+MEAS_NOISE_BASE = (0.1) ** 2    # m^2, PnP position floor — set to the MEASURED raw-PnP scatter (~0.1 m).
+                                # Was (0.01)² = 100× overconfident, so the UKF over-trusted noisy corners
+                                # and over-fit them into v_c / spurious jumps. Retune if scatter changes.
 MEAS_NOISE_STALE_MULT = 100.0
 PSI_NOISE = (math.radians(25)) ** 2  # rad^2, plate facing-yaw is the NOISY part of PnP — trust loosely
 PSI_FLIP_GATE = math.radians(90)     # |ψ innovation| above this ⇒ likely a PnP normal flip → drop ψ this frame
