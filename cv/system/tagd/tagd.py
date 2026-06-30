@@ -11,18 +11,18 @@ when available — better quads, subpixel corners, multithreaded, `quad_decimate
 speed knob. Falls back to cv2.aruco (subpixel corners) if libapriltag isn't on
 the system. Both return cv2.aruco-order corners, so slamd is detector-agnostic.
 
-Subs:  camera_feed: {ct, st, frame}     (RGB, canonical pinhole)
+Subs:  camera_feed: {ct, st, fid, slot}  (RGB frame in the shm ring slot, canonical pinhole)
 Pubs:  apriltags:   {ct, detections:[{id, corners:[[u,v]*4]}]}
 """
 import gc, time
 
 import cv2
-import numpy as np
 from tinygrad.helpers import getenv
 
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_put
+from ..common.frame_ring import FrameRing, frame_view, CAMERA_RING
 from ...slam import common
 
 # Dedicated process → let the detector use several cores (camerad is pinned/RT,
@@ -63,6 +63,7 @@ def run():
   cv2.setNumThreads(OPENCV_THREADS)
   pub = messaging.Pub(["apriltags"])
   sub = messaging.Sub(["camera_feed"], poll="camera_feed")
+  ring = FrameRing(CAMERA_RING, (common.IMG_H, common.IMG_W, 3))
   detect = _make_detect()
   last_tag_t = last_wd = 0.0
 
@@ -79,7 +80,8 @@ def run():
     if now - last_tag_t < 1.0 / TAG_DETECT_HZ: continue
     last_tag_t = now
 
-    gray = cv2.cvtColor(np.frombuffer(cam["frame"], dtype=np.uint8).reshape(
-      common.IMG_H, common.IMG_W, 3), cv2.COLOR_RGB2GRAY)
+    rgb = frame_view(ring, cam)
+    if rgb is None: continue
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     dets = [{"id": tid, "corners": c.astype(float).tolist()} for tid, c in detect(gray)]
     pub.send("apriltags", {"ct": float(cam["ct"]), "detections": dets})

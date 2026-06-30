@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Callable, Any
-import pickle, time, math, ctypes
+import pickle, time, math
 
 from tinygrad.tensor import Tensor
 from tinygrad.device import Device
@@ -11,6 +11,7 @@ from tinygrad.nn.state import safe_load, load_state_dict, get_state_dict
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_get, kv_put
+from ..common.frame_ring import FrameRing, frame_tensor, CAMERA_RING
 from ...autoaim.model import Model, CLASS_DECODE_TABLE, QUALITY_TAU, MAL_GAMMA
 from ...autoaim.common import pred, TemporalInference, MODEL_VERSION, IMG_H, IMG_W, T
 
@@ -66,6 +67,7 @@ def run():
   team_color = None
 
   infer = TemporalInference(model_fn, T=T)
+  ring = FrameRing(CAMERA_RING, (IMG_H, IMG_W, 3))
   fid = 0
 
   while True:
@@ -76,9 +78,8 @@ def run():
     if camera_feed is None: continue
 
     if sub.updated["camera_feed"]:
-      frame = camera_feed["frame"]
-      frame_ptr = ctypes.cast(ctypes.c_char_p(frame), ctypes.c_void_p).value
-      framet = Tensor.from_blob(frame_ptr, (IMG_H * IMG_W * 3,), dtype=dtypes.uint8, device="CPU")
+      framet = frame_tensor(ring, camera_feed)
+      if framet is None: continue
       ft = time.monotonic()
 
       if sub.updated["team_color"]:

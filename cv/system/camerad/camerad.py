@@ -1,7 +1,6 @@
 import gc, time, subprocess
 
 import cv2
-import numpy as np
 from tinygrad.helpers import getenv
 
 from ..core import messaging
@@ -9,6 +8,7 @@ from ..core.logging import logger
 from ..core.keyvalue import kv_put
 from ...common.image import resize_crop
 from ...common.camera import setup_aravis, get_aravis_frame_view, latch_timestamp_offset
+from ..common.frame_ring import FrameRing, CAMERA_RING
 from ..plated.plated import REAL_CAMERA_MATRIX, REAL_DIST_COEFFS, REAL_CALIB_W
 from ...autoaim.common import CANONICAL_CAMERA_MATRIX, IMG_H, IMG_W
 
@@ -27,6 +27,7 @@ def run():
   kv_put("watchdog", "camerad", time.monotonic())
 
   pub = messaging.Pub(["camera_feed"])
+  ring = FrameRing(CAMERA_RING, (IMG_H, IMG_W, 3), create=True)
 
   CALIB = getenv("CALIB", 0)
   raw_pub = messaging.Pub(["camera_feed_raw"]) if CALIB else None
@@ -44,7 +45,6 @@ def run():
       raise e
     _, _, src_w, src_h = cam.get_region()
     undist_map1, undist_map2 = _build_undistort_maps(src_w, src_h)
-    undist_frame = np.empty((IMG_H, IMG_W, 3), dtype=np.uint8)
 
   last_wd = time.monotonic()
   fid = 0
@@ -64,10 +64,10 @@ def run():
       if not ret:
         logger.error("failed to read frame")
         exit(1)
-      frame = resize_crop(frame, IMG_W, IMG_H)
-      frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+      slot, dst = ring.next_view()
+      cv2.cvtColor(resize_crop(frame, IMG_W, IMG_H), cv2.COLOR_BGR2RGB, dst=dst)
       if raw_pub is not None:
-        raw_pub.send("camera_feed_raw", {"ct": ct, "frame": frame.tobytes()})
+        raw_pub.send("camera_feed_raw", {"ct": ct, "frame": dst.tobytes()})
       t_get = t_done = time.monotonic()
     else:
       try:
@@ -79,7 +79,8 @@ def run():
           if raw_pub is not None:
             raw = cv2.rotate(frame, cv2.ROTATE_180)
             raw_pub.send("camera_feed_raw", {"ct": ct, "frame": cv2.resize(raw, (IMG_W, IMG_H)).tobytes()})
-          frame = cv2.remap(frame, undist_map1, undist_map2, cv2.INTER_LINEAR, dst=undist_frame)
+          slot, dst = ring.next_view()
+          cv2.remap(frame, undist_map1, undist_map2, cv2.INTER_LINEAR, dst=dst)
           t_done = time.monotonic()
         finally:
           if buf is not None: strm.push_buffer(buf)
@@ -90,7 +91,7 @@ def run():
 
     st = time.monotonic()
     fid += 1
-    pub.send("camera_feed", {"ct": ct, "st": st, "fid": fid, "frame": frame.tobytes()})
+    pub.send("camera_feed", {"ct": ct, "st": st, "fid": fid, "slot": slot})
 
     if PROF:
       acc_wait += t_get - t0

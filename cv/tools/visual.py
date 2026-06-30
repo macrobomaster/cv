@@ -23,7 +23,7 @@ CLASS_COLOR = {
 }
 
 VISUAL_SERVICES = [
-  "camera_feed", "autoaim", "plate", "gimbal_state", "aim_angle", "aim_error", "shoot", "chassis_velocity",
+  "camera_feed_full", "autoaim", "plate", "gimbal_state", "aim_angle", "aim_error", "shoot", "chassis_velocity",
   "game_running", "team_color", "robot_type", "comms_rates",
 ]
 COMMS_RATE_SERVICES = [
@@ -145,8 +145,8 @@ while True:
   # Camera fps from the source frame counter. The sub is conflated, so we only see the newest
   # frame each tick — but Δfid counts every frame camerad produced between the two we saw, so
   # Δfid/Δct recovers the true capture rate regardless of this loop's rate.
-  camera_feed = sub["camera_feed"]
-  if sub.updated["camera_feed"] and camera_feed is not None and "fid" in camera_feed:
+  camera_feed = sub["camera_feed_full"]   # full frames come from the framed bridge (DEBUG>=1)
+  if sub.updated["camera_feed_full"] and camera_feed is not None and "fid" in camera_feed:
     fid, ct = camera_feed["fid"], camera_feed["ct"]
     if last_cam_fid is not None and fid > last_cam_fid and ct > last_cam_ct:
       fps = (fid - last_cam_fid) / (ct - last_cam_ct)

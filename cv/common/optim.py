@@ -135,9 +135,9 @@ class GrokfastEMA:
       p.grad.assign(p.grad + t * self.factor)
 
 class SwitchEMA:
-  def __init__(self, model, ema_model, epochs:int, steps_per_epoch:int, momentum:float=0.999, master_opts:list|None=None):
+  def __init__(self, model, ema_model, epochs:int, steps_per_epoch:int, momentum:float=0.999, master_opts:list|None=None, switch:bool=False):
     self.step_counter = Tensor([0], device=get_parameters(model)[0].device).is_param_(False)
-    self.epochs, self.steps_per_epoch = epochs, steps_per_epoch
+    self.epochs, self.steps_per_epoch, self.switch = epochs, steps_per_epoch, switch
     self.momentum = momentum
     self.model_params = {k:v for k,v in get_state_dict(model).items() if v.is_param}
     ema_state_dict = get_state_dict(ema_model)
@@ -152,9 +152,14 @@ class SwitchEMA:
         if id(p) in name_of: self.live[name_of[id(p)]] = mst
 
   def update(self):
-    last = self.step_counter == self.steps_per_epoch - 1
-    for k, p_ema in self.ema_model_params.items():
+    for k, p_ema in self.ema_model_params.items():  # plain EMA of the optimized weights (this is what gets deployed)
       p_ema.assign(p_ema * self.momentum + self.live[k].detach() * (1 - self.momentum))
+    if not self.switch:  # plain EMA: never touch the live model, just accumulate the average
+      Tensor.realize(*self.ema_model_params.values())
+      return
+    # Switch-EMA: also reset the live weights to the EMA at each epoch boundary (disrupts the live loss
+    # curve and pulls back progress when steps_per_epoch ~ the EMA half-life; opt-in only).
+    last = self.step_counter == self.steps_per_epoch - 1
     for k, p_ema in self.ema_model_params.items():
       lv, p = self.live[k], self.model_params[k]
       lv.assign(last.where(p_ema.cast(lv.dtype), lv).detach())             # switch the master (carries forward)

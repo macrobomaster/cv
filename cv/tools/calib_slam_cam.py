@@ -65,7 +65,7 @@ def main():
   obj[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square   # metric squares (T_CAM lever arm)
   crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
 
-  sub = messaging.Sub(["camera_feed"], poll="camera_feed", addr=addr)
+  sub = messaging.Sub(["camera_feed_full"], poll="camera_feed_full", addr=addr)   # full frames via the framed bridge (DEBUG>=1)
   gsub = messaging.Sub(["gimbal_state"], conflate=False, addr=addr)
   gbuf = GimbalBuffer()
   R_ct, yaws, tvecs, ts = [], [], [], []
@@ -79,8 +79,8 @@ def main():
     while True:
       sub.update(timeout=200)
       for m in gsub.drain("gimbal_state"): gbuf.push(m)
-      cam = sub["camera_feed"]
-      if cam is None or not sub.updated["camera_feed"]: continue
+      cam = sub["camera_feed_full"]
+      if cam is None or not sub.updated["camera_feed_full"]: continue
       rgb = np.frombuffer(cam["frame"], np.uint8).reshape(common.IMG_H, common.IMG_W, 3)
       gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
       found, corners = cv2.findChessboardCorners(gray, (cols, rows))

@@ -80,8 +80,8 @@ def main():
            colors=[(180, 120, 255)], radii=0.07, labels=[g.get("label", "") for g in nav_map["goals"]]),
            static=True)
 
-  sub = messaging.Sub(["camera_feed", "slam_pose", "slam_debug", "apriltags", "nav_debug"],
-                      poll="camera_feed", addr=addr)
+  sub = messaging.Sub(["camera_feed_full", "slam_pose", "slam_debug", "apriltags", "nav_debug"],
+                      poll="camera_feed_full", addr=addr)   # full frames via the framed bridge (DEBUG>=1)
   fk = FrequencyKeeper(30)
 
   for s in sub.services:
@@ -108,8 +108,8 @@ def main():
       diag_t = now
 
     # --- Camera feed ------------------------------------------------------
-    cam = sub["camera_feed"]
-    if cam is not None and sub.updated["camera_feed"]:
+    cam = sub["camera_feed_full"]
+    if cam is not None and sub.updated["camera_feed_full"]:
       n_cam_received += 1
       img = np.frombuffer(cam["frame"], dtype=np.uint8).reshape(common.IMG_H, common.IMG_W, 3)
       rr.log("camera/feed", rr.Image(img).compress(70))

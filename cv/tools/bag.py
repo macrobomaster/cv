@@ -19,7 +19,9 @@ ALL_TOPICS = [
   "autoaim", "plate", "gimbal_state", "aim_error", "aim_angle", "shoot", "chassis_velocity",
   "game_running", "team_color", "robot_type", "comms_rates", "slam_pose",
 ]
-CAMERA_TOPICS = ["camera_feed", "camera_feed_raw"]
+# camera_feed now carries only a shm slot index; the full frames are on camera_feed_full
+# (published by the `framed` bridge, which must be running — DEBUG>=1 — to capture frames).
+CAMERA_TOPICS = ["camera_feed", "camera_feed_full", "camera_feed_raw"]
 
 def load_bag(path:str) -> dict:
   """Return {topic: [(t_recv, data), ...]} in record order."""
