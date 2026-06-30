@@ -52,6 +52,14 @@ T_CAM = np.array([-0.01428, -0.00509,  0.     ], dtype=np.float32)
 # R_wc). This calibration run was not flipped.
 YAW_FLIPPED = False
 
+# Camera optical-centre height above the FLOOR (m). T_CAM's vertical part is 0
+# (unobservable on the yaw-only calib sweep), so the floor plane for ground-plane
+# IPM (occupancyd) sits at gimbal-inertial z = -CAM_HEIGHT below the optical centre.
+# This is a fresh bench measurement, NOT derivable from the existing calibrations.
+# TODO: measure (tape the optical centre to the floor) + confirm with a
+# checkerboard-on-floor reprojection check (occupancyd is unusable until then).
+CAM_HEIGHT = 0.58
+
 # world<-IMU(body) orientation at gimbal (yaw=0, pitch=0). The gimbal IMU (on the
 # autoaim FULL gimbal, yaw+pitch) drives the filter PREDICT; this is its level
 # base orientation. RDF camera (x-right, y-down, z-forward) into z-up world:
