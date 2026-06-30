@@ -145,9 +145,9 @@ def run():
 
     if due(next_comm_at, "spinning"):
       if fresh(sub, "spinning"):
-        comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0x00)
-      else:
         comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0xff)
+      else:
+        comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0x00)
 
     if due(next_comm_at, "game_running"):
       game_running = comm_msg(protocol, comm_counts, "game_running", Command.CHECK_STATE, State.GAME_RUNNING.value)
