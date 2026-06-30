@@ -188,7 +188,10 @@
               Type = "oneshot";
               WorkingDirectory = "/root/cv";
               RemainAfterExit = true;
-              ExecStart = "${pkgs-aarch64-linux.tmux}/bin/tmux new-session -d -s cv ${./nix/nixos/script.sh}";
+              # run the script from the live /root/cv checkout (not a baked store copy) so editing
+              # it + `systemctl restart cv` applies without a nixos-rebuild — matches how the rest
+              # of the service already runs from /root/cv via `nix develop .`
+              ExecStart = "${pkgs-aarch64-linux.tmux}/bin/tmux new-session -d -s cv /root/cv/nix/nixos/script.sh";
               ExecStop = "${pkgs-aarch64-linux.tmux}/bin/tmux kill-session -t cv";
               TimeoutStopSec = 1;
             };
