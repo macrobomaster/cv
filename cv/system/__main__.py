@@ -22,6 +22,7 @@ PROCS = [
   SupervisedProcess("tagd", "cv.system.tagd.tagd"),
   SupervisedProcess("slamd", "cv.system.slamd.slamd"),
   SupervisedProcess("navd", "cv.system.navd.navd"),
+  SupervisedProcess("occupancyd", "cv.system.occupancyd.occupancyd", lambda _: getenv("OCCUPANCY", 0) >= 1, watchdog_dt=10),
   SupervisedProcess("decisiond", "cv.system.decisiond.decisiond"),
   SupervisedProcess("framed", "cv.system.framed.framed", lambda _: getenv("DEBUG", 0) >= 1),
 ]
