@@ -58,6 +58,10 @@ def setup_aravis():
     except Exception: ratios[ch] = dev.get_float_feature_value("BalanceRatio")
   print(f"white balance ratios (lock with BalanceWhiteAuto Off): {ratios}")
   print(f"resulting frame rate: {dev.get_float_feature_value('ResultingFrameRate'):.1f} fps")
+  try:
+    link_bps = dev.get_integer_feature_value("DeviceLinkSpeed")  # bytes/s; SuperSpeed ~5e8, High-Speed/USB2 ~6e7
+    print(f"device link speed: {link_bps / 1e6:.0f} MB/s ({'SuperSpeed' if link_bps > 1e8 else 'HIGH-SPEED — USB2 fallback, check cable/port!'})")
+  except Exception: pass
 
   ts_hz = dev.get_integer_feature_value("DeviceTimestampIncrement")
   return cam, strm, dev, ts_hz, latch_timestamp_offset(dev, ts_hz)
@@ -70,7 +74,13 @@ def latch_timestamp_offset(dev, ts_hz) -> int:
   return (t0 + t1) // 2 - dev_ns
 
 def get_aravis_frame_view(cam, strm, ts_hz, offset):
-  buf = strm.pop_buffer()
+  # 2s: free-run delivers a frame every ~5-13ms, so a 2s gap with the link up is a
+  # stream stall (not a slow frame). Surface the SDK stats (silent in dmesg) and bail
+  # to the caller's usbreset+restart instead of blocking until the 10s watchdog SIGKILLs.
+  buf = strm.timeout_pop_buffer(2_000_000)
+  if buf is None:
+    n_done, n_fail, n_under = strm.get_statistics()
+    raise TimeoutError(f"frame stall: completed={n_done} failures={n_fail} underruns={n_under}")
   while (nb := strm.try_pop_buffer()) is not None:
     strm.push_buffer(buf)
     buf = nb

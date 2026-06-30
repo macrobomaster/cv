@@ -85,7 +85,7 @@ def run():
         finally:
           if buf is not None: strm.push_buffer(buf)
       except Exception as e:
-        logger.error("failed to get frame, restarting camera")
+        logger.error(f"failed to get frame ({e}), restarting camera")
         subprocess.run(["usbreset", "MV-CS016-10UC"])
         raise e
 
