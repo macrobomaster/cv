@@ -23,7 +23,6 @@ PROCS = [
   SupervisedProcess("slamd", "cv.system.slamd.slamd"),
   SupervisedProcess("navd", "cv.system.navd.navd"),
   SupervisedProcess("decisiond", "cv.system.decisiond.decisiond"),
-  # opt-in bridge: re-publishes the shm camera ring as full frames for remote viz/calib tools
   SupervisedProcess("framed", "cv.system.framed.framed", lambda _: getenv("DEBUG", 0) >= 1),
 ]
 
