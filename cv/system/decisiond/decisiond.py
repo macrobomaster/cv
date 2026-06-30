@@ -27,6 +27,10 @@ E_WINDOW_OMEGA_K = 2.0                 # shrink window by k·r·σ_ω·t_f (σ_�
 SIGMA_OMEGA = 0.5                      # rad/s, placeholder spin-rate uncertainty
 BALLISTIC_MAX_ITER = 5
 BALLISTIC_TOL = 5e-4                   # s, fixed-point convergence
+MAX_CENTER_SPEED = 3.0                 # m/s — clamp the spin-CENTER velocity used for lead. v_c is the
+                                       # weakly-observable state (spin/translation ambiguity) and gets
+                                       # extrapolated over the full ~0.6 s lead, so a spurious spike
+                                       # flings the aim point. Bound it to the chassis's physical top speed.
 
 MUZZLE_OFFSET = np.zeros(3)            # muzzle position in gimbal-inertial. TODO: measure barrel offset.
 
@@ -99,6 +103,9 @@ def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
     if spin is None: return None
     c_0 = np.array(spin["c_0"])
     v_c = np.array(spin["v_c"])
+    spd = float(math.hypot(v_c[0], v_c[1]))           # bound the weakly-observable center velocity so a
+    if spd > MAX_CENTER_SPEED:                         # spurious spike can't fling the aim over the lead
+      v_c = v_c * (MAX_CENTER_SPEED / spd)
     t_ref = spin["t_ref"]
     def predict(t):
       dt = t - t_ref
@@ -324,8 +331,12 @@ def run():
 
     fire = trigger.evaluate(plate, yaw_err, pitch_err, t_arrival, t_now)
     if fire or t_now - last_diag > 1.0:
+      extra = ""
+      if cls == "SPIN" and plate["spin"]:
+        vc = plate["spin"]["v_c"]
+        extra = f"  |v_c|={math.hypot(vc[0], vc[1]):.1f}m/s ω={math.degrees(plate['spin']['omega']):+.0f}°/s"
       logger.info(f"{'FIRE' if fire else 'no-fire'}: {cls} "
-                  f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° → {trigger.reason}")
+                  f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° → {trigger.reason}{extra}")
       last_diag = t_now
 
     pub.send("aim_setpoint", {"yaw": yaw_gi_cmd, "pitch": pitch_cmd, "yaw_ff": yaw_ff, "pitch_ff": pitch_ff})
