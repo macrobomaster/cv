@@ -339,6 +339,11 @@ def run():
       pitch_ff = (sol_ff[1] - pitch_cmd) / AIM_FF_DT
     else:
       yaw_ff = pitch_ff = 0.0
+    # Bound the feedforward to the gimbal's slew limit: the /AIM_FF_DT finite difference amplifies any
+    # blip (velocity noise, ballistic-iteration jitter) 100×, and feedforwarding faster than the gimbal
+    # can physically turn only makes it overshoot. A real target's tracked rate never exceeds OMEGA_MAX.
+    yaw_ff = max(-GIMBAL_OMEGA_MAX["yaw"], min(GIMBAL_OMEGA_MAX["yaw"], yaw_ff))
+    pitch_ff = max(-GIMBAL_OMEGA_MAX["pitch"], min(GIMBAL_OMEGA_MAX["pitch"], pitch_ff))
 
     # Aim error vs the live gimbal pose (gimbald closes the loop; here it only gates the trigger).
     yaw_err = wrap_pi(yaw_gi_cmd - yaw_gi_now)
@@ -352,7 +357,8 @@ def run():
         vc = plate["spin"]["v_c"]
         extra = f"  |v_c|={math.hypot(vc[0], vc[1]):.1f}m/s ω={math.degrees(plate['spin']['omega']):+.0f}°/s"
       logger.info(f"{'FIRE' if fire else 'no-fire'}: {cls} "
-                  f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° → {trigger.reason}{extra}")
+                  f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° "
+                  f"ff=({math.degrees(yaw_ff):+.0f},{math.degrees(pitch_ff):+.0f})°/s → {trigger.reason}{extra}")
       last_diag = t_now
 
     last_setpoint = {"yaw": yaw_gi_cmd, "pitch": pitch_cmd, "yaw_ff": yaw_ff, "pitch_ff": pitch_ff}
