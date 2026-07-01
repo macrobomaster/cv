@@ -145,148 +145,179 @@ class PlateTracker:
     cov[0, 1] = cov[1, 0] = P[IDX_PX, IDX_PY]
     return pos, vel, cov
 
-# --- spin observer (aim-only): stable spin CENTRE from the plate BEARING ---------------------------
-# The visible plate's bearing = atan2(pos_gi_y, pos_gi_x) oscillates ±r/range around the stable centre
-# bearing and equals it when a plate faces the camera. Low-pass the bearing → centre bearing (the
-# WELL-observed axis; NO Cartesian circle fit — PnP depth scatter would wreck it). decisiond aims at this
-# stable centre so the gimbal HOLDS instead of chasing the ±10° orbit swing; firing stays the normal
-# settle gate. Crossings of (bearing-centre) time the spin (a plate every 90° → interval=T/4), used here
-# only for the spinning flag/period — a TIMED fire-on-crossing trigger is a separate, detector-gated step.
-SPIN_MIN_XY_RANGE   = 0.30      # m, below this atan2 bearing is ill-conditioned → skip
-SPIN_LP_ALPHA_BASE  = 0.03      # centre low-pass before a period known — must be SLOW enough to average a
-                                # slow spinner's sawtooth (~0.7s window bootstraps down to ~1Hz); adapts to
-                                # 2.5·T once a period is found. Too fast → the LP chases the swing, no crossings.
-SPIN_RANGE_ALPHA    = 0.02      # slow LP on range (poorly-observed depth, stable on average)
-SPIN_RATE_ALPHA     = 0.05      # LP on d(centre_bearing)/dt (translation lead for a moving spinner)
-SPIN_CROSS_DEBOUNCE = 0.010     # s, min between accepted crossings
-SPIN_CROSS_HYST     = 0.010     # rad, Schmitt deadband: bearing must swing beyond ±this on BOTH sides of
-                                # centre to register ONE crossing — a fixed graze band over-counts massively
-                                # (the plate dwells near centre most of a slow sweep). Ignores noise near centre.
-SPIN_CROSS_MAX_STEP = 0.05      # rad, reject a "crossing" whose per-frame Δbearing is this large — that's a
-                                # discontinuous plate-HANDOFF jump, not a smooth facing sweep (would 2-3× the rate)
-SPIN_MIN_COUNT      = 3         # crossing intervals in the cluster to trust a period
-SPIN_MIN_FREQ       = 1.0       # Hz, reject slower as "not spinning"
-SPIN_MAX_FREQ       = 12.0      # Hz, reject faster as noise
-SPIN_CONF_ON        = 0.60      # hysteresis: latch spinning=True
-SPIN_CONF_OFF       = 0.35      # unlatch spinning=False
-SPIN_CROSS_STALE    = 0.400     # s, no crossing this long → decay confidence (spun down / occluded)
+# --- spin observer (spectral harmonic fit): stable spin CENTRE + phase from the plate BEARING --------
+# The single visible plate's bearing = atan2(pos_gi_y, pos_gi_x) traces a SAWTOOTH at f_cross = 4·f_spin
+# about the centre bearing: each plate is visible for one quarter-turn (azimuth −45°→+45°, bearing offset
+# ramps ∓r/range through the centre), then hands off to the next plate. So the signal is DC + a slow linear
+# TREND (the robot's translation) + a periodic ORBIT at f_cross. A joint least-squares fit of
+# [1, τ, cos(2πf_cross·τ), sin(2πf_cross·τ)] at the peak frequency estimates all of these AT ONCE and
+# separates the (moving) centre from the orbit by FREQUENCY — so the centre never lags a translating robot
+# the way a scalar low-pass does (the moving-spinner fix). The frequency is found by a generalized
+# Lomb-Scargle sweep: pick f_cross that maximizes the DETRENDED orbit power (1 − ssr_full/ssr_trend), which
+# is robust to the gaps left when plate-handoff frames get dropped upstream by the association gate and is
+# invariant to translation (the trend term absorbs it). NO event-counting (crossing/handoff detectors are
+# fragile: the handoff jump never reaches this stage — it fails the mahalanobis gate and returns early). NO
+# Cartesian circle fit (PnP depth scatter would wreck it). A static/translating plate has ~zero coherent
+# orbit → gated out (no false latch). decisiond aims at centre_bearing (+ rate lead) so the gimbal HOLDS.
+SPIN_MIN_XY_RANGE    = 0.30     # m, below this atan2 bearing is ill-conditioned → skip
+SPIN_MIN_FREQ        = 1.0      # Hz spin, reject slower as "not spinning"
+SPIN_MAX_FREQ        = 6.0      # Hz spin, reject faster (enemy top-spin is ~1-5Hz; caps the grid below aliasing)
+SPIN_GRID_STEP       = 0.25     # Hz crossing-frequency grid resolution for the wide acquisition sweep
+SPIN_REFINE_FRAC     = 0.03     # ± fractional f_cross for the per-update 3-point local refine (freq tracking)
+SPIN_ACQ_STRIDE      = 9        # run the wide grid every Nth update (~10Hz); cheap local-refine between
+SPIN_ACQ_WINDOW      = 1.5      # s, max span used for frequency acquisition before f_cross is known
+SPIN_FIT_CYCLES      = 4.0      # harmonic-fit window in crossing-periods (T_spin/4) once locked ≈ 1 full spin:
+                                # long enough to average the sawtooth harmonics for a clean centre, short
+                                # enough that the linear centre-trend approximation holds while translating.
+SPIN_FIT_MIN_SAMPLES = 10       # min samples in the window to attempt a fit
+SPIN_FIT_MIN_SPAN    = 1.5      # min (window span × f_cross): need this many crossing-periods to trust a fit
+SPIN_RANGE_ALPHA     = 0.05     # LP on the fitted centre range (poorly-observed depth; feeds pitch only)
+SPIN_MIN_ORBIT       = 0.010    # rad, min fitted orbit amplitude to accept as a real spin — a static/
+                                # translating plate has ~zero coherent orbit; a real spin is ~0.6·r/range
+SPIN_CONF_ALPHA      = 0.15     # EMA gain on the per-fit detrended orbit power → confidence
+SPIN_CONF_ON         = 0.60     # hysteresis: latch spinning=True
+SPIN_CONF_OFF        = 0.35     # unlatch spinning=False
+SPIN_STALE           = 0.30     # s, no accepted update this long → drop spin (occluded / spun down)
 
 class SpinObserver:
-  """Bearing-space spin-centre estimator, fed the RAW (oscillating) plate pos_gi each accepted update."""
+  """Spectral (generalized Lomb-Scargle) spin-centre estimator, fed the RAW (oscillating) plate pos_gi on
+  each accepted update. Bearings are stored UNWRAPPED (continuous) so the least-squares fit stays linear."""
   def __init__(self):
     self.reset()
 
   def reset(self):
-    self.center_bearing = None
+    self.buf = deque(maxlen=256)          # (t, bearing_unwrapped, elev, range)
+    self.f_cross = None                    # locked crossing frequency (Hz) = 4 · f_spin
+    self.center_bearing = None             # UNWRAPPED trend at t_now; wrapped on publish
+    self.center_rate = 0.0
     self.center_elev = None
     self.center_range = None
-    self.bearing_rate = 0.0
-    self.prev_center = None
-    self.prev_t = None
-    self.last_bearing = None
-    self.last_bearing_t = None
-    self.last_side = None
-    self.last_cross_t = None
-    self.crossings = deque(maxlen=8)
-    self.spin_dir = 0
-    self.T_spin = None
+    self.orbit_amp = 0.0
     self.conf = 0.0
     self.spinning = False
+    self.t_ref = None                      # facing-crossing phase reference (deferred timed trigger)
+    self.last_t = None
+    self._n = 0                            # monotonic update counter → schedules the wide re-acquire
 
-  def _alpha(self):
-    if self.T_spin is not None and self.T_spin > 0.02:
-      return min(0.5, max(0.01, 2.0 / (1.5 * self.T_spin + 1.0)))   # ~1.5 periods: averages the orbit but
-                                                                    # doesn't lag a translating centre as much
-    return SPIN_LP_ALPHA_BASE
+  @staticmethod
+  def _design(ts, f_cross, harmonics=1):
+    """[1, τ, cos, sin, (cos2, sin2)] at f_cross. The fundamental locates the orbit; the 2nd harmonic is
+    added for the FINAL centre/confidence fit because the handoff SAWTOOTH has real 2nd-harmonic energy —
+    modelling it lifts the fit quality (~0.6→~0.85) and sharpens the spin/no-spin separation."""
+    cols = [np.ones_like(ts), ts]
+    for h in range(1, harmonics + 1):
+      ph = 2.0 * math.pi * h * f_cross * ts
+      cols += [np.cos(ph), np.sin(ph)]
+    return np.column_stack(cols)
 
-  def _update_center(self, bearing, elev, rng, t):
-    a = self._alpha()
-    if self.center_bearing is None:
-      self.center_bearing = bearing
-      self.prev_center, self.prev_t = bearing, t
-    else:
-      self.center_bearing = wrap_pi(self.center_bearing + a * wrap_pi(bearing - self.center_bearing))
-      if self.prev_t is not None and t - self.prev_t > 1e-6:
-        rate = wrap_pi(self.center_bearing - self.prev_center) / (t - self.prev_t)
-        self.bearing_rate = (1 - SPIN_RATE_ALPHA) * self.bearing_rate + SPIN_RATE_ALPHA * rate
-        self.prev_center, self.prev_t = self.center_bearing, t
-    self.center_elev = elev if self.center_elev is None else (1 - a) * self.center_elev + a * elev
-    if self.center_range is None:
-      self.center_range = rng
-    else:
-      self.center_range = (1 - SPIN_RANGE_ALPHA) * self.center_range + SPIN_RANGE_ALPHA * rng
-
-  def _detect_crossing(self, bearing, t):
-    prev_b = self.last_bearing
-    self.last_bearing, self.last_bearing_t = bearing, t
-    if self.center_bearing is None:
-      return None
-    if prev_b is not None and abs(wrap_pi(bearing - prev_b)) > SPIN_CROSS_MAX_STEP:
-      return None   # discontinuous bearing JUMP (plate handoff), not a smooth facing sweep
-    d = wrap_pi(bearing - self.center_bearing)
-    side = 1 if d > SPIN_CROSS_HYST else (-1 if d < -SPIN_CROSS_HYST else self.last_side)
-    prev_side = self.last_side
-    self.last_side = side
-    # a crossing = the bearing SWINGS from clearly one side of centre to the other (Schmitt trigger) —
-    # i.e. a plate swept through facing. Deadband ignores noise near centre; ONE crossing per real sweep.
-    if prev_side is None or side is None or side == prev_side:
-      return None
-    if self.last_cross_t is not None and t - self.last_cross_t < SPIN_CROSS_DEBOUNCE:
-      return None
-    if self.spin_dir == 0:
-      self.spin_dir = side               # lock the swing sense; reject back-swings (noise)
-    elif side != self.spin_dir:
-      return None
-    self.last_cross_t = t
-    return t
-
-  def _update_period(self):
-    if len(self.crossings) < SPIN_MIN_COUNT + 1:
-      return
-    iv = np.diff(np.array(self.crossings))
-    if len(iv) < SPIN_MIN_COUNT:
-      return
-    lo = float(np.min(iv))
-    cluster = iv[np.abs(iv - lo) <= 0.5 * lo]         # smallest-interval cluster ≈ true T/4 (rest are n·T/4)
-    if len(cluster) < SPIN_MIN_COUNT:
-      return
-    med = float(np.median(cluster))
-    freq = 1.0 / (4.0 * med) if med > 1e-6 else 1e9
-    if not (SPIN_MIN_FREQ <= freq <= SPIN_MAX_FREQ):
-      return
-    rel = float(np.std(cluster)) / med if med > 1e-6 else 1e6
-    self.T_spin = 4.0 * med
-    self.conf = math.exp(-2.0 * rel * rel)            # tight cluster → conf→1
+  @staticmethod
+  def _power(M, sig, ssr_trend):
+    """Fraction of DETRENDED bearing variance M explains: 1 − ssr/ssr_trend. This is the generalized
+    Lomb-Scargle power — translation-invariant (the trend is already removed) so it peaks at the true spin
+    frequency even for a fast-moving robot. Returns (coef, power)."""
+    coef, *_ = np.linalg.lstsq(M, sig, rcond=None)
+    ssr = float(((sig - M @ coef) ** 2).sum())
+    return coef, (1.0 - ssr / ssr_trend if ssr_trend > 1e-12 else 0.0)
 
   def update(self, pos_gi, t):
     x, y, z = float(pos_gi[0]), float(pos_gi[1]), float(pos_gi[2])
     rng = math.hypot(x, y)
     if rng < SPIN_MIN_XY_RANGE:
       return
-    bearing = math.atan2(y, x)
-    ct = self._detect_crossing(bearing, t)
-    if ct is not None:
-      self.crossings.append(ct)
-      self._update_period()
-    self._update_center(bearing, z, rng, t)
-    if self.last_cross_t is not None and t - self.last_cross_t > SPIN_CROSS_STALE:
-      self.conf *= 0.9
-    if self.conf >= SPIN_CONF_ON:
+    b_raw = math.atan2(y, x)
+    prev_b = self.buf[-1][1] if self.buf else None
+    b = b_raw if prev_b is None else prev_b + wrap_pi(b_raw - wrap_pi(prev_b))   # unwrap (continuous)
+    self.buf.append((t, b, z, rng))
+    self.last_t = t
+    self._n += 1
+
+    span = SPIN_ACQ_WINDOW if self.f_cross is None else SPIN_FIT_CYCLES / self.f_cross
+    arr = np.array(self.buf)
+    arr = arr[arr[:, 0] >= t - span]
+    if arr.shape[0] < SPIN_FIT_MIN_SAMPLES:
+      return
+    ts = arr[:, 0] - t
+    bearing = arr[:, 1]
+    cover = float(ts.max() - ts.min())
+    # detrend baseline (frequency-independent) — the Lomb-Scargle denominator
+    Mt = np.column_stack([np.ones_like(ts), ts])
+    ct, *_ = np.linalg.lstsq(Mt, bearing, rcond=None)
+    ssr_trend = float(((bearing - Mt @ ct) ** 2).sum())
+
+    # frequency selection uses the FUNDAMENTAL only — a single sinusoid peaks cleanly at f_cross with no
+    # subharmonic trap (a 2nd-harmonic column would also fit at f_cross/2 and could lock the half frequency).
+    wide = self.f_cross is None or (self._n % SPIN_ACQ_STRIDE) == 0
+    if wide:
+      best_f, best_p = None, -1.0
+      fc = 4.0 * SPIN_MIN_FREQ
+      while fc <= 4.0 * SPIN_MAX_FREQ + 1e-9:
+        if cover * fc >= SPIN_FIT_MIN_SPAN:
+          _, p = self._power(self._design(ts, fc), bearing, ssr_trend)
+          if p > best_p: best_f, best_p = fc, p
+        fc += SPIN_GRID_STEP
+      if best_f is None: return
+      f = best_f
+    else:
+      f, best_p = self.f_cross, -1.0
+      for cand in (self.f_cross * (1 - SPIN_REFINE_FRAC), self.f_cross, self.f_cross * (1 + SPIN_REFINE_FRAC)):
+        _, p = self._power(self._design(ts, cand), bearing, ssr_trend)
+        if p > best_p: f, best_p = cand, p
+
+    # final centre/orbit/confidence fit at the selected frequency, WITH the 2nd harmonic (models the sawtooth)
+    M = self._design(ts, f, harmonics=2)
+    coef, *_ = np.linalg.lstsq(M, arr[:, 1:4], rcond=None)   # cols: bearing, elev, range
+    power = 1.0 - float(((bearing - M @ coef[:, 0]) ** 2).sum()) / ssr_trend if ssr_trend > 1e-12 else 0.0
+    amp = float(math.hypot(coef[2, 0], coef[3, 0]))          # fundamental only → the physical orbit ≈ r/range
+    good = SPIN_MIN_FREQ <= f / 4.0 <= SPIN_MAX_FREQ and amp >= SPIN_MIN_ORBIT
+    self.conf = (1 - SPIN_CONF_ALPHA) * self.conf + SPIN_CONF_ALPHA * (max(0.0, power) if good else 0.0)
+
+    if good:
+      self.f_cross = f
+      self.center_bearing = float(coef[0, 0])              # trend at t_now → no lag on a moving centre
+      self.center_rate = float(coef[1, 0])
+      self.center_elev = float(coef[0, 1])
+      r = float(coef[0, 2])
+      self.center_range = r if self.center_range is None else (1 - SPIN_RANGE_ALPHA) * self.center_range + SPIN_RANGE_ALPHA * r
+      self.orbit_amp = amp
+      self.t_ref = self._facing_ref(t, f, float(coef[2, 0]), float(coef[3, 0]))
+
+    if self.conf >= SPIN_CONF_ON and self.orbit_amp >= SPIN_MIN_ORBIT:
       self.spinning = True
-    elif self.conf <= SPIN_CONF_OFF:
+    elif self.conf <= SPIN_CONF_OFF or self.orbit_amp < 0.5 * SPIN_MIN_ORBIT:
       self.spinning = False
 
-  def to_dict(self):
-    if not self.spinning or self.center_bearing is None or self.T_spin is None:
+  @staticmethod
+  def _facing_ref(t, f, A, B):
+    """Most recent plate-facing time ≤ t: the rising zero-crossing of the fitted orbit sinusoid (offset=0,
+    the plate square-on). Best-effort phase for a deferred timed trigger; the aim path doesn't use it."""
+    phi = math.atan2(-A, B)
+    if (-A * math.sin(phi) + B * math.cos(phi)) < 0.0: phi += math.pi   # want the rising crossing
+    Tc = 1.0 / f
+    tau = phi / (2.0 * math.pi * f)
+    tau -= Tc * math.ceil(tau / Tc)                         # fold into (−Tc, 0]
+    return t + tau
+
+  def next_crossing_after(self, t):
+    """Predicted time of the next plate-facing crossing at/after t (for a timed trigger)."""
+    if self.f_cross is None or self.t_ref is None:
       return None
+    Tc = 1.0 / self.f_cross
+    return self.t_ref + math.ceil((t - self.t_ref) / Tc) * Tc
+
+  def to_dict(self, t_now=None):
+    if not self.spinning or self.center_bearing is None or self.f_cross is None:
+      return None
+    if t_now is not None and self.last_t is not None and t_now - self.last_t > SPIN_STALE:
+      return None                                          # stale (occluded): drop rather than aim at a ghost
     return {
       "spinning": True,
-      "center_bearing": float(self.center_bearing),
+      "center_bearing": float(wrap_pi(self.center_bearing)),
       "center_elev": float(self.center_elev if self.center_elev is not None else 0.0),
       "center_range": float(self.center_range if self.center_range is not None else 0.0),
-      "bearing_rate": float(self.bearing_rate),
-      "T_spin": float(self.T_spin),
-      "last_cross_t": float(self.last_cross_t) if self.last_cross_t is not None else 0.0,
+      "bearing_rate": float(self.center_rate),
+      "T_spin": float(4.0 / self.f_cross),
+      "t_ref": float(self.t_ref) if self.t_ref is not None else 0.0,
+      "orbit_amp": float(self.orbit_amp),
       "conf": float(self.conf),
     }
 
@@ -385,7 +416,7 @@ class PlatedState:
       "pos_meas": self.last_meas.tolist() if self.last_meas is not None else None,
       "class": cls,          # TRACKING | UNKNOWN | LOST
       "target_id": self.target_id,
-      "spin": self.spin_obs.to_dict(),   # None unless a confident spin is latched (→ decisiond aims at centre)
+      "spin": self.spin_obs.to_dict(t_now),   # None unless a confident spin is latched (→ decisiond aims at centre)
     }
 
 # --- PnP --------------------------------------------------------------------------------------------
