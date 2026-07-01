@@ -41,6 +41,7 @@ def run():
   ring = FrameRing(CAMERA_RING, (IMG_H, IMG_W, 3))
   detector = cv2.QRCodeDetector()
   last_scan = 0.0
+  last_cv_error_log = 0.0
   last_style = None
 
   while True:
@@ -51,8 +52,15 @@ def run():
     frame = frame_view(ring, msg)
     if frame is None: continue
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-    payload, _, _ = detector.detectAndDecode(gray)
+    try:
+      gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+      payload, _, _ = detector.detectAndDecode(gray)
+    except cv2.error as e:
+      if sub.now - last_cv_error_log > 5.0:
+        err = " ".join(line.strip() for line in str(e).splitlines() if line.strip())
+        logger.warning(f"qrd: QR decode cv2 error; continuing: {err}")
+        last_cv_error_log = sub.now
+      continue
     if not payload: continue
     style = parse_play_style(payload)
     if style is None: continue
