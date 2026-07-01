@@ -28,6 +28,8 @@ MAX_CENTER_SPEED = 3.0                 # m/s — clamp the target velocity used 
 LEAD_MIN_SPEED = 0.20                  # m/s — below this don't bother leading (static / near-static)
 LEAD_PERP_FRAC = 0.7                   # if > this fraction of the velocity is ⊥ to the line of sight, the
                                        # target is ORBITING (spin) → suppress the lead (aim at filtered pos)
+SPIN_CONF_AIM = 0.60                   # min plate["spin"]["conf"] to AIM at the bearing-space spin centre
+                                       # (holds the gimbal steady on a spinner). Firing stays the settle gate.
 
 # Muzzle position relative to the yaw axis (gimbal-inertial z-up). The VERTICAL term sets pitch:
 # h = pos_gi[2] - MUZZLE_OFFSET[2], and with the yaw-only camera's T_CAM_z=0, pos_gi[2] is height-above-
@@ -93,6 +95,19 @@ def solve_with_lead(predict_fn:Callable[[float], np.ndarray], t_now:float, t_sta
 def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
   cls = plate["class"]
   if cls in ("LOST", "UNKNOWN"): return None
+
+  # Confident spinner → aim at the STABLE bearing-space centre (no orbit swing in the command), leading
+  # the centre bearing for a translating spinner. The gimbal HOLDS on the spin axis instead of chasing the
+  # ±10° plate swing; firing stays the normal settle gate. Falls through below when spin isn't confident.
+  spin = plate.get("spin")
+  if spin is not None and spin.get("conf", 0.0) >= SPIN_CONF_AIM:
+    cb, br = spin["center_bearing"], spin["bearing_rate"]
+    ce, cr, ts = spin["center_elev"], spin["center_range"], plate["t_state"]
+    def predict_center(t, cb=cb, br=br, ce=ce, cr=cr, ts=ts):
+      b = cb + br * (t - ts)                            # lead the centre bearing if the robot translates
+      return np.array([cr * math.cos(b), cr * math.sin(b), ce])
+    return predict_center
+
   pos = np.array(plate["pos_gi"])
   vel = np.array(plate["vel_gi"])
   t_state = plate["t_state"]
