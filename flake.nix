@@ -197,25 +197,26 @@
             };
           };
 
-          # thermal: nvfancontrol ships in "quiet" mode, which barely spins the fan and
-          # lets the SoC — and the NVMe baking next to it — run hot enough to drop off the
-          # PCIe bus (won't re-enumerate on a hot reboot -> PXE) / force btrfs read-only.
-          # Pin the fan to 100% and take nvfancontrol out of the loop; it's a robot, fan
-          # noise is a non-issue. (echo/read are bash builtins so no PATH deps.)
+          # thermal: nvfancontrol's "quiet" profile barely spun the fan, letting the SoC —
+          # and the NVMe baking next to it — hit 83°C+, dropping the drive off PCIe (won't
+          # re-enumerate on a hot reboot -> PXE) / forcing btrfs read-only. Disable it; the
+          # kernel step_wise governor then owns the fan but caps its top cooling state at
+          # pwm ~187, so holding true max (255) means rewriting it past the governor. Cheap
+          # 1Hz writer; the SoC throttle cooling-devices stay governed (thermal protection intact).
           services.nvfancontrol.enable = lib.mkForce false;
           systemd.services.max-fan = {
-            description = "pin cooling fan to 100%";
+            description = "hold cooling fan at 100%";
             wantedBy = [ "multi-user.target" ];
             after = [ "sysinit.target" ];
             serviceConfig = {
-              Type = "oneshot";
-              RemainAfterExit = true;
+              Restart = "always";
+              RestartSec = 1;
               ExecStart = pkgs-aarch64-linux.writeShellScript "max-fan" ''
-                for h in /sys/class/hwmon/hwmon*; do
-                  if [ "$(< "$h/name")" = pwmfan ]; then
-                    echo 1   > "$h/pwm1_enable" 2>/dev/null || true
-                    echo 255 > "$h/pwm1"
-                  fi
+                while :; do
+                  for h in /sys/class/hwmon/hwmon*; do
+                    [ "$(< "$h/name")" = pwmfan ] && echo 255 > "$h/pwm1"
+                  done
+                  ${pkgs-aarch64-linux.coreutils}/bin/sleep 1
                 done
               '';
             };
