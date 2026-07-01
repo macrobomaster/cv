@@ -166,15 +166,15 @@ def wall_tag(x:float, y:float, z:float, facing_deg:float) -> tuple[np.ndarray, n
 # }
 TAG_FIELD_MAP: dict[int, tuple[np.ndarray, np.ndarray]] = {
   # 0: wall_tag(0.0, 4.0, 0.30, facing_deg=-90),   # e.g. on the +y wall, facing -y
-  6: wall_tag(0.000, 1.5, 0.288, facing_deg=0),
-  7: wall_tag(1.500, 0.95, 0.288, facing_deg=-90),
+  6: wall_tag(0.000, 2.0, 0.288, facing_deg=0),
+  7: wall_tag(1.500, 1.25, 0.288, facing_deg=-90),
 }
 
 # Play-area bounds (x0, y0, x1, y1) in the field frame — the 12 m × 8 m field. Single
 # source for nav: the path_editor's canvas + exported NAV_MAP bounds, and navd's default
 # planning grid. Tags sit on/near this perimeter.
 # FIELD_BOUNDS = (0.0, 0.0, 12.0, 8.0)
-FIELD_BOUNDS = (0.0, 0.0, 3.0, 4.0)
+FIELD_BOUNDS = (0.0, 0.0, 3.0, 5.0)
 
 # AprilTag PnP noise grows with range — a 0.15 m tag spans fewer pixels far away,
 # so the depth solve degrades ~quadratically. Model the measurement stddev as
