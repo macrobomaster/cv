@@ -45,8 +45,8 @@ from ...nav.obstacles import RobotObstacles
 DEFAULT_GOAL = None
 
 POS_DEADBAND = 0.10          # m, pure-pursuit brakes to a stop here; "arrived" inside it
-V_MAX = 1.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
-ACCEL = 0.6                  # m/s², trapezoid accel = decel ramp rate
+V_MAX = 3.0                  # m/s, trapezoid cruise speed (plateau / hard cap)
+ACCEL = 1.8                  # m/s², trapezoid accel = decel ramp rate
 MAX_DT = 0.2                 # s, clamp on the loop dt used for the accel ramp (guards stalls)
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
 NAV_GOAL_TIMEOUT = 0.25      # s without fresh nav_goal before clearing the current destination
