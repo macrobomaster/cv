@@ -12,7 +12,7 @@ def _style_from_msg(msg):
 
 def run():
   pub = messaging.Pub(["state_setpoint", "nav_goal"])
-  sub = messaging.Sub(["game_running", "team_color", "play_style", "autoaim", "gimbal_state", "slam_pose"], poll="game_running")
+  sub = messaging.Sub(["game_running", "team_color", "play_style", "autoaim", "gimbal_state", "slam_pose", "apriltags"], poll="game_running")
   default_style = os.environ.get("PLAY_STYLE", "balanced")
   if default_style not in PLAY_STYLES:
     logger.warning(f"stated: unknown PLAY_STYLE={default_style!r}; using balanced")

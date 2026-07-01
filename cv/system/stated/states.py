@@ -6,8 +6,7 @@ Factory input:
 """
 import math
 
-from ..core.logging import logger
-from .base_states import ScanAcquireMixin, NavToGoalState, PeriodicNavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState
+from .base_states import LookAtVisibleTagMixin, ScanAcquireMixin, NavToGoalState, PeriodicNavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState
 from .state_machine import StateBase, StateMachine
 
 SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
@@ -45,14 +44,14 @@ class IdleState(StateBase):
   def run(self, ctx, pub):
     pass
 
-class NavToCenterState(PeriodicNavToGoalState):
+class NavToCenterState(LookAtVisibleTagMixin, PeriodicNavToGoalState):
   name = "nav_to_center"
   goal_label = "center"
   arrive_radius = NAV_ARRIVE_RADIUS
   period = RECENTER_PERIOD
   first_delay = 0.0
 
-class NavToHomeState(NavToGoalState):
+class NavToHomeState(LookAtVisibleTagMixin, NavToGoalState):
   name = "nav_to_home"
   goal_label = "home"
   arrive_radius = NAV_ARRIVE_RADIUS
@@ -62,7 +61,7 @@ class HoldHomeState(ScanAcquireMixin, TimedHoldGoalState):
   goal_label = "home_hold"
   hold_dt = RETREAT_HOLD_DT
 
-class ReturnCenterState(NavToGoalState):
+class ReturnCenterState(LookAtVisibleTagMixin, NavToGoalState):
   name = "return_center"
   goal_label = "center"
   arrive_radius = NAV_ARRIVE_RADIUS

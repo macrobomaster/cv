@@ -7,6 +7,7 @@ import math, time
 
 from ..core.logging import logger
 from ..common.geometry import wrap_pi
+from ...slam import common
 from .state_machine import StateBase
 
 class NavToGoalState(StateBase):
@@ -122,6 +123,61 @@ class ScanAcquireMixin:
       self._scan_acquire_have_center = True
     if ctx.entered: self._scan_acquire_start_t = ctx.now
     pub.send("state_setpoint", self._scan_acquire_setpoint(ctx.now))
+
+class LookAtVisibleTagMixin:
+  tag_hold_dt = 0.3
+  tag_pitch = 0.0
+
+  def _init_look_at_tag(self):
+    self._look_at_tag_id = None
+    self._look_at_tag_pos = None
+    self._look_at_tag_t = -math.inf
+
+  def _reset_look_at_tag(self, ctx=None):
+    self._look_at_tag_id = None
+    self._look_at_tag_pos = None
+    self._look_at_tag_t = -math.inf
+
+  def _observe_look_at_tag(self, ctx):
+    if not bool(ctx["game_running"]):
+      self._reset_look_at_tag(ctx)
+      return
+    tags, pose = ctx["apriltags"], ctx["slam_pose"]
+    if tags is None or pose is None or not ctx.updated["apriltags"]: return
+    p = pose["p_w"]
+    best = None
+    for det in tags.get("detections", []):
+      entry = common.TAG_FIELD_MAP.get(int(det["id"]))
+      if entry is None: continue
+      t = entry[1]
+      d2 = (float(t[0]) - p[0]) ** 2 + (float(t[1]) - p[1]) ** 2
+      if best is None or d2 < best[0]: best = (d2, int(det["id"]), (float(t[0]), float(t[1]), float(t[2])))
+    if best is None: return
+    _, self._look_at_tag_id, self._look_at_tag_pos = best
+    self._look_at_tag_t = ctx.now
+
+  def _heading_world(self, q_wb):
+    w, x, y, z = q_wb
+    fx, fy = 2 * (x * z + w * y), 2 * (y * z - w * x)
+    n = math.hypot(fx, fy)
+    return None if n < 1e-6 else math.atan2(fy, fx)
+
+  def _run_look_at_tag(self, ctx, pub):
+    if ctx.now - self._look_at_tag_t > self.tag_hold_dt: return
+    pose, gs = ctx["slam_pose"], ctx["gimbal_state"]
+    if pose is None or gs is None or self._look_at_tag_pos is None: return
+    heading_w = self._heading_world(pose["q_wb"])
+    if heading_w is None: return
+    px, py = pose["p_w"][:2]
+    tx, ty, _ = self._look_at_tag_pos
+    dx, dy = tx - float(px), ty - float(py)
+    if dx * dx + dy * dy < 1e-6: return
+    bearing_w = math.atan2(dy, dx)
+    yaw_sign = -1.0 if common.YAW_FLIPPED else 1.0
+    yaw = wrap_pi(float(gs["yaw_gi"]) + yaw_sign * wrap_pi(bearing_w - heading_w))
+    vx, vy = pose.get("v_w", [0.0, 0.0])[:2]
+    yaw_ff = yaw_sign * (dy * float(vx) - dx * float(vy)) / max(dx * dx + dy * dy, 1e-6)
+    pub.send("state_setpoint", {"yaw": yaw, "pitch": self.tag_pitch, "yaw_ff": yaw_ff, "pitch_ff": 0.0})
 
 class SequenceState(StateBase):
   name = "sequence"
