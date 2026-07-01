@@ -9,7 +9,7 @@ accumulates the obstacle cells in a persistent decaying WORLD grid that navd ORs
 its planner.
 
 The floor classifier here is the classical appearance test (Phase 1); a tiny tinygrad
-seg net can later replace just `floor_mask()` behind the same pipeline (Phase 2).
+seg net can later replace just `FloorClassifier` behind the same pipeline (Phase 2).
 
 Subs:  camera_feed:  {ct, st, fid, slot}            (RGB frame, canonical pinhole, shm ring)
        slam_pose:    {t, p_w, q_wb, n_tags, ...}     (robot world pose; world valid once n_tags>0)
@@ -44,8 +44,10 @@ OCC_TTL = 2.0                                   # s, out-of-view / departed obst
 BAND_TOP = 0.5                                  # fraction of image height; only the lower band sees the floor
 IPM_MIN_RANGE = 0.2                             # m, ignore cells too close (own footprint) / too far (unreliable)
 IPM_MAX_RANGE = 4.0
-FLOOR_THRESH = 28.0                             # Lab distance from the floor prior above which a pixel is "obstacle"
 FLOOR_STRIP_FRAC = 0.12                         # bottom-centre strip sampled as the floor-colour prior
+FLOOR_CHROMA_THRESH = 18.0                      # LAB a/b deviation → "obstacle" (coloured; shadow/glare-invariant). cv2 LAB units (0-255)
+FLOOR_DARK_THRESH = 45.0                        # LAB L BELOW the floor prior → dark achromatic obstacle. Brighter (glare/specular) is NOT flagged
+FLOOR_PRIOR_EMA = 0.1                           # per-frame smoothing of the floor prior (resists a transient obstacle in the sample strip)
 
 def gimbal_heading(q_wb):
   """Horizontal unit forward vector of the gimbal in world from q_wb=[w,x,y,z], or
@@ -55,21 +57,35 @@ def gimbal_heading(q_wb):
   n = math.hypot(fx, fy)
   return (fx / n, fy / n) if n > 1e-6 else None
 
-def floor_mask(band:np.ndarray) -> np.ndarray:
-  """Classical floor/not-floor on the lower image band (RGB). Samples the bottom-centre
-  strip as the floor-colour prior (the field mat is controlled) and flags pixels whose
-  Lab colour deviates from it as obstacle. Phase-2 swaps THIS for a tinygrad seg net."""
-  hb, w = band.shape[:2]
-  lab = cv2.cvtColor(band, cv2.COLOR_RGB2LAB).astype(np.float32)
-  sh = max(1, int(FLOOR_STRIP_FRAC * hb))
-  strip = lab[hb - sh:, w // 4: 3 * w // 4].reshape(-1, 3)
-  prior = np.median(strip, axis=0)
-  dist = np.linalg.norm(lab - prior, axis=2)         # (hb, w)
-  floor = dist < FLOOR_THRESH
-  k = np.ones((5, 5), np.uint8)                       # open then close to denoise specks
-  floor = cv2.morphologyEx(floor.astype(np.uint8), cv2.MORPH_OPEN, k)
-  floor = cv2.morphologyEx(floor, cv2.MORPH_CLOSE, k).astype(bool)
-  return floor
+class FloorClassifier:
+  """Floor-vs-obstacle on a uniform (grey) field mat. A band pixel is OBSTACLE if it is
+  CHROMATIC — its LAB a/b deviate from the floor prior (catches coloured robot parts;
+  invariant to shadow/glare since those mostly move L, not a/b) — OR markedly DARKER than
+  the floor (catches black chassis/wheels). Brighter-than-floor (glare/specular) is NOT
+  flagged. The floor prior is an EMA of the bottom-centre strip's median, updated only when
+  the strip still looks like floor, so an obstacle parked in the strip can't poison it.
+  Phase-2 swaps THIS class for a tinygrad seg net behind the same (band)->floor-mask API."""
+  def __init__(self):
+    self.prior = None                                  # (L, a, b) float, cv2 LAB units
+
+  def __call__(self, band:np.ndarray) -> np.ndarray:
+    hb, w = band.shape[:2]
+    lab = cv2.cvtColor(band, cv2.COLOR_RGB2LAB).astype(np.float32)
+    sh = max(1, int(FLOOR_STRIP_FRAC * hb))
+    med = np.median(lab[hb - sh:, w // 4: 3 * w // 4].reshape(-1, 3), axis=0)
+    if self.prior is None:
+      self.prior = med
+    elif np.hypot(med[1] - self.prior[1], med[2] - self.prior[2]) < FLOOR_CHROMA_THRESH \
+        and abs(med[0] - self.prior[0]) < FLOOR_DARK_THRESH:   # strip still consistent with floor → adapt
+      self.prior = (1 - FLOOR_PRIOR_EMA) * self.prior + FLOOR_PRIOR_EMA * med
+
+    chroma = np.hypot(lab[..., 1] - self.prior[1], lab[..., 2] - self.prior[2])   # colour deviation
+    darker = self.prior[0] - lab[..., 0]                                          # how much darker than floor
+    obstacle = (chroma > FLOOR_CHROMA_THRESH) | (darker > FLOOR_DARK_THRESH)
+    k = np.ones((5, 5), np.uint8)                       # open then close to denoise specks
+    floor = cv2.morphologyEx((~obstacle).astype(np.uint8), cv2.MORPH_OPEN, k)
+    floor = cv2.morphologyEx(floor, cv2.MORPH_CLOSE, k).astype(bool)
+    return floor
 
 def contact_mask(floor:np.ndarray) -> np.ndarray:
   """Per-column ground-CONTACT pixel: scanning up from the band bottom, the first
@@ -102,6 +118,7 @@ def run():
 
   ipm = GroundIPM(common.IMG_H, common.IMG_W, band_top=BAND_TOP, min_range=IPM_MIN_RANGE, max_range=IPM_MAX_RANGE)
   acc = OccupancyAccumulator(common.FIELD_BOUNDS, res=0.10, ttl=OCC_TTL)
+  floorcls = FloorClassifier()
   g = acc.grid
   logger.info(f"occupancyd: grid {g.nx}x{g.ny} @ {g.res}m, band v0={ipm.v0}, "
               f"CAM_HEIGHT={common.CAM_HEIGHT}m ({time.monotonic() - t0:.1f}s setup)")
@@ -133,7 +150,7 @@ def run():
     if rgb is None:
       reason = "frame_view None — shm slot not attachable (occupancyd not on camerad's host? camerad down?)"; continue
     n_rgb += 1
-    contact = contact_mask(floor_mask(rgb[ipm.v0:]))     # (Hb, W) ground-contact pixels
+    contact = contact_mask(floorcls(rgb[ipm.v0:]))       # (Hb, W) ground-contact pixels
     n_contact = int(contact.sum())
 
     # DEBUG: 2D overlay of the detected obstacle contact line, in FULL-image pixel coords —

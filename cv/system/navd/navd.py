@@ -40,7 +40,7 @@ from ..core.keyvalue import kv_put
 from ..common.geometry import wrap_pi
 from ..common.gimbal import GimbalBuffer
 from ...slam import common
-from ...nav.occupancy import OccupancyGrid
+from ...nav.occupancy import OccupancyGrid, ROBOT_RADIUS
 from ...nav import planner
 from ...nav.obstacles import RobotObstacles
 
@@ -57,7 +57,6 @@ STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
 NAV_GOAL_TIMEOUT = 0.25      # s without fresh nav_goal before clearing the current destination
 LOOKAHEAD = 0.4              # m, pure-pursuit lookahead (larger = smoother, cuts corners more)
 PROJECT_WINDOW = 1.5         # m, forward arc-length window when re-projecting progress onto the path
-ROBOT_RADIUS = 0.28          # m, obstacle inflation (RoboMaster half-footprint) for planning
 PLAN_DT = 0.2                # s, replan period (5 Hz receding horizon → reacts to goal/map changes)
 ENEMY_RADIUS = 0.30          # m, painted radius of a detected enemy robot obstacle (its half-footprint)
 ENEMY_AGE_GROWTH = 0.4       # m per s of staleness — a stale detection inflates (the robot may have moved)

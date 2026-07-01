@@ -12,6 +12,10 @@ import math
 
 import numpy as np
 
+# Robot footprint RADIUS (m, RoboMaster half-diagonal) — the C-space inflation radius.
+# Single source: navd plans with it and path_editor previews/exports with it, so they agree.
+ROBOT_RADIUS = 0.28
+
 class OccupancyGrid:
   def __init__(self, x0:float, y0:float, x1:float, y1:float, res:float):
     self.x0, self.y0, self.res = float(x0), float(y0), float(res)
