@@ -20,6 +20,8 @@ RECENTER_PERIOD = 10.0
 RETREAT_PERIOD = 60.0
 RETREAT_HOLD_DT = 10.0
 
+PLAY_STYLES = {"balanced", "center"}
+
 class IdleState(StateBase):
   name = "idle"
 
