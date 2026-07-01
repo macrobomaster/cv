@@ -136,10 +136,12 @@ def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
 # --- Trigger gate ---
 
 def barrel_heat_allows_fire(barrel_heat:Optional[dict], fresh:bool) -> tuple[bool, str]:
-  if barrel_heat is None: return False, "no barrel_heat"
-  if not fresh: return False, "stale barrel_heat"
+  # Heat gating only applies when the referee actually reports a POSITIVE limit. Missing / stale / limit<=0
+  # means the referee isn't enforcing heat (bench test, referee off, comms hiccup) → fire freely rather than
+  # fail closed and never shoot. A real match always reports limit>0, so this only loosens the no-referee case.
+  if barrel_heat is None or not fresh: return True, ""
   limit, current = barrel_heat.get("limit"), barrel_heat.get("current")
-  if limit is None or current is None: return False, "bad barrel_heat"
+  if not limit or current is None: return True, ""         # limit 0/None ⇒ no heat enforcement
   if current + BARREL_HEAT_PER_SHOT > limit:
     return False, f"heat {current}/{limit} (+{BARREL_HEAT_PER_SHOT})"
   return True, ""
