@@ -1,12 +1,14 @@
-"""Concrete match states for stated.
+"""Concrete match state machines for stated.
 
-State priority is the order returned by make_state_machine():
-  IDLE -> RETREAT_SEQUENCE -> NAV_TO_CENTER -> ACQUIRE -> SEARCH
+Factory input:
+  team_color: our alliance color ("red"/"blue")
+  play_style: high-level strategy preset ("balanced"/"center")
 """
 import math
 
-from .base_states import ResetState, PeriodicNavToGoalState, NavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState, SearchScanState
-from .state_machine import StateMachine
+from ..core.logging import logger
+from .base_states import PeriodicNavToGoalState, NavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState, SearchScanState
+from .state_machine import StateBase, StateMachine
 
 SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
 SCAN_SWEEP_DT = 1.0
@@ -18,50 +20,73 @@ RECENTER_PERIOD = 10.0
 RETREAT_PERIOD = 60.0
 RETREAT_HOLD_DT = 10.0
 
-CENTER_GOAL = (11.02, 6.98)
-BACK_GOAL = (11, 6)
+TEAM_GOALS = {
+  "red": {
+    "center": (11.02, 6.98),
+    "back": (11.00, 6.00),
+  },
+  "blue": {
+    "center": (0.98, 6.98),
+    "back": (1.00, 6.00),
+  },
+}
+PLAY_STYLES = {"balanced", "center"}
 
-class IdleState(ResetState):
+class IdleState(StateBase):
   name = "idle"
+
+  def should_transition(self, current:StateBase, ctx) -> bool:
+    return not bool(ctx["game_running"])
+
+  def can_transition(self, ctx) -> bool:
+    return True
+
+  def run(self, ctx, pub):
+    pass
 
 class NavToCenterState(PeriodicNavToGoalState):
   name = "nav_to_center"
   goal_label = "center"
-  goal_xy = CENTER_GOAL
   arrive_radius = NAV_ARRIVE_RADIUS
   period = RECENTER_PERIOD
   first_delay = 0.0
 
+  def __init__(self, goal_xy:tuple[float, float]):
+    self.goal_xy = goal_xy
+    super().__init__()
+
 class NavToBackState(NavToGoalState):
   name = "nav_to_back"
   goal_label = "back"
-  goal_xy = BACK_GOAL
   arrive_radius = NAV_ARRIVE_RADIUS
+
+  def __init__(self, goal_xy:tuple[float, float]):
+    self.goal_xy = goal_xy
 
 class HoldBackState(TimedHoldGoalState):
   name = "hold_back"
   goal_label = "back_hold"
-  goal_xy = BACK_GOAL
   hold_dt = RETREAT_HOLD_DT
+
+  def __init__(self, goal_xy:tuple[float, float]):
+    self.goal_xy = goal_xy
+    super().__init__()
 
 class ReturnCenterState(NavToGoalState):
   name = "return_center"
   goal_label = "center"
-  goal_xy = CENTER_GOAL
   arrive_radius = NAV_ARRIVE_RADIUS
+
+  def __init__(self, goal_xy:tuple[float, float]):
+    self.goal_xy = goal_xy
 
 class RetreatSequenceState(PeriodicSequenceState):
   name = "retreat_sequence"
   period = RETREAT_PERIOD
   first_delay = RETREAT_PERIOD
 
-  def __init__(self, recenter:NavToCenterState):
-    super().__init__([NavToBackState(), HoldBackState(), ReturnCenterState()])
-    self.recenter = recenter
-
-  def on_complete(self, ctx):
-    super().on_complete(ctx)
-    self.recenter.mark_done(ctx)
+  def __init__(self, center_goal:tuple[float, float], back_goal:tuple[float, float]):
+    super().__init__([NavToBackState(back_goal), HoldBackState(back_goal), ReturnCenterState(center_goal)])
 
 class AcquireState(AcquireHoldState):
   name = "acquire"
@@ -74,10 +99,23 @@ class SearchState(SearchScanState):
   turn_dt = SCAN_TURN_DT
   pitch = SCAN_PITCH
 
-def make_state_machine() -> StateMachine:
-  nav_to_center = NavToCenterState()
-  retreat_sequence = RetreatSequenceState(nav_to_center)
+def _goals(team_color:str) -> dict:
+  if team_color not in TEAM_GOALS:
+    raise ValueError(f"unknown team_color {team_color!r}; expected one of {sorted(TEAM_GOALS)}")
+  return TEAM_GOALS[team_color]
+
+def make_state_machine(team_color:str, play_style:str="balanced") -> StateMachine:
+  goals = _goals(team_color)
+  play_style = play_style.lower()
+  nav_to_center = NavToCenterState(goals["center"])
   acquire = AcquireState()
-  reset_states = [retreat_sequence, nav_to_center, acquire]
-  states = [IdleState(reset_states), retreat_sequence, nav_to_center, acquire, SearchState()]
+  search = SearchState()
+
+  if play_style == "balanced":
+    states = [IdleState(), RetreatSequenceState(goals["center"], goals["back"]), nav_to_center, acquire, search]
+  elif play_style == "center":
+    states = [IdleState(), nav_to_center, acquire, search]
+  else:
+    logger.warning(f"stated: unknown PLAY_STYLE={play_style!r}; using balanced")
+    states = [IdleState(), RetreatSequenceState(goals["center"], goals["back"]), nav_to_center, acquire, search]
   return StateMachine(states)

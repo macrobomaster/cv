@@ -9,23 +9,6 @@ from ..core.logging import logger
 from ..common.geometry import wrap_pi
 from .state_machine import StateBase
 
-class ResetState(StateBase):
-  name = "reset"
-
-  def __init__(self, reset_states:list[StateBase]):
-    self.reset_states = reset_states
-
-  def should_transition(self, current:StateBase, ctx) -> bool:
-    return not bool(ctx["game_running"])
-
-  def can_transition(self, ctx) -> bool:
-    return True
-
-  def run(self, ctx, pub):
-    for state in self.reset_states:
-      reset = getattr(state, "reset", None)
-      if reset is not None: reset(ctx)
-
 class NavToGoalState(StateBase):
   name = "nav_to_goal"
   goal_label = "goal"
@@ -34,6 +17,9 @@ class NavToGoalState(StateBase):
 
   def reset(self, ctx=None):
     pass
+
+  def observe(self, ctx):
+    if not bool(ctx["game_running"]): self.reset(ctx)
 
   def arrived(self, ctx) -> bool:
     if self.goal_xy is None: return True
@@ -90,6 +76,9 @@ class SequenceState(StateBase):
     for state in self.states:
       reset = getattr(state, "reset", None)
       if reset is not None: reset(ctx)
+
+  def observe(self, ctx):
+    if not bool(ctx["game_running"]): self.reset(ctx)
 
   def should_transition(self, current:StateBase, ctx) -> bool:
     return False
@@ -173,6 +162,9 @@ class AcquireHoldState(StateBase):
     self.last_valid_t = -math.inf
 
   def observe(self, ctx):
+    if not bool(ctx["game_running"]):
+      self.reset(ctx)
+      return
     autoaim = ctx["autoaim"]
     if ctx.updated["autoaim"] and autoaim is not None and autoaim.get("valid", False): self.last_valid_t = ctx.now
 
