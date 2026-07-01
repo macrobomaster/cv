@@ -167,6 +167,7 @@ def wall_tag(x:float, y:float, z:float, facing_deg:float) -> tuple[np.ndarray, n
 TAG_FIELD_MAP: dict[int, tuple[np.ndarray, np.ndarray]] = {
   # 0: wall_tag(0.0, 4.0, 0.30, facing_deg=-90),   # e.g. on the +y wall, facing -y
   6: wall_tag(0.000, 1.5, 0.288, facing_deg=0),
+  7: wall_tag(1.500, 0.95, 0.288, facing_deg=-90),
 }
 
 # Play-area bounds (x0, y0, x1, y1) in the field frame — the 12 m × 8 m field. Single
