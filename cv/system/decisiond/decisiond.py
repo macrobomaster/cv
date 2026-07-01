@@ -97,17 +97,21 @@ def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
   vel = np.array(plate["vel_gi"])
   t_state = plate["t_state"]
 
-  # Lead only a TRANSLATING target. A spinning plate's velocity is ~tangential (perpendicular to the line
-  # of sight): leading it flings the aim off the orbit. So when the velocity is mostly perpendicular to
-  # the LOS (orbiting), suppress the lead — aim at the filtered position, which the CV filter averages
-  # toward the spin center. A constant-position predict also makes the feedforward fall out to ~0.
+  # Near-static (velocity below LEAD_MIN_SPEED — mostly CV-filter jitter on a still plate) → hold a STEADY
+  # aim (constant position, FF falls to ~0) so the aim settles in tolerance and the trigger can commit.
+  # Leading the jitter would keep the aim bouncing so it never accumulates the in-tolerance ticks to fire.
   spd = float(math.hypot(vel[0], vel[1]))
+  if spd < LEAD_MIN_SPEED:
+    return lambda t, p=pos: p.copy()
   if spd > MAX_CENTER_SPEED:
     vel = vel * (MAX_CENTER_SPEED / spd)
     spd = MAX_CENTER_SPEED
+  # A spinning plate's velocity is ~tangential (⊥ to the line of sight): leading it flings the aim off the
+  # orbit. When the velocity is mostly ⊥ to the LOS (orbiting), suppress the lead — aim at the filtered
+  # position, which the CV filter averages toward the spin center.
   los = pos[:2] - MUZZLE_OFFSET[:2]
   los_n = float(math.hypot(los[0], los[1]))
-  if spd > LEAD_MIN_SPEED and los_n > 1e-6:
+  if los_n > 1e-6:
     perp = abs(vel[0] * (-los[1] / los_n) + vel[1] * (los[0] / los_n))   # |velocity ⊥ to LOS|
     if perp > LEAD_PERP_FRAC * spd:                                       # mostly tangential ⇒ orbiting
       return lambda t, p=pos: p.copy()
