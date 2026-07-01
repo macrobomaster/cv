@@ -15,6 +15,9 @@ class NavToGoalState(StateBase):
   goal_xy: tuple[float, float]|None = None
   arrive_radius = 0.25
 
+  def __init__(self, goal_xy:tuple[float, float]|None=None):
+    self.goal_xy = goal_xy
+
   def reset(self, ctx=None):
     pass
 
@@ -43,7 +46,8 @@ class PeriodicNavToGoalState(NavToGoalState):
   period = math.inf
   first_delay = 0.0
 
-  def __init__(self):
+  def __init__(self, goal_xy:tuple[float, float]|None=None):
+    super().__init__(goal_xy)
     self.next_due = time.monotonic() + self.first_delay
 
   def reset(self, ctx=None):
@@ -62,6 +66,58 @@ class PeriodicNavToGoalState(NavToGoalState):
       return True
     return False
 
+class ScanAcquireMixin:
+  acquire_hold_dt = 0.8
+  sweep_amplitude = math.radians(45.0)
+  sweep_dt = 1.0
+  turn_dt = 0.5
+  pitch = 0.0
+
+  def _init_scan_acquire(self):
+    self._scan_acquire_last_valid_t = -math.inf
+    self._scan_acquire_center = 0.0
+    self._scan_acquire_start_t = time.monotonic()
+    self._scan_acquire_have_center = False
+
+  def _reset_scan_acquire(self, ctx=None):
+    self._scan_acquire_last_valid_t = -math.inf
+    self._scan_acquire_start_t = ctx.now if ctx is not None else time.monotonic()
+    self._scan_acquire_have_center = False
+
+  def _observe_scan_acquire(self, ctx):
+    if not bool(ctx["game_running"]):
+      self._reset_scan_acquire(ctx)
+      return
+    autoaim = ctx["autoaim"]
+    if ctx.updated["autoaim"] and autoaim is not None and autoaim.get("valid", False): self._scan_acquire_last_valid_t = ctx.now
+
+  def _recently_saw_plate_scan_acquire(self, now:float) -> bool:
+    return now - self._scan_acquire_last_valid_t < self.acquire_hold_dt
+
+  def _scan_acquire_setpoint(self, t:float) -> dict:
+    cycle_dt = self.sweep_dt + self.turn_dt
+    t_scan = t - self._scan_acquire_start_t
+    cycle = int(t_scan // cycle_dt)
+    t_cycle = t_scan - cycle * cycle_dt
+    base = self._scan_acquire_center + (cycle % 2) * math.pi
+    if t_cycle < self.sweep_dt:
+      w = 2 * math.pi / self.sweep_dt
+      yaw = wrap_pi(base + self.sweep_amplitude * math.sin(w * t_cycle))
+      yaw_ff = self.sweep_amplitude * w * math.cos(w * t_cycle)
+    else:
+      yaw_ff = math.pi / self.turn_dt
+      yaw = wrap_pi(base + yaw_ff * (t_cycle - self.sweep_dt))
+    return {"yaw": yaw, "pitch": self.pitch, "yaw_ff": yaw_ff, "pitch_ff": 0.0}
+
+  def _run_scan_acquire(self, ctx, pub):
+    if self._recently_saw_plate_scan_acquire(ctx.now): return
+    gs = ctx["gimbal_state"]
+    if gs is not None and (ctx.entered or not self._scan_acquire_have_center):
+      self._scan_acquire_center = gs["yaw_gi"]
+      self._scan_acquire_have_center = True
+    if ctx.entered: self._scan_acquire_start_t = ctx.now
+    pub.send("state_setpoint", self._scan_acquire_setpoint(ctx.now))
+
 class SequenceState(StateBase):
   name = "sequence"
 
@@ -74,11 +130,13 @@ class SequenceState(StateBase):
     self.idx = 0
     self.child_started = False
     for state in self.states:
-      reset = getattr(state, "reset", None)
-      if reset is not None: reset(ctx)
+      state.reset_state(ctx)
 
   def observe(self, ctx):
-    if not bool(ctx["game_running"]): self.reset(ctx)
+    if not bool(ctx["game_running"]):
+      self.reset(ctx)
+      return
+    if self.idx < len(self.states): self.states[self.idx].observe_state(ctx)
 
   def should_transition(self, current:StateBase, ctx) -> bool:
     return False
@@ -103,9 +161,10 @@ class SequenceState(StateBase):
     child = self.states[self.idx]
     child_entered = not self.child_started
     self.child_started = True
+    if child_entered: child.observe_state(ctx)
     machine_entered = ctx.entered
     ctx.entered = child_entered
-    child.run(ctx, pub)
+    child.run_state(ctx, pub)
     ctx.entered = machine_entered
 
 class PeriodicSequenceState(SequenceState):
@@ -132,7 +191,8 @@ class TimedHoldGoalState(StateBase):
   goal_xy: tuple[float, float]|None = None
   hold_dt = 1.0
 
-  def __init__(self):
+  def __init__(self, goal_xy:tuple[float, float]|None=None):
+    self.goal_xy = goal_xy
     self.until = -math.inf
 
   def reset(self, ctx=None):
@@ -179,44 +239,3 @@ class AcquireHoldState(StateBase):
 
   def run(self, ctx, pub):
     pass
-
-class SearchScanState(StateBase):
-  name = "search"
-  sweep_amplitude = math.radians(45.0)
-  sweep_dt = 1.0
-  turn_dt = 0.5
-  pitch = 0.0
-
-  def __init__(self):
-    self.scan_center = 0.0
-    self.scan_start_t = time.monotonic()
-    self.have_scan_center = False
-
-  def should_transition(self, current:StateBase, ctx) -> bool:
-    return bool(ctx["game_running"])
-
-  def can_transition(self, ctx) -> bool:
-    return True
-
-  def setpoint(self, t:float) -> dict:
-    cycle_dt = self.sweep_dt + self.turn_dt
-    t_scan = t - self.scan_start_t
-    cycle = int(t_scan // cycle_dt)
-    t_cycle = t_scan - cycle * cycle_dt
-    base = self.scan_center + (cycle % 2) * math.pi
-    if t_cycle < self.sweep_dt:
-      w = 2 * math.pi / self.sweep_dt
-      yaw = wrap_pi(base + self.sweep_amplitude * math.sin(w * t_cycle))
-      yaw_ff = self.sweep_amplitude * w * math.cos(w * t_cycle)
-    else:
-      yaw_ff = math.pi / self.turn_dt
-      yaw = wrap_pi(base + yaw_ff * (t_cycle - self.sweep_dt))
-    return {"yaw": yaw, "pitch": self.pitch, "yaw_ff": yaw_ff, "pitch_ff": 0.0}
-
-  def run(self, ctx, pub):
-    gs = ctx["gimbal_state"]
-    if gs is not None and (ctx.entered or not self.have_scan_center):
-      self.scan_center = gs["yaw_gi"]
-      self.have_scan_center = True
-    if ctx.entered: self.scan_start_t = ctx.now
-    pub.send("state_setpoint", self.setpoint(ctx.now))

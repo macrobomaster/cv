@@ -11,8 +11,39 @@ from typing import Any
 class StateBase(ABC):
   name = "base"
 
+  def _call_hooks(self, prefix:str, *args):
+    seen = set()
+    for cls in type(self).__mro__:
+      for name, fn in cls.__dict__.items():
+        if name.startswith(prefix) and name not in seen and callable(fn):
+          seen.add(name)
+          fn(self, *args)
+
+  def _ensure_hooks_initialized(self):
+    if getattr(self, "_hooks_initialized", False): return
+    self._call_hooks("_init_")
+    self._hooks_initialized = True
+
+  def reset(self, ctx:Any=None):
+    pass
+
+  def reset_state(self, ctx:Any=None):
+    self._ensure_hooks_initialized()
+    self.reset(ctx)
+    self._call_hooks("_reset_", ctx)
+
   def observe(self, ctx:Any):
     pass
+
+  def observe_state(self, ctx:Any):
+    self._ensure_hooks_initialized()
+    self.observe(ctx)
+    self._call_hooks("_observe_", ctx)
+
+  def run_state(self, ctx:Any, pub:Any):
+    self._ensure_hooks_initialized()
+    self.run(ctx, pub)
+    self._call_hooks("_run_", ctx, pub)
 
   @abstractmethod
   def should_transition(self, current:"StateBase", ctx:Any) -> bool:
@@ -36,7 +67,7 @@ class StateMachine:
 
   def tick(self, ctx:Any, pub:Any):
     for state in self.states:
-      state.observe(ctx)
+      state.observe_state(ctx)
     next_state = self.current
     if self.current.can_transition(ctx):
       for state in self.states:
@@ -47,4 +78,4 @@ class StateMachine:
     self.entered = next_state is not self.current
     if self.entered: self.current = next_state
     setattr(ctx, "entered", self.entered)
-    self.current.run(ctx, pub)
+    self.current.run_state(ctx, pub)

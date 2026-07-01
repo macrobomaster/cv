@@ -15,18 +15,14 @@ GIMBAL heading (the board rotates chassis→gimbal). We rotate the world-frame v
 the path's lookahead point into that gimbal frame and command it. Chassis orientation is not
 controlled — position only.
 
-While ACTIVELY navigating (driving to a goal) we also point the gimbal at the best nearby tag
-(closest + most face-on) so the SLAM camera keeps an absolute anchor in view — that's when
-ego-motion makes localization drift matter. navd publishes `nav_setpoint` and gimbald arbitrates
-(aim_setpoint from decisiond outranks it). When idle/holding/arrived navd publishes NOTHING, so the
-gimbal is free for decisiond's aim or the state machine's scan.
+navd does not command the gimbal. State-machine states own scan/acquire behavior while navigating, so
+the chassis can move while decisiond keeps aiming/shooting.
 
 Subs:  slam_pose:        {t, p_w, v_w, q_wb, cov_pos, n_tags}   (from slamd)
        nav_goal:         {x, y, label?}                         (fresh-only injected goal)
        plate:            {class, pos_gi, spin, ...}             (enemy robot → dynamic obstacle)
        gimbal_state:     {yaw_gi, ...}                          (latest; for the absolute yaw setpoint)
 Pubs:  chassis_velocity: {x, y}   (x = forward, y = left, m/s; commsd → MOVE_ROBOT)
-       nav_setpoint:     {yaw, pitch, yaw_ff, pitch_ff}         (gimbal target; gimbald → aim_error)
        nav_debug:        {goal, path, obstacles}                (for visual_slam)
 Map:   NAV_MAP env → JSON {bounds:[x0,y0,x1,y1], res, robot_radius?, walls:[{rect|poly}]}  (optional)
 """
@@ -37,7 +33,6 @@ import numpy as np
 from ..core import messaging
 from ..core.logging import logger
 from ..core.keyvalue import kv_put
-from ..common.geometry import wrap_pi
 from ..common.gimbal import GimbalBuffer
 from ...slam import common
 from ...nav.occupancy import OccupancyGrid, ROBOT_RADIUS
@@ -61,11 +56,6 @@ PLAN_DT = 0.2                # s, replan period (5 Hz receding horizon → react
 ENEMY_RADIUS = 0.30          # m, painted radius of a detected enemy robot obstacle (its half-footprint)
 ENEMY_AGE_GROWTH = 0.4       # m per s of staleness — a stale detection inflates (the robot may have moved)
 CAM_OCC_TIMEOUT = 0.5        # s without a fresh cam_occupancy before dropping occupancyd's obstacle layer
-
-LOOK_AT_TAG = True           # point the gimbal at the best face-on tag to keep SLAM anchored
-VIEW_MIN_ALIGN = 0.2         # min cos(tag-normal vs line-of-sight): skip tags seen too obliquely (poor PnP)
-VIEW_MAX_RANGE = common.TAG_MAX_RANGE   # m, ignore tags beyond useful PnP range
-LOOK_PITCH = 0.0             # rad, gravity-relative pitch setpoint (level; the SLAM cam is yaw-only anyway)
 
 def load_map():
   """Static obstacle map for planning. NAV_MAP env → JSON (bounds, res, walls); with none,
@@ -168,52 +158,9 @@ def gimbal_heading(q_wb):
   n = math.hypot(fx, fy)
   return (fx / n, fy / n) if n > 1e-6 else None
 
-def best_tag_to_view(p_xy:np.ndarray):
-  """Pick the tag best to point the gimbal at for localization: face-on (its
-  normal points toward us) AND close. Score = alignment / range² (≈ apparent
-  projected tag area — the driver of PnP quality). Tags seen from the back
-  (alignment ≤ 0) or too obliquely are skipped. Returns (tag_id, tag_xy, range)
-  or None if nothing is worth looking at."""
-  best, best_score = None, 0.0
-  for tid, (R_wt, t_wt) in common.TAG_FIELD_MAP.items():
-    t_xy = t_wt[:2].astype(np.float64)
-    los = p_xy - t_xy                                # tag → robot
-    rng = float(np.linalg.norm(los))
-    if rng < 1e-3 or rng > VIEW_MAX_RANGE: continue
-    n = R_wt[:2, 2].astype(np.float64); nn = float(np.linalg.norm(n))
-    if nn < 1e-6: continue
-    align = float(los @ n) / (rng * nn)              # 1 ⇒ robot on the tag's normal (dead face-on)
-    if align < VIEW_MIN_ALIGN: continue
-    score = align / (rng * rng)
-    if score > best_score: best, best_score = (tid, t_xy, rng), score
-  return best
-
-def look_at_setpoint(p_xy:np.ndarray, v_xy:np.ndarray, fwd, yaw_gi_at_pose:float):
-  """Gimbal setpoint (gimbal-inertial yaw) to point at the best tag, or None.
-  Computes the bearing error in WORLD (frame-offset-free) and combines it with the
-  gimbal yaw, so it's robust to the slam yaw-drift bias. yaw_gi_at_pose MUST be the gimbal
-  yaw at the pose's capture time (same instant as `fwd`/`psi`) — `(yaw_gi − psi)` is the
-  slowly-drifting world↔gimbal offset, and sampling the two at different times corrupts
-  it by the gimbal's slew during the slam lag → the setpoint overshoots the tag."""
-  bt = best_tag_to_view(p_xy)
-  if bt is None: return None
-  tid, t_xy, rng = bt
-  los = t_xy - p_xy                                  # robot → tag (world)
-  bearing = math.atan2(los[1], los[0])               # desired gimbal world heading
-  psi = math.atan2(fwd[1], fwd[0])                   # gimbal world heading at the pose's capture time
-  # PLUS: ψ tracks +yaw_gi (slam rotz, faithful) so the world bearing error adds straight
-  # to the gimbal yaw. (This was −sign while the gimbal yaw DRIVE polarity was inverted in
-  # commsd — the − accidentally stabilized gimbald's then-positive-feedback loop. With the
-  # commsd aim_error.x flip fixing the drive at the source, it's the plain +.)
-  yaw_sp = yaw_gi_at_pose + wrap_pi(bearing - psi)   # absolute gimbal-inertial yaw target
-  # Feedforward: driving past a static tag drifts its bearing at
-  # β̇ = (los_y·v_x − los_x·v_y)/range² — feed it so the gimbal doesn't lag.
-  yaw_ff = float((los[1] * v_xy[0] - los[0] * v_xy[1]) / (rng * rng))
-  return {"yaw": float(yaw_sp), "pitch": LOOK_PITCH, "yaw_ff": yaw_ff, "pitch_ff": 0.0}, tid
-
 def run():
   gc.disable()
-  pub = messaging.Pub(["chassis_velocity", "nav_setpoint", "nav_debug"])
+  pub = messaging.Pub(["chassis_velocity", "nav_debug"])
   # nav_goal (injected destination), plate (enemy robot detections), and cam_occupancy (occupancyd's
   # camera obstacle grid) are non-polled latest-wins.
   sub = messaging.Sub(["slam_pose", "nav_goal", "plate", "cam_occupancy"], poll="slam_pose")
@@ -315,17 +262,6 @@ def run():
 
     navigating = goal_xy is not None and pursuit is not None and fwd is not None and not pursuit.done(p_xy)
 
-    # --- Gimbal look-at: point at the best face-on tag to keep SLAM anchored — but ONLY while
-    # actively navigating (that's when ego-motion makes drift matter). Idle/holding/arrived → stay
-    # SILENT so decisiond's aim or stated's scan owns the gimbal (gimbald yields when nav_setpoint
-    # goes stale). Silent too when there's no good tag / no gimbal feedback.
-    look_tag = None
-    if LOOK_AT_TAG and navigating and gp is not None:
-      res = look_at_setpoint(p_xy, np.asarray(pose["v_w"], np.float64)[:2], fwd, gp[0])
-      if res is not None:
-        sp, look_tag = res
-        pub.send("nav_setpoint", sp)
-
     if not navigating:                                        # idle/blocked/arrived ⇒ hold, gimbal free
       pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0
       continue
@@ -349,6 +285,5 @@ def run():
     pub.send("chassis_velocity", {"x": x, "y": y})
 
     if now - last_diag > 1.0:
-      logger.info(f"navd: goal:{inj_label} brake={brake:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}"
-                  + (f"  look@tag{look_tag}" if look_tag is not None else "  look:none"))
+      logger.info(f"navd: goal:{inj_label} brake={brake:.2f}m v={v_cmd:.2f}m/s → x={x:+.2f} y={y:+.2f}")
       last_diag = now

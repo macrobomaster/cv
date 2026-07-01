@@ -7,7 +7,7 @@ Factory input:
 import math
 
 from ..core.logging import logger
-from .base_states import PeriodicNavToGoalState, NavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState, SearchScanState
+from .base_states import ScanAcquireMixin, NavToGoalState, PeriodicNavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState
 from .state_machine import StateBase, StateMachine
 
 SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
@@ -44,41 +44,27 @@ class IdleState(StateBase):
   def run(self, ctx, pub):
     pass
 
-class NavToCenterState(PeriodicNavToGoalState):
+class NavToCenterState(ScanAcquireMixin, PeriodicNavToGoalState):
   name = "nav_to_center"
   goal_label = "center"
   arrive_radius = NAV_ARRIVE_RADIUS
   period = RECENTER_PERIOD
   first_delay = 0.0
 
-  def __init__(self, goal_xy:tuple[float, float]):
-    self.goal_xy = goal_xy
-    super().__init__()
-
-class NavToBackState(NavToGoalState):
+class NavToBackState(ScanAcquireMixin, NavToGoalState):
   name = "nav_to_back"
   goal_label = "back"
   arrive_radius = NAV_ARRIVE_RADIUS
 
-  def __init__(self, goal_xy:tuple[float, float]):
-    self.goal_xy = goal_xy
-
-class HoldBackState(TimedHoldGoalState):
+class HoldBackState(ScanAcquireMixin, TimedHoldGoalState):
   name = "hold_back"
   goal_label = "back_hold"
   hold_dt = RETREAT_HOLD_DT
 
-  def __init__(self, goal_xy:tuple[float, float]):
-    self.goal_xy = goal_xy
-    super().__init__()
-
-class ReturnCenterState(NavToGoalState):
+class ReturnCenterState(ScanAcquireMixin, NavToGoalState):
   name = "return_center"
   goal_label = "center"
   arrive_radius = NAV_ARRIVE_RADIUS
-
-  def __init__(self, goal_xy:tuple[float, float]):
-    self.goal_xy = goal_xy
 
 class RetreatSequenceState(PeriodicSequenceState):
   name = "retreat_sequence"
@@ -92,12 +78,21 @@ class AcquireState(AcquireHoldState):
   name = "acquire"
   hold_dt = ACQUIRE_HOLD_DT
 
-class SearchState(SearchScanState):
+class SearchState(ScanAcquireMixin, StateBase):
   name = "search"
   sweep_amplitude = SCAN_SWEEP_AMPLITUDE
   sweep_dt = SCAN_SWEEP_DT
   turn_dt = SCAN_TURN_DT
   pitch = SCAN_PITCH
+
+  def should_transition(self, current:StateBase, ctx) -> bool:
+    return bool(ctx["game_running"])
+
+  def can_transition(self, ctx) -> bool:
+    return True
+
+  def run(self, ctx, pub):
+    pass
 
 def _goals(team_color:str) -> dict:
   if team_color not in TEAM_GOALS:

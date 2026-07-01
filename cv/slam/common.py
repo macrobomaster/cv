@@ -151,24 +151,29 @@ def wall_tag(x:float, y:float, z:float, facing_deg:float) -> tuple[np.ndarray, n
 # Field map: tag id -> (R_world_tag, t_world_tag) in YOUR field frame (z up, RH).
 # Build each with wall_tag(...). TODO: survey the 9 tags from the field drawings.
 # Empty until then — no tag fuses (and FUSE_APRILTAGS is gated off above anyway).
+# TAG_FIELD_MAP: dict[int, tuple[np.ndarray, np.ndarray]] = {
+#   # 0: wall_tag(0.0, 4.0, 0.30, facing_deg=-90),   # e.g. on the +y wall, facing -y
+#   0: wall_tag(2.250, 3.679, 0.288, facing_deg=180),
+#   1: wall_tag(2.420, 2.666, 0.288, facing_deg=0),
+#   2: wall_tag(4.999, 1.200, 0.288, facing_deg=180),
+#   3: wall_tag(7.001, 1.200, 0.288, facing_deg=0),
+#   4: wall_tag(9.580, 2.666, 0.288, facing_deg=180),
+#   5: wall_tag(9.750, 3.679, 0.288, facing_deg=0),
+#   6: wall_tag(11.000, 7.999, 0.288, facing_deg=-90),
+#   7: wall_tag(6.000, 1.701, 0.288, facing_deg=90),
+#   8: wall_tag(6.000, 6.9839, 0.288, facing_deg=-90),
+#   9: wall_tag(1.000, 7.999, 0.288, facing_deg=-90),
+# }
 TAG_FIELD_MAP: dict[int, tuple[np.ndarray, np.ndarray]] = {
   # 0: wall_tag(0.0, 4.0, 0.30, facing_deg=-90),   # e.g. on the +y wall, facing -y
-  0: wall_tag(2.250, 3.679, 0.288, facing_deg=180),
-  1: wall_tag(2.420, 2.666, 0.288, facing_deg=0),
-  2: wall_tag(4.999, 1.200, 0.288, facing_deg=180),
-  3: wall_tag(7.001, 1.200, 0.288, facing_deg=0),
-  4: wall_tag(9.580, 2.666, 0.288, facing_deg=180),
-  5: wall_tag(9.750, 3.679, 0.288, facing_deg=0),
-  6: wall_tag(11.000, 7.999, 0.288, facing_deg=-90),
-  7: wall_tag(6.000, 1.701, 0.288, facing_deg=90),
-  8: wall_tag(6.000, 6.9839, 0.288, facing_deg=-90),
-  9: wall_tag(1.000, 7.999, 0.288, facing_deg=-90),
+  6: wall_tag(0.000, 1.5, 0.288, facing_deg=0),
 }
 
 # Play-area bounds (x0, y0, x1, y1) in the field frame — the 12 m × 8 m field. Single
 # source for nav: the path_editor's canvas + exported NAV_MAP bounds, and navd's default
 # planning grid. Tags sit on/near this perimeter.
-FIELD_BOUNDS = (0.0, 0.0, 12.0, 8.0)
+# FIELD_BOUNDS = (0.0, 0.0, 12.0, 8.0)
+FIELD_BOUNDS = (0.0, 0.0, 3.0, 4.0)
 
 # AprilTag PnP noise grows with range — a 0.15 m tag spans fewer pixels far away,
 # so the depth solve degrades ~quadratically. Model the measurement stddev as
