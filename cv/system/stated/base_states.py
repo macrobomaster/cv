@@ -179,6 +179,10 @@ class LookAtVisibleTagMixin:
     yaw_ff = yaw_sign * (dy * float(vx) - dx * float(vy)) / max(dx * dx + dy * dy, 1e-6)
     pub.send("state_setpoint", {"yaw": yaw, "pitch": self.tag_pitch, "yaw_ff": yaw_ff, "pitch_ff": 0.0})
 
+class SpinChassisMixin:
+  def _run_chassis_spin(self, ctx, pub):
+    if bool(ctx["game_running"]): pub.send("spinning", True)
+
 class SequenceState(StateBase):
   name = "sequence"
 

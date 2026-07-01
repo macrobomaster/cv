@@ -6,7 +6,7 @@ Factory input:
 """
 import math
 
-from .base_states import LookAtVisibleTagMixin, ScanAcquireMixin, NavToGoalState, PeriodicNavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState
+from .base_states import LookAtVisibleTagMixin, ScanAcquireMixin, SpinChassisMixin, NavToGoalState, PeriodicNavToGoalState, PeriodicSequenceState, TimedHoldGoalState, AcquireHoldState
 from .state_machine import StateBase, StateMachine
 
 SCAN_SWEEP_AMPLITUDE = math.radians(45.0)
@@ -56,7 +56,7 @@ class NavToHomeState(LookAtVisibleTagMixin, NavToGoalState):
   goal_label = "home"
   arrive_radius = NAV_ARRIVE_RADIUS
 
-class HoldHomeState(ScanAcquireMixin, TimedHoldGoalState):
+class HoldHomeState(SpinChassisMixin, ScanAcquireMixin, TimedHoldGoalState):
   name = "hold_home"
   goal_label = "home_hold"
   hold_dt = RETREAT_HOLD_DT
@@ -74,11 +74,11 @@ class RetreatSequenceState(PeriodicSequenceState):
   def __init__(self, center_goal:tuple[float, float], back_goal:tuple[float, float]):
     super().__init__([NavToHomeState(back_goal), HoldHomeState(back_goal), ReturnCenterState(center_goal)])
 
-class AcquireState(AcquireHoldState):
+class AcquireState(SpinChassisMixin, AcquireHoldState):
   name = "acquire"
   hold_dt = ACQUIRE_HOLD_DT
 
-class SearchState(ScanAcquireMixin, StateBase):
+class SearchState(SpinChassisMixin, ScanAcquireMixin, StateBase):
   name = "search"
   sweep_amplitude = SCAN_SWEEP_AMPLITUDE
   sweep_dt = SCAN_SWEEP_DT
