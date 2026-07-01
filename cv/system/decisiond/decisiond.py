@@ -1,7 +1,6 @@
 import time
 import math
 from collections import deque
-from dataclasses import dataclass
 from typing import Optional, Callable
 
 import numpy as np
@@ -18,19 +17,17 @@ from ...autoaim.common import (
 )
 
 # Aim / trigger tunings
-TOL_STATIC = math.radians(0.7)        # |aim_error| below this to commit a STATIC/LINEAR shot
-TOL_SPIN = math.radians(1.0)          # tighter angular hold for SPIN
-N_TICKS_FIRE = 3                       # consecutive in-tolerance ticks before STATIC/LINEAR fire
-COOLDOWN_STATIC = 0.20                # s between non-spin shots
-E_WINDOW = 0.040                       # m, hit window for spin trigger
-E_WINDOW_OMEGA_K = 2.0                 # shrink window by k·r·σ_ω·t_f (σ_ω placeholder until estimated)
-SIGMA_OMEGA = 0.5                      # rad/s, placeholder spin-rate uncertainty
+TOL_STATIC = math.radians(0.7)        # |aim_error| below this to commit a shot
+N_TICKS_FIRE = 3                       # consecutive in-tolerance ticks before firing
+COOLDOWN_STATIC = 0.20                # s between shots
 BALLISTIC_MAX_ITER = 5
 BALLISTIC_TOL = 5e-4                   # s, fixed-point convergence
-MAX_CENTER_SPEED = 3.0                 # m/s — clamp the target velocity used for lead (LINEAR vel_gi AND
-                                       # SPIN center v_c). These are weakly observable / spike on plate
-                                       # handoffs, and get extrapolated over the full ~0.6 s lead, so a
-                                       # spurious spike flings the aim. Bound to the chassis's physical top speed.
+MAX_CENTER_SPEED = 3.0                 # m/s — clamp the target velocity used for lead. Weakly observable,
+                                       # spikes on handoffs, extrapolated over the ~0.6 s lead → bound to the
+                                       # chassis's physical top speed so a spurious spike can't fling the aim.
+LEAD_MIN_SPEED = 0.20                  # m/s — below this don't bother leading (static / near-static)
+LEAD_PERP_FRAC = 0.7                   # if > this fraction of the velocity is ⊥ to the line of sight, the
+                                       # target is ORBITING (spin) → suppress the lead (aim at filtered pos)
 
 # Muzzle position relative to the yaw axis (gimbal-inertial z-up). The VERTICAL term sets pitch:
 # h = pos_gi[2] - MUZZLE_OFFSET[2], and with the yaw-only camera's T_CAM_z=0, pos_gi[2] is height-above-
@@ -95,89 +92,26 @@ def solve_with_lead(predict_fn:Callable[[float], np.ndarray], t_now:float, t_sta
 
 def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
   cls = plate["class"]
+  if cls in ("LOST", "UNKNOWN"): return None
   pos = np.array(plate["pos_gi"])
   vel = np.array(plate["vel_gi"])
   t_state = plate["t_state"]
 
-  if cls == "STATIC":
-    return lambda t, p=pos: p.copy()
-  if cls == "LINEAR":
-    spd = float(math.hypot(vel[0], vel[1]))          # bound the target velocity (z-up horizontal) so a
-    if spd > MAX_CENTER_SPEED:                         # handoff/noise spike can't fling the aim over the lead
-      vel = vel * (MAX_CENTER_SPEED / spd)
-    return lambda t, p=pos, v=vel, ts=t_state: p + v * (t - ts)
-  if cls == "SPIN":
-    spin = plate["spin"]
-    if spin is None: return None
-    c_0 = np.array(spin["c_0"])
-    v_c = np.array(spin["v_c"])
-    spd = float(math.hypot(v_c[0], v_c[1]))           # bound the weakly-observable center velocity so a
-    if spd > MAX_CENTER_SPEED:                         # spurious spike can't fling the aim over the lead
-      v_c = v_c * (MAX_CENTER_SPEED / spd)
-    t_ref = spin["t_ref"]
-    def predict(t):
-      dt = t - t_ref
-      return np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])   # z-up: center moves in x-y, height=z
-    return predict
-  return None
-
-# --- Spin trigger: best visible plate & perpendicular offset ---
-
-@dataclass
-class SpinHit:
-  k: int
-  e_perp: float
-  plate_pos: np.ndarray
-
-def _spin_plate_pos(spin:dict, k:int, t:float) -> Optional[np.ndarray]:
-  meta = spin["plates"][k]
-  if meta["known"]:
-    r, h = meta["r"], meta["h"]
-  else:
-    known = [p for p in spin["plates"] if p["known"]]
-    if not known: return None
-    r = float(np.mean([p["r"] for p in known]))
-    h = float(np.mean([p["h"] for p in known]))
-  c_0 = np.array(spin["c_0"])
-  v_c = np.array(spin["v_c"])
-  dt = t - spin["t_ref"]
-  c = np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])
-  theta_k = spin["omega"] * dt + spin["theta_body_0"] + k * (math.pi / 2)
-  return np.array([c[0] + r*math.cos(theta_k), c[1] + r*math.sin(theta_k), h])   # z-up: (x, y, height=z)
-
-def _spin_center_at(spin:dict, t:float) -> np.ndarray:
-  c_0 = np.array(spin["c_0"])
-  v_c = np.array(spin["v_c"])
-  dt = t - spin["t_ref"]
-  return np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])   # z-up: center moves in x-y, height=z
-
-def best_visible_plate(spin:dict, t:float, muzzle:np.ndarray=MUZZLE_OFFSET) -> Optional[SpinHit]:
-  center = _spin_center_at(spin, t)
-  # theta_los: direction from center toward muzzle in the x-y horizontal plane (z-up). Plate's
-  # body-frame phase must match within theta_facing for the plate to face us.
-  theta_los = math.atan2(muzzle[1] - center[1], muzzle[0] - center[0])
-  theta_facing = spin["theta_facing"]
-
-  los_vec = center - muzzle
-  los_norm = float(np.linalg.norm(los_vec))
-  if los_norm < 1e-6: return None
-  los_unit = los_vec / los_norm
-
-  best: Optional[SpinHit] = None
-  for k in range(4):
-    plate_pos = _spin_plate_pos(spin, k, t)
-    if plate_pos is None: continue
-    dt = t - spin["t_ref"]
-    theta_k = spin["omega"] * dt + spin["theta_body_0"] + k * (math.pi / 2)
-    if abs(wrap_pi(theta_k - theta_los)) > theta_facing:
-      continue
-    p_rel = plate_pos - muzzle
-    along = float(p_rel @ los_unit)
-    perp = p_rel - along * los_unit
-    e_perp = float(np.linalg.norm(perp))
-    if best is None or e_perp < best.e_perp:
-      best = SpinHit(k=k, e_perp=e_perp, plate_pos=plate_pos)
-  return best
+  # Lead only a TRANSLATING target. A spinning plate's velocity is ~tangential (perpendicular to the line
+  # of sight): leading it flings the aim off the orbit. So when the velocity is mostly perpendicular to
+  # the LOS (orbiting), suppress the lead — aim at the filtered position, which the CV filter averages
+  # toward the spin center. A constant-position predict also makes the feedforward fall out to ~0.
+  spd = float(math.hypot(vel[0], vel[1]))
+  if spd > MAX_CENTER_SPEED:
+    vel = vel * (MAX_CENTER_SPEED / spd)
+    spd = MAX_CENTER_SPEED
+  los = pos[:2] - MUZZLE_OFFSET[:2]
+  los_n = float(math.hypot(los[0], los[1]))
+  if spd > LEAD_MIN_SPEED and los_n > 1e-6:
+    perp = abs(vel[0] * (-los[1] / los_n) + vel[1] * (los[0] / los_n))   # |velocity ⊥ to LOS|
+    if perp > LEAD_PERP_FRAC * spd:                                       # mostly tangential ⇒ orbiting
+      return lambda t, p=pos: p.copy()
+  return lambda t, p=pos, v=vel, ts=t_state: p + v * (t - ts)
 
 # --- Trigger gate ---
 
@@ -186,82 +120,36 @@ class TriggerGate:
     self.consecutive_in_tol = 0
     self.last_fire_t = -math.inf
     self.last_target_id = -1
-    self.last_burst_idx: Optional[int] = None
-    self.last_spin_t_arrival: float = 0.0
     self.reason = "init"                  # why the last evaluate() did/didn't fire (diagnostics)
 
   def _reset_for_new_target(self):
     self.consecutive_in_tol = 0
-    self.last_burst_idx = None
 
-  def evaluate(self, plate:dict, yaw_err:float, pitch_err:float, t_arrival:float,
-               t_now:float) -> bool:
+  def evaluate(self, plate:dict, yaw_err:float, pitch_err:float, t_now:float) -> bool:
     target_id = plate["target_id"]
     if target_id != self.last_target_id:
       self._reset_for_new_target()
       self.last_target_id = target_id
 
-    cls = plate["class"]
-    if cls in ("LOST", "UNKNOWN"):
+    if plate["class"] != "TRACKING":         # LOST / UNKNOWN
       self.consecutive_in_tol = 0
-      self.reason = f"class={cls}"
+      self.reason = f"class={plate['class']}"
       return False
 
     aim_err = math.hypot(yaw_err, pitch_err)
-
-    if cls in ("STATIC", "LINEAR"):
-      if aim_err < TOL_STATIC:
-        self.consecutive_in_tol += 1
-      else:
-        self.consecutive_in_tol = 0
-      if self.consecutive_in_tol < N_TICKS_FIRE:
-        self.reason = f"aim {math.degrees(aim_err):.2f}°≥{math.degrees(TOL_STATIC):.1f}° (n={self.consecutive_in_tol}/{N_TICKS_FIRE})"
-        return False
-      if t_now - self.last_fire_t < COOLDOWN_STATIC:
-        self.reason = "cooldown"
-        return False
-      self.last_fire_t = t_now
-      self.reason = "FIRE"
-      return True
-
-    if cls == "SPIN":
-      spin = plate["spin"]
-      if spin is None:
-        self.reason = "spin=None"
-        return False
-      if aim_err > TOL_SPIN:
-        self.reason = f"aim {math.degrees(aim_err):.2f}°>{math.degrees(TOL_SPIN):.1f}°"
-        return False
-      hit = best_visible_plate(spin, t_arrival)
-      if hit is None:
-        self.reason = "no plate facing"
-        return False
-      omega = abs(spin["omega"])
-      if omega < 1e-3:
-        self.reason = "ω≈0"
-        return False
-      # Hit window shrinks under ω uncertainty over the flight time.
-      t_f = t_arrival - t_now
-      known = [p for p in spin["plates"] if p["known"]]
-      r_mean = float(np.mean([p["r"] for p in known])) if known else 0.15
-      e_window_eff = E_WINDOW - E_WINDOW_OMEGA_K * r_mean * SIGMA_OMEGA * max(0.0, t_f)
-      if e_window_eff <= 0:
-        self.reason = "window collapsed (range/σω)"
-        return False
-      if hit.e_perp > e_window_eff:
-        self.reason = f"e_perp {hit.e_perp*1000:.0f}>{e_window_eff*1000:.0f}mm (k={hit.k})"
-        return False
-      # Cooldown: one shot per plate-window (T_period/4 for a 4-plate spinner).
-      T_period = 2 * math.pi / omega
-      if t_now - self.last_fire_t < T_period / 4.0:
-        self.reason = "spin cooldown"
-        return False
-      self.last_fire_t = t_now
-      self.reason = "FIRE"
-      return True
-
-    self.reason = f"class={cls}?"
-    return False
+    if aim_err < TOL_STATIC:
+      self.consecutive_in_tol += 1
+    else:
+      self.consecutive_in_tol = 0
+    if self.consecutive_in_tol < N_TICKS_FIRE:
+      self.reason = f"aim {math.degrees(aim_err):.2f}°≥{math.degrees(TOL_STATIC):.1f}° (n={self.consecutive_in_tol}/{N_TICKS_FIRE})"
+      return False
+    if t_now - self.last_fire_t < COOLDOWN_STATIC:
+      self.reason = "cooldown"
+      return False
+    self.last_fire_t = t_now
+    self.reason = "FIRE"
+    return True
 
 # --- Daemon entry point ---
 # decisiond owns aiming POLICY (ballistic + lead → target angle, and the trigger) but NOT the gimbal
@@ -310,12 +198,17 @@ def run():
         logger.info("no-fire: class=LOST (target lost)"); last_diag = t_now
       continue
     if cls == "UNKNOWN":
-      # UNKNOWN = same target re-settling after a retarget (e.g. a spin plate-handoff), NOT "no target".
-      # HOLD the last aim (zero feedforward) so the gimbal stays on the robot instead of going stale and
-      # letting gimbald fall through to the search scan (→ gimbal jumps to a random direction). No fire
-      # until the class settles.
+      # UNKNOWN = same target re-settling after a retarget (fresh acquire / handoff), NOT "no target".
+      # Aim at the tracked plate NOW (zero lead, zero FF, no fire) so the gimbal stays on the robot instead
+      # of falling through to the search scan. On a fresh acquire from scan last_setpoint is None, so we
+      # must COMPUTE an aim rather than re-send nothing.
       pub.send("shoot", False)
-      if last_setpoint is not None:
+      pos = np.array(plate["pos_gi"])
+      sol = solve_with_lead(lambda t, p=pos: p.copy(), t_now, plate["t_state"], d_yaw_prev, d_pitch_prev)
+      if sol is not None:
+        last_setpoint = {"yaw": sol[0], "pitch": sol[1], "yaw_ff": 0.0, "pitch_ff": 0.0}
+        pub.send("aim_setpoint", last_setpoint)
+      elif last_setpoint is not None:
         pub.send("aim_setpoint", {**last_setpoint, "yaw_ff": 0.0, "pitch_ff": 0.0})
       if t_now - last_diag > 1.0:
         logger.info("no-fire: class=UNKNOWN (re-acquiring, holding aim)"); last_diag = t_now
@@ -355,15 +248,11 @@ def run():
     pitch_err = pitch_cmd - pitch_gi_now
     d_yaw_prev, d_pitch_prev = abs(yaw_err), abs(pitch_err)
 
-    fire = trigger.evaluate(plate, yaw_err, pitch_err, t_arrival, t_now)
+    fire = trigger.evaluate(plate, yaw_err, pitch_err, t_now)
     if fire or t_now - last_diag > 1.0:
-      extra = ""
-      if cls == "SPIN" and plate["spin"]:
-        vc = plate["spin"]["v_c"]
-        extra = f"  |v_c|={math.hypot(vc[0], vc[1]):.1f}m/s ω={math.degrees(plate['spin']['omega']):+.0f}°/s"
       logger.info(f"{'FIRE' if fire else 'no-fire'}: {cls} "
                   f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° "
-                  f"ff=({math.degrees(yaw_ff):+.0f},{math.degrees(pitch_ff):+.0f})°/s → {trigger.reason}{extra}")
+                  f"ff=({math.degrees(yaw_ff):+.0f},{math.degrees(pitch_ff):+.0f})°/s → {trigger.reason}")
       last_diag = t_now
 
     last_setpoint = {"yaw": yaw_gi_cmd, "pitch": pitch_cmd, "yaw_ff": yaw_ff, "pitch_ff": pitch_ff}

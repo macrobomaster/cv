@@ -15,11 +15,9 @@ def gi_to_flu(p) -> list:
   return [float(p[0]), float(p[1]), float(p[2])]
 
 CLASS_COLOR = {
-  "STATIC":  [0,   255, 0,   200],
-  "LINEAR":  [0,   200, 255, 200],
-  "SPIN":    [255, 80,  0,   220],
-  "UNKNOWN": [180, 180, 180, 120],
-  "LOST":    [80,  80,  80,  120],
+  "TRACKING": [0,   255, 0,   200],
+  "UNKNOWN":  [180, 180, 180, 120],
+  "LOST":     [80,  80,  80,  120],
 }
 
 VISUAL_SERVICES = [
@@ -50,32 +48,6 @@ def time_series_view(name, contents):
     )),
   )
 
-def predict_plate(spin:dict, k:int, t:float):
-  meta = spin["plates"][k]
-  if meta["known"]:
-    r, h = meta["r"], meta["h"]
-  else:
-    known = [p for p in spin["plates"] if p["known"]]
-    if not known: return None, False
-    r = float(np.mean([p["r"] for p in known]))
-    h = float(np.mean([p["h"] for p in known]))
-  c_0 = np.array(spin["c_0"])
-  v_c = np.array(spin["v_c"])
-  dt = t - spin["t_ref"]
-  cx = c_0[0] + v_c[0] * dt
-  cy = c_0[1] + v_c[1] * dt
-  theta_k = spin["omega"] * dt + spin["theta_body_0"] + k * (math.pi / 2)
-  return np.array([cx + r * math.cos(theta_k), cy + r * math.sin(theta_k), h]), meta["known"]
-
-def spin_visible(spin:dict, k:int, t:float, muzzle=np.zeros(3)) -> bool:
-  c_0 = np.array(spin["c_0"]); v_c = np.array(spin["v_c"])
-  dt = t - spin["t_ref"]
-  c = np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])
-  theta_los = math.atan2(muzzle[1] - c[1], muzzle[0] - c[0])
-  theta_k = spin["omega"] * dt + spin["theta_body_0"] + k * (math.pi / 2)
-  diff = (theta_k - theta_los + math.pi) % (2 * math.pi) - math.pi
-  return abs(diff) < spin["theta_facing"]
-
 rr.init("cv", spawn=True)
 rr.send_blueprint(rrb.Blueprint(
   rrb.TimePanel(timeline="time", play_state="following"),
@@ -93,8 +65,6 @@ rr.send_blueprint(rrb.Blueprint(
         "/scalars/aim_error_yaw_deg", "/scalars/aim_error_pitch_deg", "/scalars/aim_angle_x_deg", "/scalars/aim_angle_y_deg",
       ]),
       time_series_view("Autoaim", ["/scalars/autoaim_valid", "/scalars/autoaim_confidence"]),
-      time_series_view("Spin", ["/scalars/spin_omega_deg_s", "/scalars/spin_n_known"]),
-      time_series_view("Facing-yaw", ["/scalars/psi/measured", "/scalars/psi/model"]),
       time_series_view("Commands", ["/scalars/shoot"]),
       name="Plots",
     ),
@@ -183,13 +153,6 @@ while True:
     cov = np.array(plate["cov_pos"])
     color = CLASS_COLOR.get(cls, [200, 200, 200, 200])
 
-    # Clear stale spin entities on retarget so the prior model doesn't ghost.
-    if target_id != last_target_id:
-      for k in range(4):
-        rr.log(f"gi/spin/plate_{k}", rr.Clear(recursive=False))
-      rr.log("gi/spin/axis", rr.Clear(recursive=False))
-      last_target_id = target_id
-
     rr.log("gi/target/pos", rr.Points3D([gi_to_flu(pos)], colors=[color], radii=[0.04],
                                          labels=[f"{cls} #{target_id}"]))
     rr.log("gi/target/vel", rr.Arrows3D(origins=[gi_to_flu(pos)],
@@ -216,54 +179,6 @@ while True:
     pos_meas = plate.get("pos_meas")
     if pos_meas is not None:
       rr.log("scalars/dist/measured", rr.Scalars(float(np.linalg.norm(pos_meas))))
-
-    # Robot model — render ALWAYS (the 4-plate body is estimated for every class now), so you can
-    # watch the geometry, heading, and facing-yaw to validate the estimator outside spin too.
-    if plate["spin"] is not None:
-      spin = plate["spin"]
-      t_eval = plate["t_state"]
-      r = float(spin["plates"][0]["r"])
-      c_0 = np.array(spin["c_0"]); v_c = np.array(spin["v_c"])
-      dt = t_eval - spin["t_ref"]
-      c = np.array([c_0[0] + v_c[0]*dt, c_0[1] + v_c[1]*dt, c_0[2]])
-
-      # Spin axis: vertical (world-z) line through the current center.
-      rr.log("gi/spin/axis", rr.LineStrips3D([[gi_to_flu(c + [0, 0, -0.20]), gi_to_flu(c + [0, 0, 0.20])]],
-                                              colors=[[255, 200, 0]], radii=[0.005]))
-      # Heading: arrow from center along plate-0's outward bearing θ (so you see body orientation).
-      theta = spin["omega"] * dt + spin["theta_body_0"]
-      head = np.array([math.cos(theta), math.sin(theta), 0.0]) * (r * 1.4)
-      rr.log("gi/spin/heading", rr.Arrows3D(origins=[gi_to_flu(c)], vectors=[gi_to_flu(head.tolist())],
-                                            colors=[[255, 200, 0]]))
-      # Orbit ring the 4 plates ride on.
-      ring = [gi_to_flu([c[0] + r*math.cos(a), c[1] + r*math.sin(a), c[2]])
-              for a in np.linspace(0, 2*math.pi, 33)]
-      rr.log("gi/spin/ring", rr.LineStrips3D([ring], colors=[[120, 120, 60]], radii=[0.002]))
-
-      # All 4 predicted plates: known solid, fallback dim, currently-visible highlighted.
-      for k in range(4):
-        plate_pos, known = predict_plate(spin, k, t_eval)
-        if plate_pos is None: continue
-        visible = spin_visible(spin, k, t_eval)
-        col = [80, 255, 80, 255] if visible else ([255, 80, 0, 240] if known else [180, 80, 80, 120])
-        label = f"P{k}{'*' if visible else ''}{'?' if not known else ''}"
-        rr.log(f"gi/spin/plate_{k}", rr.Points3D([gi_to_flu(plate_pos)], colors=[col],
-                                                  radii=[0.07 if visible else 0.045], labels=[label]))
-
-      # Facing-yaw validation: raw measured ψ vs the model's heading for the visible plate. If these
-      # track each other cleanly, ψ from PnP is trustworthy; jumps/180°-flips show association risk.
-      psi_meas = plate.get("psi_meas")
-      vk = plate.get("visible_k", 0)
-      if psi_meas is not None and pos_meas is not None:
-        n = np.array([math.cos(psi_meas), math.sin(psi_meas), 0.0]) * (r * 0.8)
-        rr.log("gi/spin/psi_meas", rr.Arrows3D(origins=[gi_to_flu(pos_meas)], vectors=[gi_to_flu(n.tolist())],
-                                               colors=[[0, 200, 255]]))
-        wrap = lambda a: (a + math.pi) % (2*math.pi) - math.pi
-        rr.log("scalars/psi/measured", rr.Scalars(math.degrees(wrap(psi_meas))))
-        rr.log("scalars/psi/model", rr.Scalars(math.degrees(wrap(theta + vk * math.pi/2))))
-
-      rr.log("scalars/spin_omega_deg_s", rr.Scalars(math.degrees(spin["omega"])))
-      rr.log("scalars/spin_n_known", rr.Scalars(sum(1 for p in spin["plates"] if p["known"])))
 
   # Autoaim raw — scalars + 2D corner overlay on the camera feed (so detections are visible
   # straight from autoaimd, without plated running).

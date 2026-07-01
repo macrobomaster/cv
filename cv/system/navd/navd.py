@@ -88,12 +88,11 @@ def plan_path(static_grid, robot_radius, p_xy, goal_xy, robots=(), cam_occ=None)
   return planner.plan(g.inflated(robot_radius), p_xy, goal_xy)
 
 def enemy_center_gi(plate):
-  """Enemy robot CENTER in the gimbal-inertial frame from a plate msg (x, y), or None for a
-  lost/empty track. SPIN → the estimated spin centre c_0 (stable); else the plate position."""
+  """Enemy robot position in the gimbal-inertial frame from a plate msg (x, y), or None for a
+  lost/empty track. Uses the tracked plate position (≤ r off the body centre — fine for an obstacle)."""
   cls = plate.get("class")
   if cls in (None, "LOST", "UNKNOWN"): return None
-  spin = plate.get("spin")
-  c = spin["c_0"] if cls == "SPIN" and spin else plate.get("pos_gi")
+  c = plate.get("pos_gi")
   return (float(c[0]), float(c[1])) if c is not None else None
 
 def tag_standoff(tag_id:int, dist:float) -> np.ndarray:
