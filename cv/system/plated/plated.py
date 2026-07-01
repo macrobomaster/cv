@@ -55,6 +55,11 @@ Q_OMEGA = (4.0) ** 2            # (rad/s)^2/s, heading-rate random walk. Was (12
                                 # (~18 rad/s seen) that destabilize the coupled center → aim flings. Raise
                                 # toward (8) if genuine fast spin-ups are recognized too slowly.
 Q_R = (0.02) ** 2              # m^2/s, radius drifts slowly
+OMEGA_MAX = 70.0               # rad/s (~11 Hz) hard clamp above the physical spin ceiling — ω is UNOBSERVED
+                               # on a static plate (∂ψ/∂ω=0) so a bad ψ-innovation can kick it past the
+                               # aliasing wall (|ω|·dt>π) where it latches and runs away. Keep > real 10 Hz.
+TAU_OMEGA = 1.0                # s, ω mean-reverts to 0 absent a rotation signal (kills the unobserved-integrator
+                               # drift); real spin re-affirms ω every frame. Raise if spin-up is recognized too slowly.
 
 # Initial covariance at bootstrap — center/heading/omega/radius are poorly known from one plate.
 INIT_C = (0.30) ** 2
@@ -166,6 +171,7 @@ class RobotUKF:
     F[IDX_CX, IDX_VX] = dt
     F[IDX_CY, IDX_VY] = dt
     F[IDX_TH, IDX_W] = dt
+    F[IDX_W, IDX_W] = math.exp(-dt / TAU_OMEGA)   # ω relaxes to 0 when unobserved (static); real spin re-affirms it
     Q = np.diag([Q_CENTER*dt, Q_CENTER*dt, Q_VEL*dt, Q_VEL*dt, Q_THETA*dt, Q_OMEGA*dt, Q_R*dt])
     return F, Q
 
@@ -175,6 +181,7 @@ class RobotUKF:
     F, Q = self._F_Q(dt)
     self.x = F @ self.x
     self.x[IDX_TH] = wrap_pi(self.x[IDX_TH])
+    self.x[IDX_W] = min(OMEGA_MAX, max(-OMEGA_MAX, self.x[IDX_W]))
     self.P = F @ self.P @ F.T + Q
     np.fill_diagonal(self.P, np.minimum(np.diag(self.P), P_CAP))
     self.t = t
@@ -229,6 +236,7 @@ class RobotUKF:
     self.x = self.x + K @ innov
     self.x[IDX_TH] = wrap_pi(self.x[IDX_TH])
     self.x[IDX_R] = min(R_RANGE[1], max(R_RANGE[0], self.x[IDX_R]))
+    self.x[IDX_W] = min(OMEGA_MAX, max(-OMEGA_MAX, self.x[IDX_W]))
     self.P = self.P - K @ S @ K.T
     self.P = 0.5 * (self.P + self.P.T)
     np.fill_diagonal(self.P, np.minimum(np.diag(self.P), P_CAP))
