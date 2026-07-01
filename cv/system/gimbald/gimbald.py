@@ -76,6 +76,7 @@ def run():
   fk = FrequencyKeeper(200)
   warned_no_gimbal = False
   last_diag = 0.0
+  last_status = 0.0
 
   while True:
     fk.step()
@@ -104,6 +105,10 @@ def run():
 
     if sp is None or gp is None:
       pub.send("aim_error", {"x": 0.0, "y": 0.0})  # no setpoint / no feedback ⇒ hold (zero rate)
+      if now - last_status > 1.0:
+        ages = {s: (now - last_fresh[s] if last_fresh[s] > -math.inf else math.inf) for s in SOURCES}
+        logger.info(f"gimbald: active={active or 'hold'} feedback={gp is not None} ages={ages}")
+        last_status = now
       continue
 
     dt = 0.0 if last_t is None else (now - last_t)
@@ -113,3 +118,7 @@ def run():
     aim_x = yaw_pid.update(yaw_err, sp["yaw_ff"], yaw_rate, dt)
     aim_y = pitch_pid.update(pitch_err, sp["pitch_ff"], pitch_rate, dt)
     pub.send("aim_error", {"x": aim_x, "y": aim_y})
+    if now - last_status > 1.0:
+      logger.info(f"gimbald: active={active} yaw_err={math.degrees(yaw_err):+.1f}deg "
+                  f"yaw_ff={math.degrees(sp['yaw_ff']):+.0f}deg/s aim=({aim_x:+.3f},{aim_y:+.3f})")
+      last_status = now
