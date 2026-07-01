@@ -20,6 +20,7 @@ from ...autoaim.common import (
 TOL_STATIC = math.radians(0.7)        # |aim_error| below this to commit a shot
 N_TICKS_FIRE = 3                       # consecutive in-tolerance ticks before firing
 COOLDOWN_STATIC = 0.01                # s between shots
+BARREL_HEAT_PER_SHOT = 10             # RoboMaster 17 mm projectile heat cost
 BALLISTIC_MAX_ITER = 5
 BALLISTIC_TOL = 5e-4                   # s, fixed-point convergence
 MAX_CENTER_SPEED = 3.0                 # m/s — clamp the target velocity used for lead. Weakly observable,
@@ -134,6 +135,15 @@ def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
 
 # --- Trigger gate ---
 
+def barrel_heat_allows_fire(barrel_heat:Optional[dict], fresh:bool) -> tuple[bool, str]:
+  if barrel_heat is None: return False, "no barrel_heat"
+  if not fresh: return False, "stale barrel_heat"
+  limit, current = barrel_heat.get("limit"), barrel_heat.get("current")
+  if limit is None or current is None: return False, "bad barrel_heat"
+  if current + BARREL_HEAT_PER_SHOT > limit:
+    return False, f"heat {current}/{limit} (+{BARREL_HEAT_PER_SHOT})"
+  return True, ""
+
 class TriggerGate:
   def __init__(self):
     self.consecutive_in_tol = 0
@@ -144,7 +154,7 @@ class TriggerGate:
   def _reset_for_new_target(self):
     self.consecutive_in_tol = 0
 
-  def evaluate(self, plate:dict, yaw_err:float, pitch_err:float, t_now:float) -> bool:
+  def evaluate(self, plate:dict, yaw_err:float, pitch_err:float, t_now:float, heat_ok:bool, heat_reason:str) -> bool:
     target_id = plate["target_id"]
     if target_id != self.last_target_id:
       self._reset_for_new_target()
@@ -163,6 +173,9 @@ class TriggerGate:
     if self.consecutive_in_tol < N_TICKS_FIRE:
       self.reason = f"aim {math.degrees(aim_err):.2f}°≥{math.degrees(TOL_STATIC):.1f}° (n={self.consecutive_in_tol}/{N_TICKS_FIRE})"
       return False
+    if not heat_ok:
+      self.reason = heat_reason
+      return False
     if t_now - self.last_fire_t < COOLDOWN_STATIC:
       self.reason = "cooldown"
       return False
@@ -178,7 +191,7 @@ class TriggerGate:
 
 def run():
   pub = messaging.Pub(["aim_setpoint", "aim_angle", "shoot"])
-  sub = messaging.Sub(["plate"], poll="plate")
+  sub = messaging.Sub(["plate", "barrel_heat"], poll="plate")
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
 
@@ -267,7 +280,8 @@ def run():
     pitch_err = pitch_cmd - pitch_gi_now
     d_yaw_prev, d_pitch_prev = abs(yaw_err), abs(pitch_err)
 
-    fire = trigger.evaluate(plate, yaw_err, pitch_err, t_now)
+    heat_ok, heat_reason = barrel_heat_allows_fire(sub["barrel_heat"], sub.updated["barrel_heat"] or sub.alive["barrel_heat"])
+    fire = trigger.evaluate(plate, yaw_err, pitch_err, t_now, heat_ok, heat_reason)
     if fire or t_now - last_diag > 1.0:
       logger.info(f"{'FIRE' if fire else 'no-fire'}: {cls} "
                   f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° "
