@@ -22,11 +22,11 @@ RETREAT_HOLD_DT = 10.0
 PLAY_STYLES = {"balanced", "center"}
 
 TEAM_GOALS = {
-  "red": {
+  "blue": {
     "center": (6.79, 3.24),
     "home": (11.01, 3.52),
   },
-  "blue": {
+  "red": {
     "center": (5.16, 3.21),
     "home": (0.91, 3.45),
   },
