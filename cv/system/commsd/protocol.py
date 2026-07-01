@@ -25,7 +25,7 @@ COMMAND_FORMATS = {
   Command.RAW_ACCEL: '',
   Command.GIMBAL_STATE: '',
   Command.CHASSIS_ODOM: '',
-  Command.CHASSIS_ALIGN: '',
+  Command.CHASSIS_ALIGN: '<B',
 }
 
 RESPONSE_FORMATS = {
