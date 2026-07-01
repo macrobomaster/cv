@@ -15,6 +15,7 @@ class Command(Enum):
   GIMBAL_STATE = 0x08
   CHASSIS_ODOM = 0x09
   CHASSIS_ALIGN = 0x0b
+  BARREL_HEAT = 0x0a
 
 COMMAND_FORMATS = {
   Command.CHECK_STATE: '<B',
@@ -26,6 +27,7 @@ COMMAND_FORMATS = {
   Command.GIMBAL_STATE: '',
   Command.CHASSIS_ODOM: '',
   Command.CHASSIS_ALIGN: '<B',
+  Command.BARREL_HEAT: '',
 }
 
 RESPONSE_FORMATS = {
@@ -41,6 +43,7 @@ RESPONSE_FORMATS = {
   # vy (left), m/s. 2-D horizontal; the board does the chassis→gimbal rotation.
   Command.CHASSIS_ODOM: '<ff',
   Command.CHASSIS_ALIGN: '<B',
+  Command.BARREL_HEAT: '<HH',
 }
 
 CRC8_INIT = 0xff

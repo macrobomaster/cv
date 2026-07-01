@@ -20,6 +20,7 @@ COMM_RATES_HZ = {
   "game_running": 1.0,
   "team_color": 0.2,
   "robot_type": 0.2,
+  "barrel_heat": 10.0,
 }
 COMMS_RATE_WINDOW = 1.0
 
@@ -63,7 +64,7 @@ def run():
   port = serial.Serial(device, 921600, timeout=1)
   protocol = Protocol(port)
 
-  pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates", "chassis_odom"])
+  pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates", "chassis_odom", "barrel_heat"])
   # gimbal_state + raw_imu are high-rate streams consumed sample-by-sample
   # (slamd integrates every IMU sample), so publish non-conflate.
   gimbal_pub = messaging.Pub(["gimbal_state", "raw_imu"], conflate=False)
@@ -170,5 +171,11 @@ def run():
       robot_type = comm_msg(protocol, comm_counts, "robot_type", Command.CHECK_STATE, State.ROBOT_TYPE.value)
       if robot_type is not None:
         pub.send("robot_type", "sentry" if robot_type[1] == 0x00 else "standard")
+
+    if due(next_comm_at, "barrel_heat"):
+      ba = comm_msg(protocol, comm_counts, "barrel_heat", Command.BARREL_HEAT)
+      if ba is not None:
+        limit, current = ba
+        pub.send("barrel_heat", {"limit": limit, "current": current})
 
     last_rate_at = publish_comm_rates(pub, comm_counts, comm_rates, last_rate_at)
