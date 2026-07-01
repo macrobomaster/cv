@@ -22,6 +22,17 @@ RETREAT_HOLD_DT = 10.0
 
 PLAY_STYLES = {"balanced", "center"}
 
+TEAM_GOALS = {
+  "red": {
+    "center": (6.79, 3.24),
+    "home": (11.01, 3.52),
+  },
+  "blue": {
+    "center": (5.16, 3.21),
+    "home": (0.91, 3.45),
+  },
+}
+
 class IdleState(StateBase):
   name = "idle"
 
@@ -33,6 +44,36 @@ class IdleState(StateBase):
 
   def run(self, ctx, pub):
     pass
+
+class NavToCenterState(PeriodicNavToGoalState):
+  name = "nav_to_center"
+  goal_label = "center"
+  arrive_radius = NAV_ARRIVE_RADIUS
+  period = RECENTER_PERIOD
+  first_delay = 0.0
+
+class NavToHomeState(NavToGoalState):
+  name = "nav_to_home"
+  goal_label = "home"
+  arrive_radius = NAV_ARRIVE_RADIUS
+
+class HoldHomeState(ScanAcquireMixin, TimedHoldGoalState):
+  name = "hold_home"
+  goal_label = "home_hold"
+  hold_dt = RETREAT_HOLD_DT
+
+class ReturnCenterState(NavToGoalState):
+  name = "return_center"
+  goal_label = "center"
+  arrive_radius = NAV_ARRIVE_RADIUS
+
+class RetreatSequenceState(PeriodicSequenceState):
+  name = "retreat_sequence"
+  period = RETREAT_PERIOD
+  first_delay = RETREAT_PERIOD
+
+  def __init__(self, center_goal:tuple[float, float], back_goal:tuple[float, float]):
+    super().__init__([NavToHomeState(back_goal), HoldHomeState(back_goal), ReturnCenterState(center_goal)])
 
 class AcquireState(AcquireHoldState):
   name = "acquire"
@@ -54,23 +95,19 @@ class SearchState(ScanAcquireMixin, StateBase):
   def run(self, ctx, pub):
     pass
 
-class NavToHome(NavToGoalState):
-  name = "nav_to_home"
-  goal_label = "home"
-  arrive_radius = NAV_ARRIVE_RADIUS
-
-class NavToCenter(NavToGoalState):
-  name = "nav_to_center"
-  goal_label = "center"
-  arrive_raidus = NAV_ARRIVE_RADIUS
+def _goals(team_color:str) -> dict:
+  if team_color not in TEAM_GOALS:
+    raise ValueError(f"unknown team_color {team_color!r}; expected one of {sorted(TEAM_GOALS)}")
+  return TEAM_GOALS[team_color]
 
 def make_state_machine(team_color:str, play_style:str="balanced") -> StateMachine:
   play_style = play_style.lower()
+  goals = _goals(team_color)
 
+  nav_to_center = NavToCenterState(goals["center"])
   acquire = AcquireState()
   search = SearchState()
-  nav_to_home = NavToHome((1.5, 0.15))
-  nav_to_center = NavToCenter((1.5, 2.5))
+  retreat = RetreatSequenceState(goals["center"], goals["home"])
 
-  states = [IdleState(), nav_to_home, nav_to_center, acquire, search]
+  states = [IdleState(), retreat, nav_to_center, acquire, search]
   return StateMachine(states)
