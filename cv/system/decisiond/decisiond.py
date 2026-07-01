@@ -19,7 +19,7 @@ from ...autoaim.common import (
 # Aim / trigger tunings
 TOL_STATIC = math.radians(0.7)        # |aim_error| below this to commit a shot
 N_TICKS_FIRE = 3                       # consecutive in-tolerance ticks before firing
-COOLDOWN_STATIC = 0.20                # s between shots
+COOLDOWN_STATIC = 0.01                # s between shots
 BALLISTIC_MAX_ITER = 5
 BALLISTIC_TOL = 5e-4                   # s, fixed-point convergence
 MAX_CENTER_SPEED = 3.0                 # m/s — clamp the target velocity used for lead. Weakly observable,
@@ -33,7 +33,7 @@ LEAD_PERP_FRAC = 0.7                   # if > this fraction of the velocity is �
 # h = pos_gi[2] - MUZZLE_OFFSET[2], and with the yaw-only camera's T_CAM_z=0, pos_gi[2] is height-above-
 # CAMERA, so MUZZLE_OFFSET[2] = -(camera optical centre height above the muzzle). MEASURE it (CAD/tape) —
 # the yaw-only camera calibration can't observe a vertical lever arm. fwd/lat are parallax (2nd-order at a few m).
-CAM_ABOVE_MUZZLE = 0.3                 # m, camera optical centre height ABOVE the muzzle. TODO: measure.
+CAM_ABOVE_MUZZLE = 0.16                 # m, camera optical centre height ABOVE the muzzle. TODO: measure.
 MUZZLE_OFFSET = np.array([0.0, 0.0, -CAM_ABOVE_MUZZLE])
 
 # --- Math helpers ---
