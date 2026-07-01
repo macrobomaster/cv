@@ -1,8 +1,9 @@
 """Top-down field map editor — define the nav map (walls + goal points) for navd.
 
 Renders the field with the surveyed AprilTags, lets you paint rectangular walls and
-place goal points, previews the robot-radius inflation the planner actually sees, and
-exports a NAV_MAP JSON that navd loads (`NAV_MAP` env):
+place goal points, previews the robot-radius inflation the planner actually sees, draws
+the planner's ROUTE between consecutive goals (green; red straight = no path) so you can
+sanity-check where it would drive, and exports a NAV_MAP JSON that navd loads (`NAV_MAP` env):
 
   {bounds:[x0,y0,x1,y1], res, robot_radius, walls:[{rect:[x0,y0,x1,y1]}], goals:[{x,y,label}]}
 
@@ -22,13 +23,13 @@ import cv2
 import numpy as np
 
 from ..slam import common
-from ..nav.occupancy import OccupancyGrid
+from ..nav.occupancy import OccupancyGrid, ROBOT_RADIUS
+from ..nav import planner
 
 CANVAS_MAX = 1100        # px, longest canvas side
 PAD = 55                 # px, border around the field
 NORMAL_LEN = 0.6         # m, drawn length of each tag's face-normal arrow
 RES = 0.10               # m, grid resolution for the inflation preview / export
-ROBOT_RADIUS = 0.28      # m, obstacle inflation radius
 SNAP_PX = 14             # px, right-click removes a wall/goal within this radius
 
 # Colors (BGR)
@@ -36,6 +37,7 @@ C_BG, C_GRID = (48, 45, 45), (72, 72, 72)
 C_TAG, C_NORMAL = (220, 180, 0), (0, 230, 230)
 C_WALL, C_INFLATE = (40, 40, 40), (150, 150, 150)
 C_GOAL, C_PEND, C_RUBBER = (0, 165, 255), (0, 255, 0), (0, 210, 0)
+C_PATH, C_BLOCKED = (60, 220, 60), (0, 0, 230)   # planned route between goals; red = no path
 C_TEXT = (235, 235, 235)
 
 class View:
@@ -55,8 +57,14 @@ def build_grid(view, walls):
   for x0, y0, x1, y1 in walls: g.add_rect(x0, y0, x1, y1)
   return g, g.inflated(ROBOT_RADIUS)
 
+def plan_segments(inflated, goals):
+  """The planner's route between each consecutive goal pair (exactly what navd would drive),
+  or None for a pair with no path. Recomputed only when walls/goals change (not per frame)."""
+  return [planner.plan(inflated, (goals[i][0], goals[i][1]), (goals[i + 1][0], goals[i + 1][1]))
+          for i in range(len(goals) - 1)]
+
 # --- rendering (pure: returns a BGR image, so it's testable headless) ---
-def render(view, state, grid, inflated):
+def render(view, state, grid, inflated, planned):
   img = np.full((view.H, view.W, 3), C_BG, np.uint8)
 
   # inflation halo then raw walls (from the grids → exactly what the planner sees)
@@ -84,6 +92,14 @@ def render(view, state, grid, inflated):
     cv2.arrowedLine(img, p, tip, C_NORMAL, 2, tipLength=0.35)
     cv2.rectangle(img, (p[0] - 6, p[1] - 6), (p[0] + 6, p[1] + 6), C_TAG, -1)
     cv2.putText(img, str(tid), (p[0] + 9, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, C_TEXT, 1)
+
+  # planned routes between consecutive goals (what navd would drive) — red straight = blocked
+  for i, seg in enumerate(planned):
+    a, b = state["goals"][i], state["goals"][i + 1]
+    if seg is None:
+      cv2.line(img, view.to_px(a[0], a[1]), view.to_px(b[0], b[1]), C_BLOCKED, 1)
+    elif len(seg) >= 2:
+      cv2.polylines(img, [np.array([view.to_px(x, y) for x, y in seg], np.int32)], False, C_PATH, 2)
 
   for i, (gx, gy, lbl) in enumerate(state["goals"]):
     p = view.to_px(gx, gy)
@@ -156,12 +172,15 @@ def main():
   win = "map_editor"
   cv2.namedWindow(win)
   cv2.setMouseCallback(win, on_mouse)
-  grid = inflated = None
-  nwalls = -1
+  grid = inflated = planned = None
+  dirty = None
   while True:
-    if len(state["walls"]) != nwalls:                # rebuild grid only when walls change
-      grid, inflated = build_grid(view, state["walls"]); nwalls = len(state["walls"])
-    cv2.imshow(win, render(view, state, grid, inflated))
+    key = (len(state["walls"]), len(state["goals"]))   # rebuild grid + replan only on a change
+    if key != dirty:
+      grid, inflated = build_grid(view, state["walls"])
+      planned = plan_segments(inflated, state["goals"])
+      dirty = key
+    cv2.imshow(win, render(view, state, grid, inflated, planned))
     k = cv2.waitKey(20) & 0xFF
     if k in (ord("q"), 27): break
     elif k == ord("w"): state["mode"], state["pend"] = "walls", None
