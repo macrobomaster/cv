@@ -25,7 +25,7 @@ VISUAL_SERVICES = [
   "game_running", "team_color", "robot_type", "comms_rates",
 ]
 COMMS_RATE_SERVICES = [
-  "gimbal_state", "aim_error", "shoot", "chassis_velocity", "spinning", "game_running", "team_color", "robot_type",
+  "gimbal_state", "aim_error", "shoot", "chassis_velocity", "spinning", "game_running", "team_color", "robot_type", "chassis_odom", "barrel_heat",
 ]
 PLOT_TIME_WINDOW_S = 20.0
 
