@@ -6,7 +6,7 @@
     5.0
   ],
   "res": 0.1,
-  "robot_radius": 0.28,
+  "robot_radius": 0.35,
   "walls": [
     {
       "rect": [
