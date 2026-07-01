@@ -20,18 +20,6 @@ RECENTER_PERIOD = 10.0
 RETREAT_PERIOD = 60.0
 RETREAT_HOLD_DT = 10.0
 
-TEAM_GOALS = {
-  "red": {
-    "center": (11.02, 6.98),
-    "back": (11.00, 6.00),
-  },
-  "blue": {
-    "center": (0.98, 6.98),
-    "back": (1.00, 6.00),
-  },
-}
-PLAY_STYLES = {"balanced", "center"}
-
 class IdleState(StateBase):
   name = "idle"
 
@@ -69,12 +57,18 @@ class NavToHome(NavToGoalState):
   goal_label = "home"
   arrive_radius = NAV_ARRIVE_RADIUS
 
+class NavToCenter(NavToGoalState):
+  name = "nav_to_center"
+  goal_label = "center"
+  arrive_raidus = NAV_ARRIVE_RADIUS
+
 def make_state_machine(team_color:str, play_style:str="balanced") -> StateMachine:
   play_style = play_style.lower()
 
   acquire = AcquireState()
   search = SearchState()
   nav_to_home = NavToHome((1.5, 0.15))
+  nav_to_center = NavToCenter((1.5, 2.5))
 
-  states = [IdleState(), nav_to_home, acquire, search]
+  states = [IdleState(), nav_to_home, nav_to_center, acquire, search]
   return StateMachine(states)
