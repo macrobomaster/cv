@@ -17,9 +17,10 @@ class NavToGoalState(StateBase):
 
   def __init__(self, goal_xy:tuple[float, float]|None=None):
     self.goal_xy = goal_xy
+    self.done = False
 
   def reset(self, ctx=None):
-    pass
+    self.done = False
 
   def observe(self, ctx):
     if not bool(ctx["game_running"]): self.reset(ctx)
@@ -32,11 +33,14 @@ class NavToGoalState(StateBase):
     return math.hypot(float(px) - self.goal_xy[0], float(py) - self.goal_xy[1]) < self.arrive_radius
 
   def should_transition(self, current:StateBase, ctx) -> bool:
-    return bool(ctx["game_running"]) and self.goal_xy is not None
+    return bool(ctx["game_running"]) and self.goal_xy is not None and not self.done
 
   def can_transition(self, ctx) -> bool:
     if not bool(ctx["game_running"]): return True
-    return self.arrived(ctx)
+    if self.arrived(ctx):
+      self.done = True
+      return True
+    return False
 
   def run(self, ctx, pub):
     if ctx.entered: logger.info(f"stated: navigating to {self.goal_label}")
@@ -51,6 +55,7 @@ class PeriodicNavToGoalState(NavToGoalState):
     self.next_due = time.monotonic() + self.first_delay
 
   def reset(self, ctx=None):
+    super().reset(ctx)
     self.next_due = (ctx.now if ctx is not None else time.monotonic()) + self.first_delay
 
   def should_transition(self, current:StateBase, ctx) -> bool:

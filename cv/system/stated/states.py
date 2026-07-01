@@ -65,7 +65,7 @@ class SearchState(ScanAcquireMixin, StateBase):
     pass
 
 class NavToHome(NavToGoalState):
-  name = "name_to_home"
+  name = "nav_to_home"
   goal_label = "home"
   arrive_radius = NAV_ARRIVE_RADIUS
 
