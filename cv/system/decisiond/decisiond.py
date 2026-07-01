@@ -17,7 +17,9 @@ from ...autoaim.common import (
 )
 
 # Aim / trigger tunings
-TOL_STATIC = math.radians(2)          # |aim_error| below this to commit a shot
+TOL_STATIC = math.radians(1.1)        # |aim_error| below this to commit a shot. ~small-plate half-angle at
+                                       # 3.2m (135×125mm); sits above the ~0.5° measured settle jitter so it
+                                       # still fires. 2.0° only guaranteed a hit inside ~1.8m (fired off-plate).
 N_TICKS_FIRE = 2                       # consecutive in-tolerance ticks before firing
 COOLDOWN_STATIC = 0.01                # s between shots
 BARREL_HEAT_PER_SHOT = 10             # RoboMaster 17 mm projectile heat cost
