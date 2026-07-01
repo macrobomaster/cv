@@ -15,6 +15,7 @@ PROCS = [
   SupervisedProcess("commsd", "cv.system.commsd.commsd", on_orin, watchdog_dt=5),
   SupervisedProcess("camerad", "cv.system.camerad.camerad", watchdog_dt=10,
                     cpu_affinity=2 if ON_ORIN else None, rt_priority=80 if ON_ORIN else None),
+  SupervisedProcess("qrd", "cv.system.qrd.qrd"),
   SupervisedProcess("gimbald", "cv.system.gimbald.gimbald"),
   SupervisedProcess("autoaimd", "cv.system.autoaimd.autoaimd"),
   SupervisedProcess("plated", "cv.system.plated.plated"),
