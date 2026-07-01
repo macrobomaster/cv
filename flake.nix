@@ -197,6 +197,30 @@
             };
           };
 
+          # thermal: nvfancontrol ships in "quiet" mode, which barely spins the fan and
+          # lets the SoC — and the NVMe baking next to it — run hot enough to drop off the
+          # PCIe bus (won't re-enumerate on a hot reboot -> PXE) / force btrfs read-only.
+          # Pin the fan to 100% and take nvfancontrol out of the loop; it's a robot, fan
+          # noise is a non-issue. (echo/read are bash builtins so no PATH deps.)
+          services.nvfancontrol.enable = lib.mkForce false;
+          systemd.services.max-fan = {
+            description = "pin cooling fan to 100%";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "sysinit.target" ];
+            serviceConfig = {
+              Type = "oneshot";
+              RemainAfterExit = true;
+              ExecStart = pkgs-aarch64-linux.writeShellScript "max-fan" ''
+                for h in /sys/class/hwmon/hwmon*; do
+                  if [ "$(< "$h/name")" = pwmfan ]; then
+                    echo 1   > "$h/pwm1_enable" 2>/dev/null || true
+                    echo 255 > "$h/pwm1"
+                  fi
+                done
+              '';
+            };
+          };
+
           networking.hostName = config.hardware.nvidia-jetpack.som;
           system.stateVersion = "25.05";
         };
