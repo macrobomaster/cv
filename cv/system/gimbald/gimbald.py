@@ -1,23 +1,27 @@
 """Gimbal control daemon — owns the single gimbal tracking loop (velocity feedforward + PID → aim_error).
 
-Multiple controllers want to point the gimbal: decisiond (aim at a target) and stated (search scan).
+Multiple controllers want to point the gimbal: decisiond (aim at a target), qrd (QR acknowledgement),
+and stated (search scan).
 Rather than have them fight over aim_error or read each other's state, each publishes a
 gimbal SETPOINT on its own topic, and gimbald arbitrates and runs the one control loop that closes on
 gimbal_state and emits aim_error to commsd.
 
-Setpoint contract (all topics): {yaw, pitch, yaw_ff, pitch_ff}
+Setpoint contract (`aim_setpoint`, `state_setpoint`): {yaw, pitch, yaw_ff, pitch_ff}
   yaw, pitch        absolute gimbal target — gimbal-inertial yaw, gravity-relative pitch (rad)
   yaw_ff, pitch_ff  feedforward angular rate of the aim point (rad/s); 0 if unknown
+`qr_ack` is a trigger event; gimbald turns it into a short local setpoint sequence.
 
 Arbitration (priority, first fresh wins): aim_setpoint (decisiond, only when it has a target);
-otherwise state_setpoint (stated's search scan); otherwise hold (zero rate). The PID is reset on every
-source switch so its integral/derivative don't carry across a setpoint discontinuity.
+otherwise a short qr_ack nod; otherwise state_setpoint (stated's search scan); otherwise hold (zero rate).
+The PID is reset on every source switch so its integral/derivative don't carry across a setpoint discontinuity.
 
-Subs:  aim_setpoint, state_setpoint, gimbal_state
+Subs:  aim_setpoint, qr_ack, state_setpoint, gimbal_state
 Pubs:  aim_error: {x, y}   (rate/joystick command to commsd)
 """
 import time
 import math
+
+from tinygrad.helpers import getenv
 
 from ..core import messaging
 from ..core.logging import logger
@@ -26,9 +30,18 @@ from ..common.geometry import wrap_pi
 from ..common.gimbal import GimbalBuffer
 from ...autoaim.common import AIM_GAINS, AIM_I_CLAMP, AIM_D_TAU
 
-# Setpoint sources in PRIORITY order — first one with a fresh sample wins the gimbal.
+# External setpoint topics; qr_ack is handled as a generated local setpoint between these priorities.
 SOURCES = ["aim_setpoint", "state_setpoint"]
 SETPOINT_TIMEOUT = 0.1   # s — a setpoint older than this is stale; its source yields to the next
+QR_ACK_DT = getenv("QR_ACK_DT", 0.55)
+QR_ACK_PITCH = math.radians(getenv("QR_ACK_PITCH_DEG", 7.0))
+
+def qr_ack_setpoint(now:float, start:float, yaw:float, pitch:float) -> dict|None:
+  phase = (now - start) / QR_ACK_DT
+  if phase < 0.0 or phase >= 1.0: return None
+  pitch_offset = -QR_ACK_PITCH * math.sin(math.pi * phase) ** 2
+  pitch_ff = -QR_ACK_PITCH * (math.pi / QR_ACK_DT) * math.sin(2.0 * math.pi * phase)
+  return {"yaw": yaw, "pitch": pitch + pitch_offset, "yaw_ff": 0.0, "pitch_ff": pitch_ff}
 
 class AxisPID:
   """Velocity feedforward + PID on the angular position error → aim_error (a rate command, divided
@@ -62,7 +75,7 @@ class AxisPID:
 
 def run():
   pub = messaging.Pub(["aim_error"])
-  sub = messaging.Sub(SOURCES)                       # conflated: latest setpoint per source
+  sub = messaging.Sub(SOURCES + ["qr_ack"])          # conflated: latest setpoint/event per source
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
 
@@ -71,6 +84,8 @@ def run():
 
   yaw_now = pitch_now = yaw_rate = pitch_rate = 0.0
   last_fresh = {s: -math.inf for s in SOURCES}
+  qr_ack_start = -math.inf
+  qr_ack_yaw = qr_ack_pitch = 0.0
   active = None
   last_t = None
   fk = FrequencyKeeper(200)
@@ -94,10 +109,22 @@ def run():
 
     for s in SOURCES:
       if sub.updated[s]: last_fresh[s] = now
+    if sub.updated["qr_ack"] and gp is not None:
+      qr_ack_start = now
+      qr_ack_yaw, qr_ack_pitch = yaw_now, pitch_now
+      msg = sub["qr_ack"]
+      logger.info(f"gimbald: QR ack nod style={msg.get('style') if isinstance(msg, dict) else msg}")
 
-    # First fresh source in priority order wins the gimbal.
-    src = next((s for s in SOURCES if now - last_fresh[s] < SETPOINT_TIMEOUT), None)
-    sp = sub[src] if src is not None else None
+    # First fresh/high-priority source wins the gimbal.
+    qr_sp = qr_ack_setpoint(now, qr_ack_start, qr_ack_yaw, qr_ack_pitch)
+    if now - last_fresh["aim_setpoint"] < SETPOINT_TIMEOUT:
+      src, sp = "aim_setpoint", sub["aim_setpoint"]
+    elif qr_sp is not None:
+      src, sp = "qr_ack", qr_sp
+    elif now - last_fresh["state_setpoint"] < SETPOINT_TIMEOUT:
+      src, sp = "state_setpoint", sub["state_setpoint"]
+    else:
+      src, sp = None, None
     if src != active:
       yaw_pid.reset(); pitch_pid.reset(); last_t = None; active = src
       if now - last_diag > 1.0:
