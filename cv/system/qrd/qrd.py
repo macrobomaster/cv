@@ -6,9 +6,9 @@ Shows a QR code to the camera with one of these payloads:
   PLAY_STYLE=passive
   PLAY_STYLE=aggressive
 
-When decoded, publishes `play_style`: {style, raw, t, fid}. stated consumes this and rebuilds its
-team-specific state machine with the selected play style. Also emits `qr_ack` once per newly acquired
-QR so gimbald can provide physical feedback.
+Before the match is running, publishes `play_style`: {style, raw, t, fid}. stated consumes this and
+rebuilds its team-specific state machine with the selected play style. Also emits `qr_ack` once per
+newly acquired QR so gimbald can provide physical feedback.
 """
 import time
 
@@ -39,7 +39,7 @@ def parse_play_style(payload:str) -> str|None:
 def run():
   cv2.setNumThreads(OPENCV_THREADS)
   pub = messaging.Pub(["play_style", "qr_ack"])
-  sub = messaging.Sub(["camera_feed"], poll="camera_feed")
+  sub = messaging.Sub(["camera_feed", "game_running"], poll="camera_feed")
   ring = FrameRing(CAMERA_RING, (IMG_H, IMG_W, 3))
   detector = cv2.QRCodeDetector()
   last_scan = 0.0
@@ -50,6 +50,7 @@ def run():
 
   while True:
     sub.update(timeout=100)
+    if bool(sub["game_running"]): continue
     if not sub.updated["camera_feed"] or sub.now - last_scan < QR_SCAN_DT: continue
     last_scan = sub.now
     msg = sub["camera_feed"]

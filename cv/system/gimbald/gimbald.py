@@ -11,11 +11,12 @@ Setpoint contract (`aim_setpoint`, `state_setpoint`): {yaw, pitch, yaw_ff, pitch
   yaw_ff, pitch_ff  feedforward angular rate of the aim point (rad/s); 0 if unknown
 `qr_ack` is a trigger event; gimbald turns it into a short local setpoint sequence.
 
-Arbitration (priority, first fresh wins): aim_setpoint (decisiond, only when it has a target);
-otherwise a short qr_ack nod; otherwise state_setpoint (stated's search scan); otherwise hold (zero rate).
-The PID is reset on every source switch so its integral/derivative don't carry across a setpoint discontinuity.
+Arbitration (priority, first fresh wins): while the game is running, aim_setpoint (decisiond, only when it
+has a target) then state_setpoint (stated's search scan); before the game, a short qr_ack nod; otherwise
+hold (zero rate). The PID is reset on every source switch so its integral/derivative don't carry across a
+setpoint discontinuity.
 
-Subs:  aim_setpoint, qr_ack, state_setpoint, gimbal_state
+Subs:  aim_setpoint, qr_ack, state_setpoint, game_running, gimbal_state
 Pubs:  aim_error: {x, y}   (rate/joystick command to commsd)
 """
 import time
@@ -75,7 +76,7 @@ class AxisPID:
 
 def run():
   pub = messaging.Pub(["aim_error"])
-  sub = messaging.Sub(SOURCES + ["qr_ack"])          # conflated: latest setpoint/event per source
+  sub = messaging.Sub(SOURCES + ["qr_ack", "game_running"])   # conflated: latest setpoint/event per source
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
 
@@ -97,6 +98,7 @@ def run():
     fk.step()
     sub.update(timeout=10)
     now = time.monotonic()
+    game_running = bool(sub["game_running"])
 
     for m in gimbal_sub.drain("gimbal_state"): gimbal_buf.push(m)
     gp = gimbal_buf.latest()
@@ -109,19 +111,19 @@ def run():
 
     for s in SOURCES:
       if sub.updated[s]: last_fresh[s] = now
-    if sub.updated["qr_ack"] and gp is not None:
+    if sub.updated["qr_ack"] and gp is not None and not game_running:
       qr_ack_start = now
       qr_ack_yaw, qr_ack_pitch = yaw_now, pitch_now
       msg = sub["qr_ack"]
       logger.info(f"gimbald: QR ack nod style={msg.get('style') if isinstance(msg, dict) else msg}")
 
     # First fresh/high-priority source wins the gimbal.
-    qr_sp = qr_ack_setpoint(now, qr_ack_start, qr_ack_yaw, qr_ack_pitch)
-    if now - last_fresh["aim_setpoint"] < SETPOINT_TIMEOUT:
+    qr_sp = None if game_running else qr_ack_setpoint(now, qr_ack_start, qr_ack_yaw, qr_ack_pitch)
+    if game_running and now - last_fresh["aim_setpoint"] < SETPOINT_TIMEOUT:
       src, sp = "aim_setpoint", sub["aim_setpoint"]
     elif qr_sp is not None:
       src, sp = "qr_ack", qr_sp
-    elif now - last_fresh["state_setpoint"] < SETPOINT_TIMEOUT:
+    elif game_running and now - last_fresh["state_setpoint"] < SETPOINT_TIMEOUT:
       src, sp = "state_setpoint", sub["state_setpoint"]
     else:
       src, sp = None, None

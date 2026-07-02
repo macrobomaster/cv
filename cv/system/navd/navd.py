@@ -167,7 +167,7 @@ def run():
   pub = messaging.Pub(["chassis_velocity", "nav_debug"])
   # nav_goal (injected destination), plate (enemy robot detections), and cam_occupancy (occupancyd's
   # camera obstacle grid) are non-polled latest-wins.
-  sub = messaging.Sub(["slam_pose", "nav_goal", "plate", "cam_occupancy"], poll="slam_pose")
+  sub = messaging.Sub(["slam_pose", "nav_goal", "plate", "cam_occupancy", "game_running"], poll="slam_pose")
   # gimbal_state non-conflated + buffered so we can sample yaw_gi at the slam pose's
   # capture time — the SAME instant as q_wb/psi. (Latest yaw_gi vs a lagged q_wb-heading
   # corrupts the world↔gimbal offset during a slew → the look-at setpoint overshoots.)
@@ -198,6 +198,16 @@ def run():
     for m in gimbal_sub.drain("gimbal_state"): gimbal_buf.push(m)
     if now - last_wd > 1.0:
       kv_put("watchdog", "navd", now); last_wd = now
+
+    if not bool(sub["game_running"]):
+      injected = tag_standoff(*DEFAULT_GOAL) if DEFAULT_GOAL else None
+      inj_label = "default" if DEFAULT_GOAL else "idle"
+      last_goal_t = now if injected is not None else -math.inf
+      pursuit = last_goal = None
+      pub.send("chassis_velocity", {"x": 0.0, "y": 0.0}); v_prev = 0.0
+      if now - last_diag > 1.0:
+        logger.info("navd: game not running, stopped"); last_diag = now
+      continue
 
     pose = sub["slam_pose"]
     if sub.updated["slam_pose"]: last_pose_t = now

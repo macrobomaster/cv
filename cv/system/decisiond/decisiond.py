@@ -219,7 +219,7 @@ class TriggerGate:
 
 def run():
   pub = messaging.Pub(["aim_setpoint", "aim_angle", "shoot"])
-  sub = messaging.Sub(["plate", "barrel_heat"], poll="plate")
+  sub = messaging.Sub(["plate", "barrel_heat", "game_running"], poll="plate")
   gimbal_sub = messaging.Sub(["gimbal_state"], conflate=False)
   gimbal_buf = GimbalBuffer()
 
@@ -246,6 +246,13 @@ def run():
       yaw_gi_now, pitch_gi_now, _, _ = gp
 
     t_now = time.monotonic()
+    if not bool(sub["game_running"]):
+      pub.send("shoot", False)
+      last_setpoint = None
+      d_yaw_prev = d_pitch_prev = 0.0
+      trigger.consecutive_in_tol = 0
+      continue
+
     plate = sub["plate"]
     if plate is None: continue
     if not sub.updated["plate"]: continue

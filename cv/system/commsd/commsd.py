@@ -71,6 +71,7 @@ def run():
   comm_rates = {comm: 0.0 for comm in COMM_RATES_HZ}
   last_rate_at = time.monotonic()
   last_wd = time.monotonic()
+  game_running = False
 
   while True:
     if time.monotonic() - last_wd > 1:
@@ -119,14 +120,14 @@ def run():
       else:
         comm_msg(protocol, comm_counts, "aim_error", Command.AIM_ERROR, 0.0, 0.0)
 
-    if shoot is not None and due(next_comm_at, "shoot"):
-      if fresh(sub, "shoot"):
+    if due(next_comm_at, "shoot"):
+      if game_running and shoot is not None and fresh(sub, "shoot"):
         comm_msg(protocol, comm_counts, "shoot", Command.CONTROL_SHOOT, 0xff if shoot else 0x00)
       else:
         comm_msg(protocol, comm_counts, "shoot", Command.CONTROL_SHOOT, 0x00)
 
-    if chassis_velocity is not None and due(next_comm_at, "chassis_velocity"):
-      if fresh(sub, "chassis_velocity"):
+    if due(next_comm_at, "chassis_velocity"):
+      if game_running and chassis_velocity is not None and fresh(sub, "chassis_velocity"):
         x = chassis_velocity["x"]
         y = chassis_velocity["y"]
         comm_msg(protocol, comm_counts, "chassis_velocity", Command.MOVE_ROBOT, x, y)
@@ -134,21 +135,22 @@ def run():
         comm_msg(protocol, comm_counts, "chassis_velocity", Command.MOVE_ROBOT, 0.0, 0.0)
 
     if due(next_comm_at, "spinning"):
-      if fresh(sub, "spinning"):
+      if game_running and fresh(sub, "spinning"):
         comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0xff)
       else:
         comm_msg(protocol, comm_counts, "spinning", Command.CONTROL_SPINNING, 0x00)
 
     if due(next_comm_at, "chassis_align"):
-      if fresh(sub, "chassis_align"):
+      if game_running and fresh(sub, "chassis_align"):
         comm_msg(protocol, comm_counts, "chassis_align", Command.CHASSIS_ALIGN, 0xff)
       else:
         comm_msg(protocol, comm_counts, "chassis_align", Command.CHASSIS_ALIGN, 0x00)
 
     if due(next_comm_at, "game_running"):
-      game_running = comm_msg(protocol, comm_counts, "game_running", Command.CHECK_STATE, State.GAME_RUNNING.value)
-      if game_running is not None:
-        pub.send("game_running", True if game_running[1] == 0x00 else False)
+      state = comm_msg(protocol, comm_counts, "game_running", Command.CHECK_STATE, State.GAME_RUNNING.value)
+      if state is not None:
+        game_running = True if state[1] == 0x00 else False
+        pub.send("game_running", game_running)
 
     if due(next_comm_at, "team_color"):
       team_color = comm_msg(protocol, comm_counts, "team_color", Command.CHECK_STATE, State.TEAM_COLOR.value)
