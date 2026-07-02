@@ -24,6 +24,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import gc, math, time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -40,6 +41,8 @@ from ...occupancy.ipm import GroundIPM, OccupancyAccumulator
 OPENCV_THREADS = getenv("OPENCV_THREADS", 1)   # don't oversubscribe; camerad is RT-pinned
 OCCUPANCY_HZ = getenv("OCCUPANCY_HZ", 8)        # cap; navd replans at 5Hz so this is plenty
 DEBUG = getenv("DEBUG", 0)                       # >=1: publish a 2D contact overlay for visual_slam
+FLOORSEG = getenv("FLOORSEG", 0)                 # >=1: use the BiSeNetV2 seg net floor backend (GPU) instead of classical
+FLOORSEG_MAXW = getenv("FLOORSEG_MAXW", 768)     # downscale the band to this width for the seg net (÷32) to bound GPU cost
 OCC_TTL = 2.0                                   # s, out-of-view / departed obstacles fade (mirrors RobotObstacles.ttl)
 BAND_TOP = 0.5                                  # fraction of image height; only the lower band sees the floor
 IPM_MIN_RANGE = 0.2                             # m, ignore cells too close (own footprint) / too far (unreliable)
@@ -64,7 +67,7 @@ class FloorClassifier:
   the floor (catches black chassis/wheels). Brighter-than-floor (glare/specular) is NOT
   flagged. The floor prior is an EMA of the bottom-centre strip's median, updated only when
   the strip still looks like floor, so an obstacle parked in the strip can't poison it.
-  Phase-2 swaps THIS class for a tinygrad seg net behind the same (band)->floor-mask API."""
+  The Phase-2 SegFloorClassifier is a drop-in behind the same (band)->floor-mask API."""
   def __init__(self):
     self.prior = None                                  # (L, a, b) float, cv2 LAB units
 
@@ -86,6 +89,35 @@ class FloorClassifier:
     floor = cv2.morphologyEx((~obstacle).astype(np.uint8), cv2.MORPH_OPEN, k)
     floor = cv2.morphologyEx(floor, cv2.MORPH_CLOSE, k).astype(bool)
     return floor
+
+class SegFloorClassifier:
+  """Phase-2 floor backend: native-tinygrad BiSeNetV2 (ADE20K), same (band)->bool floor mask
+  API as FloorClassifier. floor = argmax class ∈ ADE_FREE_CLASSES. Runs on the tinygrad GPU
+  (shares with autoaim → occupancyd stays rate-limited; downscale the band via FLOORSEG_MAXW
+  if it eats autoaim's budget). Weights: weights/floorseg.safetensors (`python -m cv.floorseg.convert`)."""
+  def __init__(self, maxw:int):
+    from tinygrad.tensor import Tensor
+    from tinygrad.engine.jit import TinyJit
+    from tinygrad.nn.state import safe_load, load_state_dict
+    from ...floorseg.model import BiSeNetV2, ADE_FREE_CLASSES, IM_MEAN, IM_STD
+    self._Tensor, self.maxw, self.free = Tensor, maxw, np.asarray(ADE_FREE_CLASSES)
+    self.mean = np.asarray(IM_MEAN, np.float32) * 255.0    # band is [0,255] → fold the /255 into mean/std
+    self.std = np.asarray(IM_STD, np.float32) * 255.0
+    Tensor.training = False
+    self.model = BiSeNetV2(150)
+    w = Path(__file__).resolve().parents[3] / "weights" / "floorseg.safetensors"
+    load_state_dict(self.model, safe_load(str(w)), strict=False, verbose=False)
+    self._jit = TinyJit(lambda x: self.model.logits8(x).argmax(1).realize())
+
+  def __call__(self, band:np.ndarray) -> np.ndarray:
+    hb, w = band.shape[:2]
+    sw = min(w, self.maxw); sh = hb
+    sw -= sw % 32; sh -= sh % 32                          # BiSeNetV2 needs dims divisible by 32
+    small = cv2.resize(band, (sw, sh)) if (sw, sh) != (w, hb) else band
+    x = ((small.astype(np.float32) - self.mean) / self.std).transpose(2, 0, 1)[None]
+    ids = self._jit(self._Tensor(x)).numpy()[0]           # (sh/8, sw/8) class ids
+    floor = np.isin(ids, self.free).astype(np.uint8)
+    return cv2.resize(floor, (w, hb), interpolation=cv2.INTER_NEAREST).astype(bool)
 
 def contact_mask(floor:np.ndarray) -> np.ndarray:
   """Per-column ground-CONTACT pixel: scanning up from the band bottom, the first
@@ -119,6 +151,14 @@ def run():
   ipm = GroundIPM(common.IMG_H, common.IMG_W, band_top=BAND_TOP, min_range=IPM_MIN_RANGE, max_range=IPM_MAX_RANGE)
   acc = OccupancyAccumulator(common.FIELD_BOUNDS, res=0.10, ttl=OCC_TTL)
   floorcls = FloorClassifier()
+  if FLOORSEG >= 1:
+    try:
+      floorcls = SegFloorClassifier(FLOORSEG_MAXW)
+      logger.info(f"occupancyd: floor backend = BiSeNetV2 seg net (maxw={FLOORSEG_MAXW})")
+    except Exception as e:                              # missing weights / load error → keep classical
+      logger.warning(f"occupancyd: FLOORSEG requested but seg net unavailable ({e}); using classical")
+  else:
+    logger.info("occupancyd: floor backend = classical")
   g = acc.grid
   logger.info(f"occupancyd: grid {g.nx}x{g.ny} @ {g.res}m, band v0={ipm.v0}, "
               f"CAM_HEIGHT={common.CAM_HEIGHT}m ({time.monotonic() - t0:.1f}s setup)")
