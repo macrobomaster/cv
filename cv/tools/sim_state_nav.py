@@ -98,9 +98,22 @@ def parse_hp_loss(s):
 def in_windows(t, windows):
   return any(a <= t <= b for a, b in windows)
 
-def default_start(team):
-  x, y = TEAM_GOALS[team]["home"]
-  cx, cy = TEAM_GOALS[team]["center"]
+def default_style():
+  return "passive" if "passive" in PLAY_STYLES else sorted(PLAY_STYLES)[0]
+
+def default_start(team, style):
+  goals = TEAM_GOALS[team]
+  x, y = goals.get("home", ((common.FIELD_BOUNDS[0] + common.FIELD_BOUNDS[2]) * 0.5,
+                            (common.FIELD_BOUNDS[1] + common.FIELD_BOUNDS[3]) * 0.5))
+  target = goals.get(f"{style}_center") or goals.get("center")
+  if target is None:
+    target = next((v for k, v in goals.items() if k.endswith("center")), None)
+  if target is None:
+    target = next((v for k, v in goals.items() if k != "home"), None)
+  if target is None:
+    target = ((common.FIELD_BOUNDS[0] + common.FIELD_BOUNDS[2]) * 0.5,
+              (common.FIELD_BOUNDS[1] + common.FIELD_BOUNDS[3]) * 0.5)
+  cx, cy = target
   return x, y, math.degrees(math.atan2(cy - y, cx - x))
 
 def q_wb_from_heading(heading):
@@ -317,7 +330,7 @@ def log_dynamic(sim_t, p_xy, v_w, heading, trail, state_name, state_id, game_run
   rr.log("scalars/gimbal_yaw_deg", rr.Scalars(math.degrees(heading)))
 
 def run(args):
-  start = args.start if args.start is not None else default_start(args.team)
+  start = args.start if args.start is not None else default_start(args.team, args.style)
   p_xy = np.array(start[:2], np.float64)
   gimbal_yaw = math.radians(start[2])
   gimbal_pitch = 0.0
@@ -453,7 +466,7 @@ def main():
   ap.add_argument("--duration", type=float, default=DEFAULT_DURATION, help="simulation duration in seconds")
   ap.add_argument("--dt", type=float, default=DEFAULT_DT, help="simulation timestep in seconds")
   ap.add_argument("--team", choices=sorted(TEAM_GOALS), default="blue")
-  ap.add_argument("--style", choices=sorted(PLAY_STYLES), default="balanced")
+  ap.add_argument("--style", choices=sorted(PLAY_STYLES), default=default_style())
   ap.add_argument("--start", type=float, nargs=3, metavar=("X", "Y", "YAW_DEG"),
                   help="initial robot pose; default is team home facing center")
   ap.add_argument("--game-start", type=float, default=0.0, help="time when game_running becomes true")
