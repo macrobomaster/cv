@@ -12,14 +12,20 @@ from ..common.geometry import wrap_pi
 from ..common.gimbal import GimbalBuffer
 from ...autoaim.common import (
   MUZZLE_VELOCITY, GRAVITY,
-  DELTA_INPUT, DELTA_TRIGGER, GIMBAL_TAU, GIMBAL_OMEGA_MAX,
+  DELTA_INPUT, DELTA_TRIGGER, GIMBAL_OMEGA_MAX,
   AIM_FF_DT,
 )
 
 # Aim / trigger tunings
-TOL_STATIC = math.radians(1.1)        # |aim_error| below this to commit a shot. ~small-plate half-angle at
-                                       # 3.2m (135×125mm); sits above the ~0.5° measured settle jitter so it
-                                       # still fires. 2.0° only guaranteed a hit inside ~1.8m (fired off-plate).
+# Fire tolerance is RANGE-SCALED: the plate subtends atan(half/range), so a fixed angle fires OFF-plate past
+# ~3.2m and needlessly withholds hittable shots inside ~2m. Require the aim cone within TOL_PLATE_FRAC of the
+# plate half-angle, bounded by a floor (don't demand sub-jitter precision up close) and a ceil (don't commit
+# mid-slew at very close range). See fire_tolerance().
+PLATE_HALF_MIN = 0.0625                # m, armor half-HEIGHT — the tight axis (small 135×125 & large 230×127 are
+                                       # both ~62-63mm tall); the radial aim cone must sit inside this
+TOL_PLATE_FRAC = 0.7                   # fraction of the plate half-angle to require (jitter + muzzle-dispersion margin)
+TOL_FLOOR = math.radians(0.5)          # rad, never demand tighter than the measured ~0.5° settle jitter
+TOL_CEIL  = math.radians(2.0)          # rad, cap close-range looseness (< ~1.4m) so we don't fire mid-slew
 N_TICKS_FIRE = 2                       # consecutive in-tolerance ticks before firing
 COOLDOWN_STATIC = 0.01                # s between shots
 BARREL_HEAT_PER_SHOT = 10             # RoboMaster 17 mm projectile heat cost
@@ -33,6 +39,10 @@ LEAD_PERP_FRAC = 0.7                   # if > this fraction of the velocity is �
                                        # target is ORBITING (spin) → suppress the lead (aim at filtered pos)
 SPIN_CONF_AIM = 0.60                   # min plate["spin"]["conf"] to AIM at the bearing-space spin centre
                                        # (holds the gimbal steady on a spinner). Firing stays the settle gate.
+GIMBAL_SETTLE_TOL = math.radians(0.5)  # gimbal counts as "on point" within this → no settle lead while tracking
+GIMBAL_CL_TAU     = 0.33               # s, CLOSED-loop position settle ≈ 1/kp (kp≈3). delta_settle used to use the
+                                       # OPEN-loop velocity-rise GIMBAL_TAU (0.072) — the wrong constant.
+SETTLE_MAX        = 0.15               # s, cap so a large-error (fresh-acquisition) step can't balloon the lead
 
 # Muzzle position relative to the yaw axis (gimbal-inertial z-up). The VERTICAL term sets pitch:
 # h = pos_gi[2] - MUZZLE_OFFSET[2], and with the yaw-only camera's T_CAM_z=0, pos_gi[2] is height-above-
@@ -44,10 +54,16 @@ MUZZLE_OFFSET = np.array([0.0, 0.0, -CAM_ABOVE_MUZZLE])
 # --- Math helpers ---
 
 def delta_settle(yaw_err:float, pitch_err:float) -> float:
-  # Gimbal isn't settled until BOTH axes are → max of the per-axis slew+settle times.
-  sy = GIMBAL_TAU["yaw"] + abs(yaw_err) / GIMBAL_OMEGA_MAX["yaw"]
-  sp = GIMBAL_TAU["pitch"] + abs(pitch_err) / GIMBAL_OMEGA_MAX["pitch"]
-  return max(sy, sp)
+  # Time for the gimbal to be ON the commanded point before the shot, added to the lead pipeline. A closed P-loop
+  # error decays ~exp(-t/GIMBAL_CL_TAU) (never rate-limited for normal aim errors — OMEGA_MAX/kp is ~130°), so the
+  # settle is the time to bring the worse axis within GIMBAL_SETTLE_TOL. ZERO while already tracking, so a locked
+  # target isn't chronically over-led (the old flat GIMBAL_TAU added ~72ms of phantom lead every tick); capped so a
+  # fresh-acquisition step can't balloon the lead.
+  def s(err):
+    e = abs(err)
+    if e <= GIMBAL_SETTLE_TOL: return 0.0
+    return min(SETTLE_MAX, GIMBAL_CL_TAU * math.log(e / GIMBAL_SETTLE_TOL))
+  return max(s(yaw_err), s(pitch_err))
 
 # --- Ballistic solver (drag-free, low-arc) ---
 
@@ -137,6 +153,13 @@ def make_predict_fn(plate:dict) -> Optional[Callable[[float], np.ndarray]]:
 
 # --- Trigger gate ---
 
+def fire_tolerance(rng:float) -> float:
+  # Range-scaled aim tolerance: the plate half subtends atan(PLATE_HALF_MIN/range); require the aim cone within
+  # TOL_PLATE_FRAC of it, bounded [TOL_FLOOR, TOL_CEIL]. Replaces a fixed tolerance that fired off-plate past
+  # ~3.2m and withheld hittable shots inside ~2m.
+  if rng < 1e-3: return TOL_CEIL
+  return min(TOL_CEIL, max(TOL_FLOOR, TOL_PLATE_FRAC * math.atan(PLATE_HALF_MIN / rng)))
+
 def barrel_heat_allows_fire(barrel_heat:Optional[dict], fresh:bool) -> tuple[bool, str]:
   # Heat gating only applies when the referee actually reports a POSITIVE limit. Missing / stale / limit<=0
   # means the referee isn't enforcing heat (bench test, referee off, comms hiccup) → fire freely rather than
@@ -158,7 +181,7 @@ class TriggerGate:
   def _reset_for_new_target(self):
     self.consecutive_in_tol = 0
 
-  def evaluate(self, plate:dict, yaw_err:float, pitch_err:float, t_now:float, heat_ok:bool, heat_reason:str) -> bool:
+  def evaluate(self, plate:dict, yaw_err:float, pitch_err:float, rng:float, t_now:float, heat_ok:bool, heat_reason:str) -> bool:
     target_id = plate["target_id"]
     if target_id != self.last_target_id:
       self._reset_for_new_target()
@@ -169,13 +192,14 @@ class TriggerGate:
       self.reason = f"class={plate['class']}"
       return False
 
+    tol = fire_tolerance(rng)
     aim_err = math.hypot(yaw_err, pitch_err)
-    if aim_err < TOL_STATIC:
+    if aim_err < tol:
       self.consecutive_in_tol += 1
     else:
       self.consecutive_in_tol = 0
     if self.consecutive_in_tol < N_TICKS_FIRE:
-      self.reason = f"aim {math.degrees(aim_err):.2f}°≥{math.degrees(TOL_STATIC):.1f}° (n={self.consecutive_in_tol}/{N_TICKS_FIRE})"
+      self.reason = f"aim {math.degrees(aim_err):.2f}°≥{math.degrees(tol):.2f}° @{rng:.1f}m (n={self.consecutive_in_tol}/{N_TICKS_FIRE})"
       return False
     if not heat_ok:
       self.reason = heat_reason
@@ -285,7 +309,8 @@ def run():
     d_yaw_prev, d_pitch_prev = abs(yaw_err), abs(pitch_err)
 
     heat_ok, heat_reason = barrel_heat_allows_fire(sub["barrel_heat"], sub.updated["barrel_heat"] or sub.alive["barrel_heat"])
-    fire = trigger.evaluate(plate, yaw_err, pitch_err, t_now, heat_ok, heat_reason)
+    rng = float(math.hypot(target_at_arrival[0], target_at_arrival[1]))   # where the pellet arrives → range-scaled tol
+    fire = trigger.evaluate(plate, yaw_err, pitch_err, rng, t_now, heat_ok, heat_reason)
     if fire or t_now - last_diag > 1.0:
       logger.info(f"{'FIRE' if fire else 'no-fire'}: {cls} "
                   f"aim=({math.degrees(yaw_err):+.2f},{math.degrees(pitch_err):+.2f})° "
