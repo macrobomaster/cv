@@ -1,2 +1,3 @@
 metric3d_v2_small.onnx
 vgg.pth
+bisenetv2_ade20k.pth
