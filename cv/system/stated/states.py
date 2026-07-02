@@ -24,16 +24,18 @@ ATTACK_DEEP_PERIOD = 10
 ATTACK_DEEP_AT = 120
 ATTACK_DEEP_HOLD_DT = 10.0
 
-PLAY_STYLES = {"balanced", "center"}
+PLAY_STYLES = {"passive", "aggressive"}
 
 TEAM_GOALS = {
   "blue": {
-    "center": (6.47, 3.52),
+    "passive_center": (6.47, 3.52),
+    "aggressive_center": (5.48, 3.52),
     "home": (11.16, 3.52),
     "attack_deep": (2.62, 1.00),
   },
   "red": {
-    "center": (5.48, 3.52),
+    "passive_center": (5.48, 3.52),
+    "aggressive_center": (6.47, 3.52),
     "home": (0.73, 3.52),
     "attack_deep": (9.38, 1.00),
   },
@@ -151,14 +153,22 @@ def _goals(team_color:str) -> dict:
     raise ValueError(f"unknown team_color {team_color!r}; expected one of {sorted(TEAM_GOALS)}")
   return TEAM_GOALS[team_color]
 
-def make_state_machine(team_color:str, play_style:str="balanced") -> StateMachine:
+def make_state_machine(team_color:str, play_style:str="passive") -> StateMachine:
   play_style = play_style.lower()
   goals = _goals(team_color)
 
-  nav_to_center = NavToCenterState(goals["center"])
+  match play_style:
+    case "passive":
+      center_goal = goals["passive_center"]
+    case "aggressive":
+      center_goal = goals["aggressive_center"]
+    case _:
+      center_goal = goals["passive_center"]
+
+  nav_to_center = NavToCenterState(center_goal)
   acquire = AcquireState()
   search = SearchState()
-  retreat = RetreatSequenceState(goals["center"], goals["home"])
+  retreat = RetreatSequenceState(center_goal, goals["home"])
 
   states = [IdleState(), retreat, nav_to_center, acquire, search]
   return StateMachine(states)
