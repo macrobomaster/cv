@@ -43,7 +43,7 @@ CX, CY = float(K[0, 2]), float(K[1, 2])
 # ABSOLUTE heading (where +x is in the world) — δψ (yaw_offset, from tags) supplies
 # it. Use R_CAM and T_CAM from the SAME run (shared gauge). T_CAM's vertical part
 # is unobservable on a yaw-only sweep → 0 (doesn't affect planar position); its xy
-# ≈ 0.188 m along −y = 19 cm to the right, matching the measured mount.
+# is ≈ 1 cm — the SLAM camera optical centre sits essentially on the yaw axis.
 R_CAM = np.array([[ 1.26394e-02, -2.46683e-01,  9.69014e-01],
                   [-9.98690e-01, -5.11704e-02, -1.07261e-17],
                   [ 4.95848e-02, -9.67744e-01, -2.47006e-01]], dtype=np.float32)
@@ -169,6 +169,38 @@ TAG_FIELD_MAP: dict[int, tuple[np.ndarray, np.ndarray]] = {
 # source for nav: the path_editor's canvas + exported NAV_MAP bounds, and navd's default
 # planning grid. Tags sit on/near this perimeter.
 FIELD_BOUNDS = (0.0, 0.0, 12.0, 8.0)
+
+# Static field obstacles as (x0, y0, x1, y1) rectangles in metres — TRANSCRIBE FROM THE FIELD
+# DRAWINGS here (easier + version-controlled vs mouse-drawing). navd plans around these and
+# path_editor renders them (with inflation + route preview). For an angled/non-rect barrier,
+# approximate with a few rects or add an `add_poly` case. Empty until surveyed.
+FIELD_WALLS: list[tuple[float, float, float, float]] = [
+  (5.000, 0.700, 6.999, 1.695), # bumpy road center block
+  (2.250, 2.174, 2.419, 5.199), # red team wall
+  (9.605, 2.174, 9.750, 5.199), # blue team wall
+  (2.216, 7.000, 9.783, 7.999), # ramp
+  (2.216, 6.000, 4.784, 6.999), # red team smaller ramp
+  (7.215, 6.000, 9.783, 6.999), # blue team smaller ramp
+  (3.420, 3.975, 3.590, 5.999), # red team outer wall
+  (8.480, 3.975, 8.649, 5.999), # blue team outer wall
+]
+
+# Semantic field zones (red/blue spawn, centre capture, …) — NOT planning obstacles; just rendered
+# for reference in path_editor + visual_slam so you can place goals relative to them (and name them
+# in stated). Each: a `name`, an RGB `color`, and a shape (`rect`:[x0,y0,x1,y1] or `poly`:[[x,y],…]).
+# PLACEHOLDER coords below — adjust to the rulebook/drawings.
+FIELD_ZONES: list[dict] = [
+  {"name": "red spawn",  "color": [225, 60, 60],  "rect": [0.0, 3.0, 1.5, 5.0]},
+  {"name": "blue spawn", "color": [60, 110, 235], "rect": [10.5, 3.0, 12.0, 5.0]},
+  {"name": "capture",    "color": [70, 200, 70],  "rect": [5.0, 3.0, 7.0, 5.0]},
+]
+
+def zone_corners(z:dict):
+  """A zone's outline as a list of (x, y) world corners (rect → 4 corners, or the poly verbatim)."""
+  if "rect" in z:
+    x0, y0, x1, y1 = z["rect"]
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+  return [tuple(p) for p in z["poly"]]
 
 # AprilTag PnP noise grows with range — a 0.15 m tag spans fewer pixels far away,
 # so the depth solve degrades ~quadratically. Model the measurement stddev as

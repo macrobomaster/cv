@@ -16,6 +16,11 @@ import numpy as np
 # Single source: navd plans with it and path_editor previews/exports with it, so they agree.
 ROBOT_RADIUS = 0.35
 
+# Planning grid cell size (m). Single source for navd + path_editor. 5 cm → 240×160 on the 12×8
+# field, ~55 ms/plan (fine for the 5 Hz replan). Finer costs plan time ∝ cells (Python A*): 4 cm
+# ~90 ms, 3 cm ~180 ms — go below 5 cm only with a faster planner or a background plan thread.
+GRID_RES = 0.05
+
 class OccupancyGrid:
   def __init__(self, x0:float, y0:float, x1:float, y1:float, res:float):
     self.x0, self.y0, self.res = float(x0), float(y0), float(res)

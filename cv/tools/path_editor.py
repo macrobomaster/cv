@@ -12,8 +12,11 @@ and injects them as nav_goal at runtime; navd plans around the walls.
 
   python -m cv.tools.path_editor [out.json]
 
+Walls come from `slam.common.FIELD_WALLS` (transcribe them from the field drawings in code — easier
+and exact); the editor just renders them. Mouse wall-drawing stays for quick what-ifs.
+
 Mode:  [w] walls   ·   [g] goals          (current mode shown in the HUD)
-Walls: left-click a corner, left-click the opposite corner → rectangle
+Walls: left-click a corner, left-click the opposite corner → rectangle (experiments only)
 Goals: left-click to drop a point (auto-labeled g0,g1,…)
 Both:  right-click remove nearest · [z] undo · [x] clear mode · [s] save · [l] load · [q] quit
 """
@@ -23,13 +26,12 @@ import cv2
 import numpy as np
 
 from ..slam import common
-from ..nav.occupancy import OccupancyGrid, ROBOT_RADIUS
+from ..nav.occupancy import OccupancyGrid, ROBOT_RADIUS, GRID_RES as RES
 from ..nav import planner
 
 CANVAS_MAX = 1100        # px, longest canvas side
 PAD = 55                 # px, border around the field
-NORMAL_LEN = 0.6         # m, drawn length of each tag's face-normal arrow
-RES = 0.10               # m, grid resolution for the inflation preview / export
+NORMAL_LEN = 0.6         # m, drawn length of each tag's face-normal arrow (RES/ROBOT_RADIUS imported)
 SNAP_PX = 14             # px, right-click removes a wall/goal within this radius
 
 # Colors (BGR)
@@ -66,6 +68,19 @@ def plan_segments(inflated, goals):
 # --- rendering (pure: returns a BGR image, so it's testable headless) ---
 def render(view, state, grid, inflated, planned):
   img = np.full((view.H, view.W, 3), C_BG, np.uint8)
+
+  # semantic zones (spawn/capture) — translucent fill + border + label, as a background layer
+  if common.FIELD_ZONES:
+    zpx = [(z, np.array([view.to_px(x, y) for x, y in common.zone_corners(z)], np.int32))
+           for z in common.FIELD_ZONES]
+    overlay = img.copy()
+    for z, pts in zpx: cv2.fillPoly(overlay, [pts], z["color"][::-1])   # RGB → BGR
+    cv2.addWeighted(overlay, 0.22, img, 0.78, 0, img)
+    for z, pts in zpx:
+      col = z["color"][::-1]
+      cv2.polylines(img, [pts], True, col, 1)
+      c = pts.mean(axis=0).astype(int)
+      cv2.putText(img, z["name"], (c[0] - 4 * len(z["name"]), c[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
 
   # inflation halo then raw walls (from the grids → exactly what the planner sees)
   for iy in range(grid.ny):
@@ -147,7 +162,10 @@ def main():
   ap.add_argument("out", nargs="?", default="nav_map.json", help="output NAV_MAP JSON")
   args = ap.parse_args()
   view = View()
-  state = {"walls": [], "goals": [], "mode": "walls", "pend": None, "mouse": None, "out": args.out}
+  # Walls default to the code-defined FIELD_WALLS (transcribed from the drawings); a saved JSON,
+  # if present, overrides for testing a custom map. Goals: place here to read coords for stated.
+  state = {"walls": [tuple(r) for r in common.FIELD_WALLS], "goals": [],
+           "mode": "goals", "pend": None, "mouse": None, "out": args.out}
   try: load(state)
   except (FileNotFoundError, json.JSONDecodeError): pass
 

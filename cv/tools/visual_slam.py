@@ -82,6 +82,16 @@ def main():
            colors=[(180, 120, 255)], radii=0.07, labels=[g.get("label", "") for g in nav_map["goals"]]),
            static=True)
 
+  # Semantic zones (spawn/capture) from slam.common.FIELD_ZONES — outline + centre label on the ground.
+  for z in common.FIELD_ZONES:
+    corners = common.zone_corners(z)
+    loop = [[x, y, 0.01] for x, y in corners] + [[corners[0][0], corners[0][1], 0.01]]
+    ent = "world/zones/" + z["name"].replace(" ", "_")
+    rr.log(ent, rr.LineStrips3D([loop], colors=[z["color"]], radii=[0.02]), static=True)
+    cx = sum(x for x, _ in corners) / len(corners); cy = sum(y for _, y in corners) / len(corners)
+    rr.log(ent + "_lbl", rr.Points3D([[cx, cy, 0.02]], colors=[z["color"]], radii=0.02,
+           labels=[z["name"]]), static=True)
+
   sub = messaging.Sub(["camera_feed_full", "slam_pose", "slam_debug", "apriltags", "nav_debug",
                        "cam_occupancy", "cam_occupancy_debug"],
                       poll="camera_feed_full", addr=addr)   # full frames via the framed bridge (DEBUG>=1)

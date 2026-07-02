@@ -62,7 +62,10 @@ def plan(grid, start_xy, goal_xy):
   goal = _snap(grid, grid.world_to_cell(*goal_xy))
   if start is None or goal is None: return None
   gx, gy = goal
-  is_free = grid.is_free
+  # Inline the free check over local refs (no method-call / in_bounds overhead) — the A* hot loop
+  # runs this millions of times at fine resolution, so it dominates the plan time.
+  occ, nx, ny = grid.occ, grid.nx, grid.ny
+  free = lambda ix, iy: 0 <= ix < nx and 0 <= iy < ny and not occ[iy, ix]
 
   parent = {start: None}
   gscore = {start: 0.0}
@@ -77,8 +80,8 @@ def plan(grid, start_xy, goal_xy):
     cx, cy, gc = c[0], c[1], gscore[c]
     for ox, oy, step in _NB:
       nb = (cx + ox, cy + oy)
-      if nb in closed or not is_free(nb[0], nb[1]): continue
-      if ox and oy and (not is_free(cx + ox, cy) or not is_free(cx, cy + oy)): continue  # no corner-cut
+      if nb in closed or not free(nb[0], nb[1]): continue
+      if ox and oy and (not free(cx + ox, cy) or not free(cx, cy + oy)): continue  # no corner-cut
       ng = gc + step
       if ng < gscore.get(nb, math.inf):
         gscore[nb] = ng; parent[nb] = c

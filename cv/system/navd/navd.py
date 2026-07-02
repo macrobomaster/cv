@@ -35,7 +35,7 @@ from ..core.logging import logger
 from ..core.keyvalue import kv_put
 from ..common.gimbal import GimbalBuffer
 from ...slam import common
-from ...nav.occupancy import OccupancyGrid, ROBOT_RADIUS
+from ...nav.occupancy import OccupancyGrid, ROBOT_RADIUS, GRID_RES
 from ...nav import planner
 from ...nav.obstacles import RobotObstacles
 
@@ -50,27 +50,32 @@ ACCEL = 1.8                  # m/s², trapezoid accel = decel ramp rate
 MAX_DT = 0.2                 # s, clamp on the loop dt used for the accel ramp (guards stalls)
 STALE_TIMEOUT = 0.5          # s without a fresh slam_pose before stopping
 NAV_GOAL_TIMEOUT = 0.25      # s without fresh nav_goal before clearing the current destination
-LOOKAHEAD = 0.4              # m, pure-pursuit lookahead (larger = smoother, cuts corners more)
-PROJECT_WINDOW = 1.5         # m, forward arc-length window when re-projecting progress onto the path
+LOOKAHEAD = 0.3              # m, pure-pursuit lookahead (larger = smoother, cuts corners more)
+PROJECT_WINDOW = 1.2         # m, forward arc-length window when re-projecting progress onto the path
 PLAN_DT = 0.2                # s, replan period (5 Hz receding horizon → reacts to goal/map changes)
 ENEMY_RADIUS = 0.30          # m, painted radius of a detected enemy robot obstacle (its half-footprint)
 ENEMY_AGE_GROWTH = 0.4       # m per s of staleness — a stale detection inflates (the robot may have moved)
 CAM_OCC_TIMEOUT = 0.5        # s without a fresh cam_occupancy before dropping occupancyd's obstacle layer
 
+def field_grid():
+  """A FIELD_BOUNDS grid with the static FIELD_WALLS (transcribed from the drawings, in
+  slam.common) painted in — navd's default map, and the fallback if NAV_MAP is unusable."""
+  g = OccupancyGrid(*common.FIELD_BOUNDS, GRID_RES)
+  for r in common.FIELD_WALLS: g.add_rect(*r)
+  return g, ROBOT_RADIUS
+
 def load_map():
-  """Static obstacle map for planning. NAV_MAP env → JSON (bounds, res, walls); with none,
-  an empty grid over the 12×8 field (FIELD_BOUNDS) so dynamic obstacles still work. Returns
-  (OccupancyGrid, robot_radius)."""
+  """Static obstacle map for planning. NAV_MAP env → JSON (bounds, res, walls) overrides; with
+  none, the FIELD_WALLS grid from slam.common. Returns (OccupancyGrid, robot_radius)."""
   p = os.environ.get("NAV_MAP")
   if not p:
-    return OccupancyGrid(*common.FIELD_BOUNDS, 0.10), ROBOT_RADIUS
+    return field_grid()
   try:
     with open(p) as f: data = json.load(f)
   except (OSError, json.JSONDecodeError) as e:
-    logger.warning(f"navd: NAV_MAP {p} unreadable ({e}); empty field grid")
-    return OccupancyGrid(*common.FIELD_BOUNDS, 0.10), ROBOT_RADIUS
+    logger.warning(f"navd: NAV_MAP {p} unreadable ({e}); using FIELD_WALLS grid"); return field_grid()
   x0, y0, x1, y1 = data["bounds"]
-  g = OccupancyGrid(x0, y0, x1, y1, data.get("res", 0.10))
+  g = OccupancyGrid(x0, y0, x1, y1, data.get("res", GRID_RES))
   for w in data.get("walls", []):
     if "rect" in w: g.add_rect(*w["rect"])
     elif "poly" in w: g.add_poly(w["poly"])
