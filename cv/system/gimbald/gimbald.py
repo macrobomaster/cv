@@ -34,14 +34,16 @@ from ...autoaim.common import AIM_GAINS, AIM_I_CLAMP, AIM_D_TAU
 # External setpoint topics; qr_ack is handled as a generated local setpoint between these priorities.
 SOURCES = ["aim_setpoint", "state_setpoint"]
 SETPOINT_TIMEOUT = 0.1   # s — a setpoint older than this is stale; its source yields to the next
-QR_ACK_DT = getenv("QR_ACK_DT", 0.55)
-QR_ACK_PITCH = math.radians(getenv("QR_ACK_PITCH_DEG", 7.0))
+QR_ACK_DT = getenv("QR_ACK_DT", 1.1)
+QR_ACK_NODS = getenv("QR_ACK_NODS", 2)
+QR_ACK_PITCH = math.radians(getenv("QR_ACK_PITCH_DEG", 20.0))
 
 def qr_ack_setpoint(now:float, start:float, yaw:float, pitch:float) -> dict|None:
   phase = (now - start) / QR_ACK_DT
   if phase < 0.0 or phase >= 1.0: return None
-  pitch_offset = -QR_ACK_PITCH * math.sin(math.pi * phase) ** 2
-  pitch_ff = -QR_ACK_PITCH * (math.pi / QR_ACK_DT) * math.sin(2.0 * math.pi * phase)
+  u = math.pi * QR_ACK_NODS * phase
+  pitch_offset = -QR_ACK_PITCH * math.sin(u) ** 2
+  pitch_ff = -QR_ACK_PITCH * (math.pi * QR_ACK_NODS / QR_ACK_DT) * math.sin(2.0 * u)
   return {"yaw": yaw, "pitch": pitch + pitch_offset, "yaw_ff": 0.0, "pitch_ff": pitch_ff}
 
 class AxisPID:
