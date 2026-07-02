@@ -4,7 +4,7 @@ Factory input:
   team_color: our alliance color ("red"/"blue")
   play_style: high-level strategy preset ("balanced"/"center")
 """
-import os, math
+import math
 
 from .base_states import (LookAtMappedTagMixin, ScanAcquireMixin, SpinChassisMixin, NavToGoalState,
                           PeriodicNavToGoalState, TimedNavToGoalState, SequenceState, TimedHoldGoalState,
@@ -19,7 +19,7 @@ ACQUIRE_HOLD_DT = 0.8
 NAV_ARRIVE_RADIUS = 0.1
 RECENTER_PERIOD = 30.0
 RETREAT_HOLD_DT = 10.0
-RETREAT_HP = 150
+RETREAT_HP_BY_STYLE = {"passive": 200.0, "aggressive": 150.0}
 ATTACK_DEEP_PERIOD = 10
 ATTACK_DEEP_AT = 120
 ATTACK_DEEP_HOLD_DT = 10.0
@@ -82,10 +82,10 @@ def _robot_hp(ctx) -> float|None:
 class RetreatSequenceState(SequenceState):
   name = "retreat_sequence"
   preempt = True
-  hp_threshold = RETREAT_HP
 
-  def __init__(self, center_goal:tuple[float, float], back_goal:tuple[float, float]):
+  def __init__(self, center_goal:tuple[float, float], back_goal:tuple[float, float], hp_threshold:float):
     super().__init__([NavToHomeState(back_goal), HoldHomeState(back_goal), ReturnCenterState(center_goal)])
+    self.hp_threshold = hp_threshold
     self.armed = True
 
   def reset(self, ctx=None):
@@ -156,6 +156,7 @@ def _goals(team_color:str) -> dict:
 def make_state_machine(team_color:str, play_style:str="passive") -> StateMachine:
   play_style = play_style.lower()
   goals = _goals(team_color)
+  retreat_hp = RETREAT_HP_BY_STYLE.get(play_style, RETREAT_HP_BY_STYLE["passive"])
 
   match play_style:
     case "passive":
@@ -168,7 +169,7 @@ def make_state_machine(team_color:str, play_style:str="passive") -> StateMachine
   nav_to_center = NavToCenterState(center_goal)
   acquire = AcquireState()
   search = SearchState()
-  retreat = RetreatSequenceState(center_goal, goals["home"])
+  retreat = RetreatSequenceState(center_goal, goals["home"], retreat_hp)
 
   states = [IdleState(), retreat, nav_to_center, acquire, search]
   return StateMachine(states)
