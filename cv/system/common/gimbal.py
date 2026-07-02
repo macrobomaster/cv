@@ -8,6 +8,8 @@ non-conflated and drain() every tick so no sample is dropped.
 from collections import deque
 from typing import Optional
 
+from .geometry import wrap_pi
+
 DEQUE_MAX = 200          # ~1 s at 200 Hz; tolerates large t_capture lag
 STALE_GAP = 0.030        # s — nearest sample farther than this from t ⇒ flagged stale
 
@@ -41,6 +43,8 @@ class GimbalBuffer:
       ts, y, p = s[:3]
       if prev_ts <= t <= ts:
         a = (t - prev_ts) / (ts - prev_ts)
-        return prev_y + a * (y - prev_y), prev_p + a * (p - prev_p), False
+        # yaw is ±π-wrapped: interpolate the SHORTEST arc, else a pair straddling the branch cut (+179°→−179°)
+        # linearly averages to ~0° and throws the de-rotation off by ~180°. pitch doesn't wrap.
+        return wrap_pi(prev_y + a * wrap_pi(y - prev_y)), prev_p + a * (p - prev_p), False
       prev_ts, prev_y, prev_p = ts, y, p
     return None
