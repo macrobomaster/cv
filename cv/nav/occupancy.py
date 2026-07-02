@@ -68,12 +68,18 @@ class OccupancyGrid:
     g.occ = self.occ.copy()
     return g
 
-  def inflated(self, radius:float) -> "OccupancyGrid":
-    """Copy with obstacles dilated by `radius` (m) → C-space for a point robot."""
+  def inflated(self, radius:float, border:bool = True) -> "OccupancyGrid":
+    """Copy with obstacles dilated by `radius` (m) → C-space for a point robot. With
+    border=True (default) also blocks a `radius` margin around the perimeter — the field is
+    enclosed, so the robot CENTRE must stay `radius` inside the bounds (else it hangs off the
+    edge). Pass border=False for a grid whose bounds aren't a physical wall."""
     from scipy.ndimage import binary_dilation
     g = self.copy()
     rc = int(math.ceil(radius / self.res))
-    if rc > 0 and self.occ.any():
+    if rc <= 0: return g
+    if self.occ.any():
       yy, xx = np.ogrid[-rc:rc + 1, -rc:rc + 1]
       g.occ = binary_dilation(self.occ, structure=(xx * xx + yy * yy <= rc * rc))
+    if border:
+      g.occ[:rc, :] = True; g.occ[-rc:, :] = True; g.occ[:, :rc] = True; g.occ[:, -rc:] = True
     return g
