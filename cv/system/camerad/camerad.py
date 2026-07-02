@@ -77,8 +77,7 @@ def run():
           if frame is None: continue
           ct = t_cap + CAPTURE_MID_EXPOSURE
           if raw_pub is not None:
-            raw = cv2.rotate(frame, cv2.ROTATE_180)
-            raw_pub.send("camera_feed_raw", {"ct": ct, "frame": cv2.resize(raw, (IMG_W, IMG_H)).tobytes()})
+            raw_pub.send("camera_feed_raw", {"ct": ct, "frame": cv2.resize(frame, (IMG_W, IMG_H)).tobytes()})
           slot, dst = ring.next_view()
           cv2.remap(frame, undist_map1, undist_map2, cv2.INTER_LINEAR, dst=dst)
           t_done = time.monotonic()
