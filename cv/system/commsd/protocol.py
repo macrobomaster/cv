@@ -16,6 +16,7 @@ class Command(Enum):
   CHASSIS_ODOM = 0x09
   CHASSIS_ALIGN = 0x0b
   BARREL_HEAT = 0x0a
+  ROBOT_HP = 0x0c
 
 COMMAND_FORMATS = {
   Command.CHECK_STATE: '<B',
@@ -28,6 +29,7 @@ COMMAND_FORMATS = {
   Command.CHASSIS_ODOM: '',
   Command.CHASSIS_ALIGN: '<B',
   Command.BARREL_HEAT: '',
+  Command.ROBOT_HP: '',
 }
 
 RESPONSE_FORMATS = {
@@ -44,6 +46,7 @@ RESPONSE_FORMATS = {
   Command.CHASSIS_ODOM: '<ff',
   Command.CHASSIS_ALIGN: '<B',
   Command.BARREL_HEAT: '<HH',
+  Command.ROBOT_HP: '<H',
 }
 
 CRC8_INIT = 0xff

@@ -13,7 +13,7 @@ COMM_RATES_HZ = {
   "raw_imu": 200.0,
   "chassis_odom": 50.0,
   "aim_error": 200.0,
-  "shoot": 20.0,
+  "shoot": 100.0,
   "chassis_velocity": 50.0,
   "spinning": 10.0,
   "chassis_align": 10.0,
@@ -21,6 +21,7 @@ COMM_RATES_HZ = {
   "team_color": 0.2,
   "robot_type": 0.2,
   "barrel_heat": 10.0,
+  "robot_hp": 10.0,
 }
 COMMS_RATE_WINDOW = 1.0
 
@@ -28,9 +29,7 @@ def due(next_comm_at, comm):
   t = time.monotonic()
   if t < next_comm_at[comm]:
     return False
-  # schedule from the previous deadline so the cadence doesn't drift with loop overhead
   next_comm_at[comm] += 1 / COMM_RATES_HZ[comm]
-  # if we fell more than a period behind, resync instead of bursting to catch up
   if next_comm_at[comm] < t:
     next_comm_at[comm] = t + 1 / COMM_RATES_HZ[comm]
   return True
@@ -64,9 +63,7 @@ def run():
   port = serial.Serial(device, 921600, timeout=1)
   protocol = Protocol(port)
 
-  pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates", "chassis_odom", "barrel_heat"])
-  # gimbal_state + raw_imu are high-rate streams consumed sample-by-sample
-  # (slamd integrates every IMU sample), so publish non-conflate.
+  pub = messaging.Pub(["game_running", "team_color", "robot_type", "comms_rates", "chassis_odom", "barrel_heat", "robot_hp"])
   gimbal_pub = messaging.Pub(["gimbal_state", "raw_imu"], conflate=False)
   sub = messaging.Sub(["aim_error", "shoot", "chassis_velocity", "spinning", "chassis_align"])
   next_comm_at = {comm: 0.0 for comm in COMM_RATES_HZ}
@@ -80,7 +77,6 @@ def run():
       kv_put("watchdog", "commsd", time.monotonic())
       last_wd = time.monotonic()
 
-    # block until the soonest comm is due, waking early on subscriber traffic
     timeout_ms = max(0, int((min(next_comm_at.values()) - time.monotonic()) * 1000))
     sub.update(timeout=timeout_ms)
 
@@ -105,9 +101,6 @@ def run():
           "accel": [ax, ay, az],
         })
 
-    # wheel-odometry chassis velocity (gimbal-heading frame, m/s) → slamd fuses it
-    # as a velocity measurement so the estimate stops coasting. slamd takes the
-    # latest per camera frame, so publish conflate (not sample-by-sample).
     if due(next_comm_at, "chassis_odom"):
       co = comm_msg(protocol, comm_counts, "chassis_odom", Command.CHASSIS_ODOM)
       if co is not None:
@@ -120,11 +113,6 @@ def run():
 
     if aim_error is not None and due(next_comm_at, "aim_error"):
       if fresh(sub, "aim_error"):
-        # Both axes: the board's gimbal-rate command runs OPPOSITE to gimbald's sign convention
-        # (a positive command lowers the angle). Without the YAW flip gimbald is a positive-feedback
-        # loop, so any fixed aim setpoint (decisiond) runs away; navd's look-at only "worked" before
-        # because its −sign accidentally compensated. HW-confirmed via that. Reading (gimbal_state) is
-        # NOT flipped — only the command — so slam/viz heading stays faithful.
         x = aim_error["x"] * -1
         y = aim_error["y"] * -1
         comm_msg(protocol, comm_counts, "aim_error", Command.AIM_ERROR, x, y)
@@ -177,5 +165,10 @@ def run():
       if ba is not None:
         limit, current = ba
         pub.send("barrel_heat", {"limit": limit, "current": current})
+
+    if due(next_comm_at, "robot_hp"):
+      ro = comm_msg(protocol, comm_counts, "robot_hp", Command.ROBOT_HP)
+      if ro is not None:
+        pub.send("robot_hp", ro[0])
 
     last_rate_at = publish_comm_rates(pub, comm_counts, comm_rates, last_rate_at)
