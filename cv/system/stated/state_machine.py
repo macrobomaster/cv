@@ -10,6 +10,7 @@ from typing import Any
 
 class StateBase(ABC):
   name = "base"
+  preempt = False
 
   def _call_hooks(self, prefix:str, *args):
     seen = set()
@@ -69,7 +70,11 @@ class StateMachine:
     for state in self.states:
       state.observe_state(ctx)
     next_state = self.current
-    if self.current.can_transition(ctx):
+    for state in self.states:
+      if state.preempt and state.should_transition(self.current, ctx):
+        next_state = state
+        break
+    if next_state is self.current and self.current.can_transition(ctx):
       for state in self.states:
         if state.should_transition(self.current, ctx):
           next_state = state

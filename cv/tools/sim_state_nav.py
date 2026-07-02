@@ -21,7 +21,7 @@ from scipy.spatial.transform import Rotation
 from ..slam import common
 from ..system.common.geometry import rotz, wrap_pi
 from ..system.navd import navd
-from ..system.stated.states import TEAM_GOALS, PLAY_STYLES, make_state_machine
+from ..system.stated.states import TEAM_GOALS, PLAY_STYLES, RETREAT_HP, make_state_machine
 
 DEFAULT_OUT = "state_nav_sim.rrd"
 DEFAULT_DURATION = 180.0
@@ -36,6 +36,7 @@ class SimCtx:
     self.data = {}
     self.updated = {}
     self.now = 0.0
+    self.match_elapsed = 0.0
     self.entered = False
 
   def __getitem__(self, service):
@@ -84,6 +85,15 @@ def parse_enemy(s):
     if vals[4] < vals[3]: raise argparse.ArgumentTypeError("enemy t1 must be >= t0")
     return tuple(vals)
   raise argparse.ArgumentTypeError("expected x,y or x,y,r or x,y,r,t0,t1")
+
+def parse_hp_loss(s):
+  try:
+    t, amount = [float(x) for x in s.split(":", 1)]
+  except ValueError as e:
+    raise argparse.ArgumentTypeError("expected TIME:AMOUNT") from e
+  if t < 0.0: raise argparse.ArgumentTypeError("HP loss time must be >= 0")
+  if amount < 0.0: raise argparse.ArgumentTypeError("HP loss amount must be >= 0")
+  return t, amount
 
 def in_windows(t, windows):
   return any(a <= t <= b for a, b in windows)
@@ -138,7 +148,11 @@ def current_tag_choice(chain, pose):
     if callable(sel):
       heading = state._heading_world(pose["q_wb"])
       if heading is None: return None
-      best = sel(pose, heading)
+      score_heading = getattr(state, "_look_at_heading_w", None)
+      if score_heading is None:
+        motion_heading = getattr(state, "_motion_heading_world", None)
+        score_heading = motion_heading(pose) if callable(motion_heading) else None
+      best = sel(pose, heading, heading if score_heading is None else score_heading)
       if best is not None: return int(best[1]), tuple(float(x) for x in best[2])
   return None
 
@@ -236,9 +250,22 @@ def log_static_scene(static_grid, robot_radius, team):
   rr.log("world/team_goals", rr.Points3D(goals, colors=colors, radii=0.07, labels=labels), static=True)
   rr.log("scalars/state_flags", rr.SeriesLines(names=["game", "autoaim", "spinning", "has_goal"]), static=True)
   rr.log("scalars/chassis_velocity", rr.SeriesLines(names=["x_gimbal", "y_gimbal", "speed_world"]), static=True)
+  rr.log("scalars/robot_hp", rr.SeriesLines(names=["hp"]), static=True)
+  rr.log("scalars/hp_loss", rr.SeriesLines(names=["loss"]), static=True)
+  rr.log("scalars/state_change", rr.SeriesLines(names=["change"]), static=True)
+  rr.log("state_changes/markers", rr.SeriesLines(names=["change"]), static=True)
+
+def log_state_change(sim_t):
+  rr.set_time("sim_time", duration=sim_t)
+  rr.log("state_changes/markers", rr.Scalars(1.0))
+
+def log_hp_loss(sim_t):
+  rr.set_time("sim_time", duration=sim_t)
+  rr.log("hp_loss/markers", rr.Scalars(1.0))
 
 def log_dynamic(sim_t, p_xy, v_w, heading, trail, state_name, state_id, game_running, autoaim_valid, spinning,
-                goal_xy, path, robots, selected_tag, state_setpoint, chassis_cmd, lookahead):
+                goal_xy, path, robots, selected_tag, state_setpoint, chassis_cmd, lookahead, state_changed, robot_hp,
+                hp_loss_event):
   rr.set_time("sim_time", duration=sim_t)
   pos = [float(p_xy[0]), float(p_xy[1]), 0.04]
   speed = float(np.linalg.norm(v_w))
@@ -284,6 +311,9 @@ def log_dynamic(sim_t, p_xy, v_w, heading, trail, state_name, state_id, game_run
   rr.log("scalars/selected_tag", rr.Scalars(-1 if selected_tag is None else selected_tag[0]))
   rr.log("scalars/state_flags", rr.Scalars([int(game_running), int(autoaim_valid), int(spinning), int(goal_xy is not None)]))
   rr.log("scalars/chassis_velocity", rr.Scalars([float(chassis_cmd[0]), float(chassis_cmd[1]), speed]))
+  rr.log("scalars/robot_hp", rr.Scalars(float(robot_hp)))
+  rr.log("scalars/hp_loss", rr.Scalars(float(hp_loss_event)))
+  rr.log("scalars/state_change", rr.Scalars(float(state_changed)))
   rr.log("scalars/gimbal_yaw_deg", rr.Scalars(math.degrees(heading)))
 
 def run(args):
@@ -306,6 +336,9 @@ def run(args):
   last_plan = -math.inf
   v_prev = 0.0
   trail = []
+  prev_state_name = None
+  prev_robot_hp = None
+  hp_losses = sorted(args.hp_loss)
   trail_log_every = max(1, int(round(TRAIL_LOG_DT / args.dt)))
   gimbal_max_rate = math.radians(args.gimbal_rate_deg)
 
@@ -320,7 +353,11 @@ def run(args):
     sim_t = k * args.dt
     now = t0 + sim_t
     game_running = args.game_start <= sim_t and (args.game_stop < 0 or sim_t <= args.game_stop)
+    ctx.match_elapsed = sim_t - args.game_start if game_running else 0.0
     autoaim_valid = game_running and in_windows(sim_t, args.autoaim_window)
+    robot_hp = max(0.0, args.hp_start - sum(amount for t_loss, amount in hp_losses if sim_t >= t_loss))
+    hp_loss_event = prev_robot_hp is not None and robot_hp < prev_robot_hp
+    prev_robot_hp = robot_hp
     pose = slam_pose(now, p_xy, v_w, gimbal_yaw)
     gs = gimbal_state(now, gimbal_yaw, gimbal_pitch, gimbal_yaw_rate, gimbal_pitch_rate)
 
@@ -334,6 +371,7 @@ def run(args):
     }, True)
     ctx.set("gimbal_state", gs, True)
     ctx.set("slam_pose", pose, True)
+    ctx.set("robot_hp", robot_hp, True)
     pub.clear()
     sm.tick(ctx, pub)
 
@@ -396,9 +434,15 @@ def run(args):
     spinning = pub.last("spinning") is True
     if k % trail_log_every == 0:
       trail.append(np.array([p_xy[0], p_xy[1], 0.03], np.float64))
+    state_changed = state_name != prev_state_name
+    if state_changed:
+      log_state_change(sim_t)
+      prev_state_name = state_name
+    if hp_loss_event:
+      log_hp_loss(sim_t)
     log_dynamic(sim_t, p_xy, v_w, gimbal_yaw, trail, state_name, state_ids.get(sm.current.name, -1), game_running,
                 autoaim_valid, spinning, None if goal_xy is None else goal_xy.tolist(), path, robots, selected_tag, sp,
-                chassis_cmd, lookahead)
+                chassis_cmd, lookahead, state_changed, robot_hp, hp_loss_event)
 
   print(f"wrote {out}  field_walls={len(common.FIELD_WALLS)}  style={args.style}  last_goal={inj_label}")
 
@@ -418,10 +462,14 @@ def main():
                   help="make autoaim valid during this interval; repeatable")
   ap.add_argument("--enemy", action="append", type=parse_enemy, default=[], metavar="X,Y[,R[,T0,T1]]",
                   help="dynamic obstacle circle; repeatable")
+  ap.add_argument("--hp-start", type=float, default=400.0, help="initial robot HP")
+  ap.add_argument("--hp-loss", action="append", type=parse_hp_loss, default=[], metavar="TIME:AMOUNT",
+                  help=f"subtract HP at sim time; repeatable. Retreat threshold is {RETREAT_HP:g}")
   ap.add_argument("--gimbal-rate-deg", type=float, default=360.0, help="simulated gimbal slew limit in deg/s")
   args = ap.parse_args()
   if args.duration <= 0: raise SystemExit("--duration must be > 0")
   if args.dt <= 0: raise SystemExit("--dt must be > 0")
+  if args.hp_start < 0: raise SystemExit("--hp-start must be >= 0")
   run(args)
 
 if __name__ == "__main__":
