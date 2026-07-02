@@ -23,6 +23,8 @@ from ..stated.states import PLAY_STYLES
 
 QR_SCAN_DT = getenv("QR_SCAN_DT", 0.2)
 QR_ACK_REARM_DT = getenv("QR_ACK_REARM_DT", 2.0)
+QR_DIAG_DT = getenv("QR_DIAG_DT", 2.0)
+QR_DETECT_SCALE = getenv("QR_DETECT_SCALE", 2.0)
 OPENCV_THREADS = getenv("OPENCV_THREADS", 1)
 
 def parse_play_style(payload:str) -> str|None:
@@ -36,6 +38,17 @@ def parse_play_style(payload:str) -> str|None:
     return None
   return style if style in PLAY_STYLES else None
 
+def qr_seen(points) -> bool:
+  return points is not None and getattr(points, "size", 1) > 0
+
+def decode_qr(detector, gray):
+  payload, points, _ = detector.detectAndDecode(gray)
+  if payload or QR_DETECT_SCALE <= 1.0:
+    return payload, points
+  scaled = cv2.resize(gray, None, fx=QR_DETECT_SCALE, fy=QR_DETECT_SCALE, interpolation=cv2.INTER_LINEAR)
+  payload_scaled, points_scaled, _ = detector.detectAndDecode(scaled)
+  return (payload_scaled, points_scaled) if payload_scaled or qr_seen(points_scaled) else (payload, points)
+
 def run():
   cv2.setNumThreads(OPENCV_THREADS)
   pub = messaging.Pub(["play_style", "qr_ack"])
@@ -47,28 +60,51 @@ def run():
   last_style = None
   last_ack_style = None
   last_valid_t = -1e9
+  last_diag = 0.0
+  scans = detected = decoded = rejected = 0
 
   while True:
     sub.update(timeout=100)
-    if bool(sub["game_running"]): continue
+    if bool(sub["game_running"]):
+      if sub.now - last_diag > QR_DIAG_DT:
+        logger.info("qrd: paused while game_running")
+        last_diag = sub.now
+      continue
     if not sub.updated["camera_feed"] or sub.now - last_scan < QR_SCAN_DT: continue
     last_scan = sub.now
     msg = sub["camera_feed"]
     frame = frame_view(ring, msg)
-    if frame is None: continue
+    if frame is None:
+      if sub.now - last_diag > QR_DIAG_DT:
+        logger.info(f"qrd: no local camera frame fid={msg.get('fid') if msg else None}")
+        last_diag = sub.now
+      continue
 
     try:
       gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-      payload, _, _ = detector.detectAndDecode(gray)
+      payload, points = decode_qr(detector, gray)
     except cv2.error as e:
       if sub.now - last_cv_error_log > 5.0:
         err = " ".join(line.strip() for line in str(e).splitlines() if line.strip())
         logger.warning(f"qrd: QR decode cv2 error; continuing: {err}")
         last_cv_error_log = sub.now
       continue
-    if not payload: continue
+    scans += 1
+    if qr_seen(points): detected += 1
+    if payload: decoded += 1
+    if not payload:
+      if sub.now - last_diag > QR_DIAG_DT:
+        logger.info(f"qrd: no QR payload scans={scans} detected={detected} decoded={decoded} rejected={rejected} fid={msg.get('fid')}")
+        scans = detected = decoded = rejected = 0
+        last_diag = sub.now
+      continue
     style = parse_play_style(payload)
-    if style is None: continue
+    if style is None:
+      rejected += 1
+      if sub.now - last_diag > QR_DIAG_DT:
+        logger.info(f"qrd: unsupported QR payload raw={payload!r}; expected={sorted(PLAY_STYLES)}")
+        last_diag = sub.now
+      continue
 
     rearmed = sub.now - last_valid_t > QR_ACK_REARM_DT
     last_valid_t = sub.now
