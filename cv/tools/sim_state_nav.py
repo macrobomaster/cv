@@ -19,9 +19,10 @@ import rerun as rr
 from scipy.spatial.transform import Rotation
 
 from ..slam import common
-from ..system.common.geometry import rotz, wrap_pi
+from ..system.common.geometry import rotz, roty, wrap_pi
 from ..system.navd import navd
-from ..system.stated.states import TEAM_GOALS, PLAY_STYLES, RETREAT_HP, make_state_machine
+from ..system.stated import states as stated_states
+from ..system.stated.states import TEAM_GOALS, PLAY_STYLES, make_state_machine
 
 DEFAULT_OUT = "state_nav_sim.rrd"
 DEFAULT_DURATION = 180.0
@@ -30,6 +31,9 @@ TRAIL_LOG_DT = 0.2
 ROBOT_RADIUS_VIS = 0.18
 ZONE_HATCH_SPACING = 0.35
 ZONE_HATCH_Z = 0.014
+_TAG_S = common.TAG_SIZE / 2.0
+_TAG_OBJ_PTS = np.array([[-_TAG_S,  _TAG_S, 0.0], [_TAG_S,  _TAG_S, 0.0],
+                         [ _TAG_S, -_TAG_S, 0.0], [-_TAG_S, -_TAG_S, 0.0]], dtype=np.float64)
 
 class SimCtx:
   def __init__(self):
@@ -101,6 +105,41 @@ def in_windows(t, windows):
 def default_style():
   return "passive" if "passive" in PLAY_STYLES else sorted(PLAY_STYLES)[0]
 
+def retreat_hp_threshold(style):
+  by_style = getattr(stated_states, "RETREAT_HP_BY_STYLE", None)
+  if isinstance(by_style, dict): return by_style.get(style, by_style.get(default_style()))
+  return getattr(stated_states, "RETREAT_HP", None)
+
+def default_full_hp():
+  return float(getattr(stated_states, "RETREAT_FULL_HP", 400.0))
+
+def point_in_poly(x, y, poly):
+  inside = False
+  n = len(poly)
+  for i in range(n):
+    x0, y0 = poly[i]
+    x1, y1 = poly[(i + 1) % n]
+    cross = (x - x0) * (y1 - y0) - (y - y0) * (x1 - x0)
+    on_segment = (min(x0, x1) - 1e-9 <= x <= max(x0, x1) + 1e-9
+                  and min(y0, y1) - 1e-9 <= y <= max(y0, y1) + 1e-9)
+    if abs(cross) < 1e-9 and on_segment:
+      return True
+    if (y0 > y) != (y1 > y):
+      x_cross = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+      if x <= x_cross: inside = not inside
+  return inside
+
+def team_spawn_zone(team):
+  team = team.lower()
+  for z in common.FIELD_ZONES:
+    name = z.get("name", "").lower()
+    if team in name and "spawn" in name: return z
+  return None
+
+def in_team_spawn(team, p_xy):
+  z = team_spawn_zone(team)
+  return z is not None and point_in_poly(float(p_xy[0]), float(p_xy[1]), common.zone_corners(z))
+
 def default_start(team, style):
   goals = TEAM_GOALS[team]
   x, y = goals.get("home", ((common.FIELD_BOUNDS[0] + common.FIELD_BOUNDS[2]) * 0.5,
@@ -120,6 +159,86 @@ def q_wb_from_heading(heading):
   Rz = rotz(-heading if common.YAW_FLIPPED else heading)
   q = Rotation.from_matrix(Rz @ common.R_CAM).as_quat()  # xyzw
   return [float(q[3]), float(q[0]), float(q[1]), float(q[2])]
+
+def camera_pose(p_xy, yaw, pitch):
+  Rz = rotz(-yaw if common.YAW_FLIPPED else yaw)
+  R_wc = Rz @ roty(pitch) @ common.R_CAM
+  p_cam = np.array([float(p_xy[0]), float(p_xy[1]), common.CAM_HEIGHT], np.float64) + Rz @ common.T_CAM.astype(np.float64)
+  return R_wc, p_cam
+
+def polygon_area(pts):
+  area = 0.0
+  for i, (x0, y0) in enumerate(pts):
+    x1, y1 = pts[(i + 1) % len(pts)]
+    area += x0 * y1 - x1 * y0
+  return abs(area) * 0.5
+
+def segment_intersects_rect(a, b, rect):
+  x0, y0, x1, y1 = rect
+  xmin, xmax = min(x0, x1), max(x0, x1)
+  ymin, ymax = min(y0, y1), max(y0, y1)
+  ax, ay = float(a[0]), float(a[1])
+  bx, by = float(b[0]), float(b[1])
+  dx, dy = bx - ax, by - ay
+  t0, t1 = 0.0, 1.0
+  for p, q in ((-dx, ax - xmin), (dx, xmax - ax), (-dy, ay - ymin), (dy, ymax - ay)):
+    if abs(p) < 1e-12:
+      if q < 0.0: return False
+      continue
+    r = q / p
+    if p < 0.0:
+      if r > t1: return False
+      t0 = max(t0, r)
+    else:
+      if r < t0: return False
+      t1 = min(t1, r)
+  return t1 >= t0 and t1 > 1e-6 and t0 < 1.0 - 1e-6
+
+def segment_hits_wall(a, b):
+  return any(segment_intersects_rect(a, b, rect) for rect in common.FIELD_WALLS)
+
+def tag_los_debug(p_cam, R_wt, t_wt, pts_w):
+  front = R_wt[:, 2].astype(np.float64) * 0.05
+  targets = [t_wt + front] + [p + front for p in pts_w]
+  a = (float(p_cam[0]), float(p_cam[1]))
+  visible_rays, occluded_rays = [], []
+  for target in targets:
+    ray = [p_cam.astype(float).tolist(), target.astype(float).tolist()]
+    if segment_hits_wall(a, (float(target[0]), float(target[1]))): occluded_rays.append(ray)
+    else: visible_rays.append(ray)
+  return len(occluded_rays) == 0, visible_rays, occluded_rays
+
+def sim_apriltags(now, p_xy, yaw, pitch, static_grid, max_range, max_view_angle, min_area_px):
+  R_wc, p_cam = camera_pose(p_xy, yaw, pitch)
+  min_view_cos = math.cos(max_view_angle)
+  detections = []
+  visible_rays, occluded_rays, occluded_tags, occluded_ids = [], [], [], []
+  for tag_id, (R_wt, t_wt) in common.TAG_FIELD_MAP.items():
+    R_wt = R_wt.astype(np.float64)
+    t_wt = t_wt.astype(np.float64)
+    to_cam = p_cam - t_wt
+    dist = float(np.linalg.norm(to_cam))
+    if dist < 1e-6 or dist > max_range: continue
+    if float((to_cam / dist) @ R_wt[:, 2]) < min_view_cos: continue
+    pts_w = (R_wt @ _TAG_OBJ_PTS.T).T + t_wt
+    pts_c = (R_wc.T @ (pts_w - p_cam).T).T
+    if np.any(pts_c[:, 2] <= 0.02): continue
+    uvw = (common.K.astype(np.float64) @ pts_c.T).T
+    uv = uvw[:, :2] / uvw[:, 2:3]
+    if np.any(uv[:, 0] < 0.0) or np.any(uv[:, 0] >= common.IMG_W) or np.any(uv[:, 1] < 0.0) or np.any(uv[:, 1] >= common.IMG_H):
+      continue
+    if polygon_area(uv.tolist()) < min_area_px: continue
+    los, tag_visible_rays, tag_occluded_rays = tag_los_debug(p_cam, R_wt, t_wt, pts_w)
+    if not los:
+      occluded_rays += tag_occluded_rays
+      occluded_tags.append(t_wt.astype(float).tolist())
+      occluded_ids.append(str(int(tag_id)))
+      continue
+    visible_rays += tag_visible_rays
+    detections.append({"id": int(tag_id), "corners": uv.astype(float).tolist()})
+  detections.sort(key=lambda d: -polygon_area(d["corners"]))
+  return {"ct": float(now), "detections": detections, "visible_rays": visible_rays, "occluded_rays": occluded_rays,
+          "occluded_tags": occluded_tags, "occluded_ids": occluded_ids}
 
 def slam_pose(now, p_xy, v_w, heading):
   return {
@@ -157,6 +276,10 @@ def state_chain(sm):
 
 def current_tag_choice(chain, pose):
   for state in reversed(chain):
+    track_id = getattr(state, "_tag_scan_track_id", None)
+    if track_id in common.TAG_FIELD_MAP:
+      t_wt = common.TAG_FIELD_MAP[track_id][1]
+      return int(track_id), tuple(float(x) for x in t_wt)
     sel = getattr(state, "_select_tag", None)
     if callable(sel):
       heading = state._heading_world(pose["q_wb"])
@@ -195,7 +318,8 @@ def zone_hatches(corners, spacing=ZONE_HATCH_SPACING):
       if not any(np.linalg.norm(p - q) < 1e-6 for q in uniq): uniq.append(p)
     uniq.sort(key=lambda p: float(p @ d))
     for a, b in zip(uniq[0::2], uniq[1::2]):
-      if np.linalg.norm(b - a) > 1e-6: out.append([[float(a[0]), float(a[1]), ZONE_HATCH_Z], [float(b[0]), float(b[1]), ZONE_HATCH_Z]])
+      if np.linalg.norm(b - a) > 1e-6:
+        out.append([[float(a[0]), float(a[1]), ZONE_HATCH_Z], [float(b[0]), float(b[1]), ZONE_HATCH_Z]])
     h += spacing
   return out
 
@@ -215,6 +339,8 @@ def log_field_zones():
 
 def log_static_scene(static_grid, robot_radius, team):
   rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+  rr.log("camera", rr.Pinhole(resolution=(common.IMG_W, common.IMG_H), image_from_camera=common.K,
+                              camera_xyz=rr.ViewCoordinates.RDF), static=True)
   x0, y0, x1, y1 = common.FIELD_BOUNDS
   rr.log("world/field", rr.LineStrips3D([[[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0], [x0, y0, 0]]],
           colors=[(110, 110, 110)], radii=[0.012]), static=True)
@@ -265,8 +391,12 @@ def log_static_scene(static_grid, robot_radius, team):
   rr.log("scalars/chassis_velocity", rr.SeriesLines(names=["x_gimbal", "y_gimbal", "speed_world"]), static=True)
   rr.log("scalars/robot_hp", rr.SeriesLines(names=["hp"]), static=True)
   rr.log("scalars/hp_loss", rr.SeriesLines(names=["loss"]), static=True)
+  rr.log("scalars/hp_heal", rr.SeriesLines(names=["heal"]), static=True)
+  rr.log("scalars/in_spawn", rr.SeriesLines(names=["in_spawn"]), static=True)
+  rr.log("scalars/tag_count", rr.SeriesLines(names=["visible"]), static=True)
   rr.log("scalars/state_change", rr.SeriesLines(names=["change"]), static=True)
   rr.log("state_changes/markers", rr.SeriesLines(names=["change"]), static=True)
+  rr.log("hp_loss/markers", rr.SeriesLines(names=["loss"]), static=True)
 
 def log_state_change(sim_t):
   rr.set_time("sim_time", duration=sim_t)
@@ -276,10 +406,45 @@ def log_hp_loss(sim_t):
   rr.set_time("sim_time", duration=sim_t)
   rr.log("hp_loss/markers", rr.Scalars(1.0))
 
+def log_tag_occlusion_debug(apriltags):
+  visible_rays = apriltags.get("visible_rays", []) if apriltags is not None else []
+  occluded_rays = apriltags.get("occluded_rays", []) if apriltags is not None else []
+  occluded_tags = apriltags.get("occluded_tags", []) if apriltags is not None else []
+  occluded_ids = apriltags.get("occluded_ids", []) if apriltags is not None else []
+  rr.log("world/visible_tag_rays", rr.LineStrips3D(visible_rays, colors=[(0, 220, 255)], radii=[0.006])
+         if visible_rays else rr.Clear(recursive=True))
+  rr.log("world/occluded_tag_rays", rr.LineStrips3D(occluded_rays, colors=[(255, 60, 60)], radii=[0.009])
+         if occluded_rays else rr.Clear(recursive=True))
+  rr.log("world/occluded_tags", rr.Points3D(occluded_tags, colors=[(255, 60, 60)], radii=0.075, labels=occluded_ids)
+         if occluded_tags else rr.Clear(recursive=True))
+
+def log_apriltags(apriltags):
+  detections = apriltags.get("detections", []) if apriltags is not None else []
+  log_tag_occlusion_debug(apriltags)
+  rr.log("scalars/tag_count", rr.Scalars(float(len(detections))))
+  if not detections:
+    rr.log("camera/apriltags", rr.Clear(recursive=True))
+    rr.log("camera/apriltag_ids", rr.Clear(recursive=True))
+    rr.log("world/detected_tags", rr.Clear(recursive=True))
+    return
+  outlines = [det["corners"] + [det["corners"][0]] for det in detections]
+  centers = [[sum(p[0] for p in det["corners"]) / 4.0, sum(p[1] for p in det["corners"]) / 4.0] for det in detections]
+  labels = [str(det["id"]) for det in detections]
+  rr.log("camera/apriltags", rr.LineStrips2D(outlines, colors=[(0, 220, 255)], radii=2.0))
+  rr.log("camera/apriltag_ids", rr.Points2D(centers, colors=[(0, 220, 255)], radii=4.0, labels=labels))
+  world_pts, world_labels = [], []
+  for det in detections:
+    if det["id"] not in common.TAG_FIELD_MAP: continue
+    world_pts.append(common.TAG_FIELD_MAP[det["id"]][1].astype(float).tolist())
+    world_labels.append(str(det["id"]))
+  rr.log("world/detected_tags", rr.Points3D(world_pts, colors=[(0, 220, 255)], radii=0.07, labels=world_labels)
+         if world_pts else rr.Clear(recursive=True))
+
 def log_dynamic(sim_t, p_xy, v_w, heading, trail, state_name, state_id, game_running, autoaim_valid, spinning,
                 goal_xy, path, robots, selected_tag, state_setpoint, chassis_cmd, lookahead, state_changed, robot_hp,
-                hp_loss_event):
+                hp_loss_event, hp_heal_rate, in_spawn, apriltags):
   rr.set_time("sim_time", duration=sim_t)
+  log_apriltags(apriltags)
   pos = [float(p_xy[0]), float(p_xy[1]), 0.04]
   speed = float(np.linalg.norm(v_w))
   label = f"{state_name}  v={speed:.2f}m/s"
@@ -326,6 +491,8 @@ def log_dynamic(sim_t, p_xy, v_w, heading, trail, state_name, state_id, game_run
   rr.log("scalars/chassis_velocity", rr.Scalars([float(chassis_cmd[0]), float(chassis_cmd[1]), speed]))
   rr.log("scalars/robot_hp", rr.Scalars(float(robot_hp)))
   rr.log("scalars/hp_loss", rr.Scalars(float(hp_loss_event)))
+  rr.log("scalars/hp_heal", rr.Scalars(float(hp_heal_rate)))
+  rr.log("scalars/in_spawn", rr.Scalars(float(in_spawn)))
   rr.log("scalars/state_change", rr.Scalars(float(state_changed)))
   rr.log("scalars/gimbal_yaw_deg", rr.Scalars(math.degrees(heading)))
 
@@ -350,8 +517,9 @@ def run(args):
   v_prev = 0.0
   trail = []
   prev_state_name = None
-  prev_robot_hp = None
   hp_losses = sorted(args.hp_loss)
+  hp_loss_idx = 0
+  robot_hp = min(args.hp_start, args.hp_max)
   trail_log_every = max(1, int(round(TRAIL_LOG_DT / args.dt)))
   gimbal_max_rate = math.radians(args.gimbal_rate_deg)
 
@@ -368,11 +536,18 @@ def run(args):
     game_running = args.game_start <= sim_t and (args.game_stop < 0 or sim_t <= args.game_stop)
     ctx.match_elapsed = sim_t - args.game_start if game_running else 0.0
     autoaim_valid = game_running and in_windows(sim_t, args.autoaim_window)
-    robot_hp = max(0.0, args.hp_start - sum(amount for t_loss, amount in hp_losses if sim_t >= t_loss))
-    hp_loss_event = prev_robot_hp is not None and robot_hp < prev_robot_hp
-    prev_robot_hp = robot_hp
+    hp_loss_event = False
+    while hp_loss_idx < len(hp_losses) and sim_t >= hp_losses[hp_loss_idx][0]:
+      robot_hp = max(0.0, robot_hp - hp_losses[hp_loss_idx][1])
+      hp_loss_event = True
+      hp_loss_idx += 1
+    in_spawn = game_running and in_team_spawn(args.team, p_xy)
+    hp_heal_rate = args.hp_heal_rate if in_spawn and robot_hp < args.hp_max else 0.0
+    if hp_heal_rate > 0.0: robot_hp = min(args.hp_max, robot_hp + hp_heal_rate * args.dt)
     pose = slam_pose(now, p_xy, v_w, gimbal_yaw)
     gs = gimbal_state(now, gimbal_yaw, gimbal_pitch, gimbal_yaw_rate, gimbal_pitch_rate)
+    apriltags = sim_apriltags(now, p_xy, gimbal_yaw, gimbal_pitch, static_grid, args.tag_max_range,
+                              math.radians(args.tag_max_view_angle_deg), args.tag_min_area_px)
 
     ctx.begin_tick(now)
     ctx.set("game_running", game_running, True)
@@ -385,6 +560,7 @@ def run(args):
     ctx.set("gimbal_state", gs, True)
     ctx.set("slam_pose", pose, True)
     ctx.set("robot_hp", robot_hp, True)
+    ctx.set("apriltags", apriltags, True)
     pub.clear()
     sm.tick(ctx, pub)
 
@@ -455,12 +631,18 @@ def run(args):
       log_hp_loss(sim_t)
     log_dynamic(sim_t, p_xy, v_w, gimbal_yaw, trail, state_name, state_ids.get(sm.current.name, -1), game_running,
                 autoaim_valid, spinning, None if goal_xy is None else goal_xy.tolist(), path, robots, selected_tag, sp,
-                chassis_cmd, lookahead, state_changed, robot_hp, hp_loss_event)
+                chassis_cmd, lookahead, state_changed, robot_hp, hp_loss_event, hp_heal_rate, in_spawn, apriltags)
 
-  print(f"wrote {out}  field_walls={len(common.FIELD_WALLS)}  style={args.style}  last_goal={inj_label}")
+  hfov = math.degrees(2.0 * math.atan(common.IMG_W / (2.0 * common.FX)))
+  vfov = math.degrees(2.0 * math.atan(common.IMG_H / (2.0 * common.FY)))
+  print(f"wrote {out}  field_walls={len(common.FIELD_WALLS)}  style={args.style}  "
+        f"camera_fov=({hfov:.1f}h,{vfov:.1f}v)deg  last_goal={inj_label}")
 
 def main():
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  hp_thresh = retreat_hp_threshold(default_style())
+  hp_help = "subtract HP at sim time; repeatable"
+  if hp_thresh is not None: hp_help += f". Default-style retreat threshold is {hp_thresh:g}"
   ap.add_argument("--out", default=DEFAULT_OUT, help="output .rrd recording")
   ap.add_argument("--spawn", action="store_true", help="also spawn a Rerun viewer while writing the .rrd")
   ap.add_argument("--duration", type=float, default=DEFAULT_DURATION, help="simulation duration in seconds")
@@ -475,14 +657,23 @@ def main():
                   help="make autoaim valid during this interval; repeatable")
   ap.add_argument("--enemy", action="append", type=parse_enemy, default=[], metavar="X,Y[,R[,T0,T1]]",
                   help="dynamic obstacle circle; repeatable")
-  ap.add_argument("--hp-start", type=float, default=400.0, help="initial robot HP")
+  ap.add_argument("--hp-start", type=float, default=default_full_hp(), help="initial robot HP")
+  ap.add_argument("--hp-max", type=float, default=default_full_hp(), help="maximum HP after spawn healing")
+  ap.add_argument("--hp-heal-rate", type=float, default=30.0, help="HP per second healed while inside own spawn zone")
   ap.add_argument("--hp-loss", action="append", type=parse_hp_loss, default=[], metavar="TIME:AMOUNT",
-                  help=f"subtract HP at sim time; repeatable. Retreat threshold is {RETREAT_HP:g}")
+                  help=hp_help)
+  ap.add_argument("--tag-max-range", type=float, default=common.TAG_MAX_RANGE, help="max simulated AprilTag detection range in metres")
+  ap.add_argument("--tag-max-view-angle-deg", type=float, default=75.0, help="max oblique tag face angle for simulated detection")
+  ap.add_argument("--tag-min-area-px", type=float, default=20.0, help="minimum projected tag area in px^2 for detection")
   ap.add_argument("--gimbal-rate-deg", type=float, default=360.0, help="simulated gimbal slew limit in deg/s")
   args = ap.parse_args()
   if args.duration <= 0: raise SystemExit("--duration must be > 0")
   if args.dt <= 0: raise SystemExit("--dt must be > 0")
   if args.hp_start < 0: raise SystemExit("--hp-start must be >= 0")
+  if args.hp_max <= 0: raise SystemExit("--hp-max must be > 0")
+  if args.hp_heal_rate < 0: raise SystemExit("--hp-heal-rate must be >= 0")
+  if args.tag_max_range <= 0: raise SystemExit("--tag-max-range must be > 0")
+  if args.tag_min_area_px < 0: raise SystemExit("--tag-min-area-px must be >= 0")
   run(args)
 
 if __name__ == "__main__":
