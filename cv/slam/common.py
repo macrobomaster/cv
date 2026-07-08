@@ -178,7 +178,8 @@ FIELD_WALLS: list[tuple[float, float, float, float]] = [
   (5.000, 0.700, 6.999, 1.695), # bumpy road center block
   (2.250, 2.174, 2.419, 5.199), # red team wall
   (9.605, 2.174, 9.750, 5.199), # blue team wall
-  (2.216, 7.000, 9.783, 7.999), # ramp
+  # (2.216, 7.000, 9.783, 7.999), # ramp
+  (4.784, 6.995, 7.215, 6.999), # ramp wall
   (2.216, 6.000, 4.784, 6.999), # red team smaller ramp
   (7.215, 6.000, 9.783, 6.999), # blue team smaller ramp
   (3.420, 3.975, 3.590, 5.999), # red team outer wall
