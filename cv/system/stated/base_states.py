@@ -159,6 +159,197 @@ class ScanAcquireMixin:
     if ctx.entered: self._scan_acquire_start_t = ctx.now
     pub.send("state_setpoint", self._scan_acquire_setpoint(ctx.now))
 
+def _ctx_get(ctx, service:str):
+  try: return ctx[service]
+  except (KeyError, TypeError): return None
+
+def _segment_intersects_rect(a, b, rect):
+  x0, y0, x1, y1 = rect
+  xmin, xmax = min(x0, x1), max(x0, x1)
+  ymin, ymax = min(y0, y1), max(y0, y1)
+  ax, ay = float(a[0]), float(a[1])
+  bx, by = float(b[0]), float(b[1])
+  dx, dy = bx - ax, by - ay
+  t0, t1 = 0.0, 1.0
+  for p, q in ((-dx, ax - xmin), (dx, xmax - ax), (-dy, ay - ymin), (dy, ymax - ay)):
+    if abs(p) < 1e-12:
+      if q < 0.0: return False
+      continue
+    r = q / p
+    if p < 0.0:
+      if r > t1: return False
+      t0 = max(t0, r)
+    else:
+      if r < t0: return False
+      t1 = min(t1, r)
+  return t1 >= t0 and t1 > 1e-6 and t0 < 1.0 - 1e-6
+
+def _field_wall_los(a, b):
+  return not any(_segment_intersects_rect(a, b, rect) for rect in common.FIELD_WALLS)
+
+class TagScanMixin:
+  tag_scan_pitch = 0.0
+  tag_scan_slow_rate = math.radians(45.0)
+  tag_scan_fast_rate = math.radians(360.0)
+  tag_scan_fast_arc = max(math.radians(20.0), min(math.radians(60.0),
+                                                0.85 * 2.0 * math.atan(common.IMG_W / (2.0 * common.FX))))
+  tag_track_lost_dt = 1.0
+
+  def _init_tag_scan(self):
+    self._tag_scan_start_yaw = 0.0
+    self._tag_scan_start_t = time.monotonic()
+    self._tag_scan_have_start = False
+    self._tag_scan_last_seen_t = -math.inf
+    self._tag_scan_track_id = None
+    self._tag_scan_track_yaw = None
+    self._tag_scan_track_pitch = self.tag_scan_pitch
+    self._tag_scan_was_tracking = False
+
+  def _reset_tag_scan(self, ctx=None):
+    self._tag_scan_start_t = ctx.now if ctx is not None else time.monotonic()
+    self._tag_scan_have_start = False
+    self._tag_scan_last_seen_t = -math.inf
+    self._tag_scan_track_id = None
+    self._tag_scan_track_yaw = None
+    self._tag_scan_track_pitch = self.tag_scan_pitch
+    self._tag_scan_was_tracking = False
+
+  def _tag_detection_center_area(self, det):
+    corners = det.get("corners") if isinstance(det, dict) else None
+    if corners is None or len(corners) < 4: return None
+    pts = [(float(p[0]), float(p[1])) for p in corners[:4]]
+    u = sum(p[0] for p in pts) / 4.0
+    v = sum(p[1] for p in pts) / 4.0
+    area = 0.0
+    for i, (x0, y0) in enumerate(pts):
+      x1, y1 = pts[(i + 1) % len(pts)]
+      area += x0 * y1 - x1 * y0
+    return u, v, abs(area) * 0.5
+
+  def _select_tag_detection(self, detections):
+    best = tracked = None
+    for det in detections:
+      c = self._tag_detection_center_area(det)
+      if c is None: continue
+      try: tag_id = int(det.get("id"))
+      except (TypeError, ValueError): tag_id = None
+      cand = (c[2], tag_id, c)
+      if tag_id is not None and tag_id == self._tag_scan_track_id: tracked = cand
+      if best is None or cand[0] > best[0]: best = cand
+    return tracked or best
+
+  def _tag_visual_track_setpoint(self, gs, center_area):
+    u, v, _ = center_area
+    yaw_sign = -1.0 if common.YAW_FLIPPED else 1.0
+    yaw_err = -yaw_sign * math.atan2(u - common.CX, common.FX)
+    pitch_err = -math.atan2(v - common.CY, common.FY)
+    pitch_now = float(gs.get("pitch_gi", self.tag_scan_pitch))
+    return wrap_pi(float(gs["yaw_gi"]) + yaw_err), pitch_now + pitch_err
+
+  def _heading_world_tag_scan(self, q_wb):
+    w, x, y, z = q_wb
+    fx, fy = 2 * (x * z + w * y), 2 * (y * z - w * x)
+    n = math.hypot(fx, fy)
+    return None if n < 1e-6 else math.atan2(fy, fx)
+
+  def _tag_world_track_setpoint(self, ctx, gs):
+    if self._tag_scan_track_id is None: return None
+    entry = common.TAG_FIELD_MAP.get(self._tag_scan_track_id)
+    pose = _ctx_get(ctx, "slam_pose")
+    if entry is None or pose is None: return None
+    if pose.get("n_tags", 0) == 0: return None
+    heading_w = self._heading_world_tag_scan(pose["q_wb"])
+    if heading_w is None: return None
+    _, t_wt = entry
+    px, py = pose["p_w"][:2]
+    dx, dy = float(t_wt[0]) - float(px), float(t_wt[1]) - float(py)
+    d2 = dx * dx + dy * dy
+    if d2 < 1e-6: return None
+    yaw_sign = -1.0 if common.YAW_FLIPPED else 1.0
+    bearing_w = math.atan2(dy, dx)
+    yaw_rel = yaw_sign * wrap_pi(bearing_w - heading_w)
+    vx, vy = pose.get("v_w", [0.0, 0.0])[:2]
+    yaw_ff = yaw_sign * (dy * float(vx) - dx * float(vy)) / d2
+    return {"yaw": wrap_pi(float(gs["yaw_gi"]) + yaw_rel), "pitch": self.tag_scan_pitch,
+            "yaw_ff": yaw_ff, "pitch_ff": 0.0}
+
+  def _tag_scan_track_occluded(self, ctx):
+    if self._tag_scan_track_id is None: return False
+    entry = common.TAG_FIELD_MAP.get(self._tag_scan_track_id)
+    pose = _ctx_get(ctx, "slam_pose")
+    if entry is None or pose is None: return False
+    _, t_wt = entry
+    px, py = pose["p_w"][:2]
+    return not _field_wall_los((px, py), (float(t_wt[0]), float(t_wt[1])))
+
+  def _observe_tag_scan(self, ctx):
+    if not bool(ctx["game_running"]):
+      self._reset_tag_scan(ctx)
+      return
+    tags = _ctx_get(ctx, "apriltags")
+    gs = _ctx_get(ctx, "gimbal_state")
+    if (getattr(ctx, "updated", {}).get("apriltags") and tags is not None
+        and tags.get("detections") and gs is not None):
+      selected = self._select_tag_detection(tags["detections"])
+      if selected is None: return
+      _, tag_id, center_area = selected
+      self._tag_scan_track_id = tag_id
+      self._tag_scan_track_yaw, self._tag_scan_track_pitch = self._tag_visual_track_setpoint(gs, center_area)
+      self._tag_scan_last_seen_t = ctx.now
+
+  def _tag_scan_setpoint(self, t:float) -> dict:
+    fast_arc = min(max(self.tag_scan_fast_arc, math.radians(5.0)), math.pi - math.radians(5.0))
+    slow_arc = math.pi - fast_arc
+    slow_rate = max(self.tag_scan_slow_rate, 1e-6)
+    fast_rate = max(self.tag_scan_fast_rate, slow_rate)
+    slow_dt, fast_dt = slow_arc / slow_rate, fast_arc / fast_rate
+    cycle_dt = slow_dt + fast_dt
+    phase = max(0.0, t - self._tag_scan_start_t)
+    cycle = int(phase // cycle_dt)
+    t_cycle = phase - cycle * cycle_dt
+    base = self._tag_scan_start_yaw + cycle * math.pi
+    if t_cycle < slow_dt:
+      yaw = base + slow_rate * t_cycle
+      yaw_ff = slow_rate
+    else:
+      yaw = base + slow_arc + fast_rate * (t_cycle - slow_dt)
+      yaw_ff = fast_rate
+    return {"yaw": wrap_pi(yaw), "pitch": self.tag_scan_pitch, "yaw_ff": yaw_ff, "pitch_ff": 0.0}
+
+  def _run_tag_scan(self, ctx, pub):
+    gs = _ctx_get(ctx, "gimbal_state")
+    if gs is None: return
+    if ctx.entered or not self._tag_scan_have_start:
+      self._tag_scan_start_yaw = float(gs["yaw_gi"])
+      self._tag_scan_start_t = ctx.now
+      self._tag_scan_have_start = True
+      self._tag_scan_was_tracking = False
+    if self._tag_scan_track_yaw is not None and ctx.now - self._tag_scan_last_seen_t < self.tag_track_lost_dt:
+      self._tag_scan_was_tracking = True
+      # If the mapped tag is now behind a wall, drop the track immediately instead of
+      # continuing to aim at its stale visual center through geometry.
+      if self._tag_scan_track_occluded(ctx):
+        self._tag_scan_start_yaw = float(gs["yaw_gi"])
+        self._tag_scan_start_t = ctx.now
+        self._tag_scan_track_id = None
+        self._tag_scan_track_yaw = None
+        self._tag_scan_track_pitch = self.tag_scan_pitch
+        self._tag_scan_was_tracking = False
+      else:
+        sp = self._tag_world_track_setpoint(ctx, gs)
+        if sp is None:
+          sp = {"yaw": self._tag_scan_track_yaw, "pitch": self._tag_scan_track_pitch, "yaw_ff": 0.0, "pitch_ff": 0.0}
+        pub.send("state_setpoint", sp)
+        return
+    if self._tag_scan_was_tracking:
+      self._tag_scan_start_yaw = float(gs["yaw_gi"])
+      self._tag_scan_start_t = ctx.now
+      self._tag_scan_track_id = None
+      self._tag_scan_track_yaw = None
+      self._tag_scan_track_pitch = self.tag_scan_pitch
+      self._tag_scan_was_tracking = False
+    pub.send("state_setpoint", self._tag_scan_setpoint(ctx.now))
+
 class LookAtMappedTagMixin:
   tag_pitch = 0.0
   tag_los_offset = 0.05

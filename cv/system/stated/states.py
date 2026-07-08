@@ -6,8 +6,9 @@ Factory input:
 """
 import math
 
-from .base_states import (LookAtMappedTagMixin, ScanAcquireMixin, SpinChassisMixin, NavToGoalState,
-                          PeriodicNavToGoalState, TimedNavToGoalState, SequenceState, TimedHoldGoalState,
+from ..core.logging import logger
+from .base_states import (TagScanMixin, ScanAcquireMixin, SpinChassisMixin, NavToGoalState,
+                          PeriodicNavToGoalState, SequenceState, TimedHoldGoalState,
                           AcquireHoldState, PeriodicSequenceState)
 from .state_machine import StateBase, StateMachine
 
@@ -18,8 +19,8 @@ SCAN_PITCH = 0.0
 ACQUIRE_HOLD_DT = 0.8
 NAV_ARRIVE_RADIUS = 0.1
 RECENTER_PERIOD = 30.0
-RETREAT_HOLD_DT = 10.0
 RETREAT_HP_BY_STYLE = {"passive": 200.0, "aggressive": 150.0}
+RETREAT_FULL_HP = 400.0
 ATTACK_DEEP_PERIOD = 10
 ATTACK_DEEP_AT = 120
 ATTACK_DEEP_HOLD_DT = 10.0
@@ -53,24 +54,38 @@ class IdleState(StateBase):
   def run(self, ctx, pub):
     pass
 
-class NavToCenterState(LookAtMappedTagMixin, PeriodicNavToGoalState):
+class NavToCenterState(TagScanMixin, PeriodicNavToGoalState):
   name = "nav_to_center"
   goal_label = "center"
   arrive_radius = NAV_ARRIVE_RADIUS
   period = RECENTER_PERIOD
   first_delay = 0.0
 
-class NavToHomeState(LookAtMappedTagMixin, NavToGoalState):
+class NavToHomeState(TagScanMixin, NavToGoalState):
   name = "nav_to_home"
   goal_label = "home"
   arrive_radius = NAV_ARRIVE_RADIUS
 
-class HoldHomeState(SpinChassisMixin, ScanAcquireMixin, TimedHoldGoalState):
-  name = "hold_home"
-  goal_label = "home_hold"
-  hold_dt = RETREAT_HOLD_DT
+class RecoverHomeState(SpinChassisMixin, ScanAcquireMixin, StateBase):
+  name = "recover_home"
+  goal_label = "home_recover"
 
-class ReturnCenterState(LookAtMappedTagMixin, NavToGoalState):
+  def __init__(self, goal_xy:tuple[float, float], full_hp:float=RETREAT_FULL_HP):
+    self.goal_xy = goal_xy
+    self.full_hp = full_hp
+
+  def should_transition(self, current:StateBase, ctx) -> bool:
+    return False
+
+  def can_transition(self, ctx) -> bool:
+    hp = _robot_hp(ctx)
+    return (not bool(ctx["game_running"])) or (hp is not None and hp >= self.full_hp)
+
+  def run(self, ctx, pub):
+    if ctx.entered: logger.info(f"stated: recovering at {self.goal_label} until hp>={self.full_hp:g}")
+    pub.send("nav_goal", {"x": self.goal_xy[0], "y": self.goal_xy[1], "label": self.goal_label})
+
+class ReturnCenterState(TagScanMixin, NavToGoalState):
   name = "return_center"
   goal_label = "center"
   arrive_radius = NAV_ARRIVE_RADIUS
@@ -84,36 +99,33 @@ class RetreatSequenceState(SequenceState):
   preempt = True
 
   def __init__(self, center_goal:tuple[float, float], back_goal:tuple[float, float], hp_threshold:float):
-    super().__init__([NavToHomeState(back_goal), HoldHomeState(back_goal), ReturnCenterState(center_goal)])
+    super().__init__([NavToHomeState(back_goal), RecoverHomeState(back_goal), ReturnCenterState(center_goal)])
     self.hp_threshold = hp_threshold
-    self.armed = True
 
-  def reset(self, ctx=None):
-    super().reset(ctx)
-    self.armed = True
+  def low_hp(self, ctx) -> bool:
+    hp = _robot_hp(ctx)
+    return hp is not None and hp <= self.hp_threshold
 
   def observe(self, ctx):
     if not bool(ctx["game_running"]):
       self.reset(ctx)
       return
+    if self.low_hp(ctx) and self.idx >= 2:
+      self.reset(ctx)
     super().observe(ctx)
-    hp = _robot_hp(ctx)
-    if hp is not None and hp > self.hp_threshold: self.armed = True
 
   def should_transition(self, current:StateBase, ctx) -> bool:
-    hp = _robot_hp(ctx)
-    return current is not self and bool(ctx["game_running"]) and self.armed and hp is not None and hp <= self.hp_threshold
+    return current is not self and bool(ctx["game_running"]) and self.low_hp(ctx)
 
-  def run(self, ctx, pub):
-    entered = ctx.entered
-    super().run(ctx, pub)
-    if entered: self.armed = False
+  def can_transition(self, ctx) -> bool:
+    if not bool(ctx["game_running"]): return True
+    if self.low_hp(ctx) and self.idx >= 1: return False
+    return super().can_transition(ctx)
 
-class NavToAttackDeepState(SpinChassisMixin, ScanAcquireMixin, TimedNavToGoalState):
+class NavToAttackDeepState(TagScanMixin, NavToGoalState):
   name = "attack_deep"
   goal_label = "attack_deep"
   arrive_radius = NAV_ARRIVE_RADIUS
-  trigger_at = ATTACK_DEEP_AT
 
 class HoldAttackDeepState(SpinChassisMixin, ScanAcquireMixin, TimedHoldGoalState):
   name = "hold_attack_deep"
@@ -170,6 +182,7 @@ def make_state_machine(team_color:str, play_style:str="passive") -> StateMachine
   acquire = AcquireState()
   search = SearchState()
   retreat = RetreatSequenceState(center_goal, goals["home"], retreat_hp)
+  attack = AttackDeepState(goals["attack_deep"])
 
-  states = [IdleState(), retreat, nav_to_center, acquire, search]
+  states = [IdleState(), attack, retreat, nav_to_center, acquire, search]
   return StateMachine(states)
